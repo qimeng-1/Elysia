@@ -2,6 +2,7 @@
 name = "elysia"
 version = "0.1.0"
 description = "Elysia 电子生命 —— P0 灵魂：双栖架构 + TimeSense + 双心跳 + 身体语言"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9",

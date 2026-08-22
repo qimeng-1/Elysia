@@ -1,0 +1,25 @@
+# Elysia 提交门禁 —— 全 local hooks（经 uv run 调用 .venv 内工具）
+# 目的：任何 commit 前强制 ruff/mypy/回归测试，任一失败拦截提交
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff lint
+        entry: uv run --project . ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format check
+        entry: uv run --project . ruff format --check
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy strict
+        entry: uv run --project . mypy src
+        language: system
+        pass_filenames: false
+      - id: pytest
+        name: pytest regression
+        entry: uv run --project . pytest
+        language: system
+        pass_filenames: false

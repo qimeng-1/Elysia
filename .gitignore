@@ -1,0 +1,33 @@
+# ── Elysia 代码库边界 ──────────────────────────────────────────
+# 定义什么进 git、什么不进。详细策略见 工程标准/MIGRATION_GUIDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 运行时数据（data/ 进 git 做记忆快照版本化；仅排除缓存/日志/临时）
+data/logs/
+data/cache/
+data/tmp/
+*.log
+
+# 密钥与本地配置（绝不进仓库）
+.env
+*.env.local
+config.local.*
+api_keys.*
+*.key
+*.pem
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini

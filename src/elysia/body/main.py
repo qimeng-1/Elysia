@@ -14,6 +14,7 @@ import signal
 import sys
 
 from elysia.body.heartbeat import BodyHeartbeat
+from elysia.body.resource import ResourceSampler
 from elysia.core.clock import SystemClock
 from elysia.core.config import Settings, get_settings
 from elysia.core.log import get_logger, setup_logging
@@ -36,6 +37,7 @@ async def _run(settings: Settings) -> int:
         clock=SystemClock(),
         interval_s=settings.body_heartbeat_interval_s,
     )
+    heartbeat.attach_resource_sampler(ResourceSampler())
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

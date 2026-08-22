@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from elysia.body.resource import ResourceSamplerCallable
 from elysia.core.clock import Clock, SystemClock
 from elysia.core.state_store import HeartbeatStore, StateStore
 
@@ -33,10 +34,10 @@ class BodyHeartbeat:
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._interval_s = interval_s
         self._running = False
-        self._resource_sampler: Any = None  # P0-B 注入资源采样器
+        self._resource_sampler: ResourceSamplerCallable | None = None
 
-    def attach_resource_sampler(self, sampler: Any) -> None:
-        """绑定资源采样器（P0-B）：返回 dict 供心跳快照。"""
+    def attach_resource_sampler(self, sampler: ResourceSamplerCallable) -> None:
+        """绑定资源采样器：心跳快照与 body_status 均含资源样本。"""
         self._resource_sampler = sampler
 
     async def run(self) -> None:
@@ -44,12 +45,17 @@ class BodyHeartbeat:
         self._running = True
         while self._running:
             now = self._clock.now()
-            payload: dict[str, Any] = {}
-            if self._resource_sampler is not None:
-                payload["resources"] = self._resource_sampler()
-            await self._heartbeat_store.append(now, "body", payload)
+            resources: dict[str, Any] = (
+                self._resource_sampler() if self._resource_sampler is not None else {}
+            )
+            await self._heartbeat_store.append(now, "body", {"resources": resources})
             await self._state_store.save_json(
-                BODY_STATUS_KEY, {"last_online_ts": now, "status": "online"}
+                BODY_STATUS_KEY,
+                {
+                    "last_online_ts": now,
+                    "status": "online",
+                    "resources": resources,
+                },
             )
             await self._clock.sleep(self._interval_s)
 

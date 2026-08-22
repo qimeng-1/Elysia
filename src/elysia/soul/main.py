@@ -17,12 +17,15 @@ import signal
 import sys
 from typing import Any
 
+from elysia.core.checkpoint import CheckpointManager
 from elysia.core.clock import SystemClock
 from elysia.core.config import Settings, get_settings
 from elysia.core.log import get_logger, setup_logging
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense, from_payload
+from elysia.soul.away_life import AwayLife
+from elysia.soul.distress import DistressMonitor
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state, stop_with_cancel
 
 
@@ -69,6 +72,9 @@ async def _run(settings: Settings) -> int:
         mode_mgr=mode_mgr,
         clock=SystemClock(),
         interval_s=settings.heartbeat_interval_s,
+        distress_monitor=DistressMonitor(),
+        away_life=AwayLife(heartbeat_store),
+        checkpoint=CheckpointManager(settings.data_dir),
     )
 
     stop = asyncio.Event()

@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     payload   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_heartbeats_ts ON heartbeats (ts);
+CREATE TABLE IF NOT EXISTS thought_log (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts   REAL NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL
+);
 """
 
 
@@ -168,12 +174,31 @@ class HeartbeatStore(_AsyncSQLite):
         rows = await self.execute_raw("SELECT MAX(ts) FROM heartbeats")
         return rows[0][0] if rows[0][0] is not None else None
 
-    async def gaps(self, threshold_s: float) -> list[tuple[float, float]]:
-        """心跳空洞：相邻心跳间隔 > 阈值的区间 [(gap_start, gap_end), ...]。
+    async def think(self, ts: float, kind: str, text: str) -> None:
+        """记录一条内部念头（离线自主生活的结构化自我叙事）。"""
 
-        验收门"心跳日志连续 24h 无中断"的检测器。
+        def _think(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO thought_log (ts, kind, text) VALUES (?, ?, ?)",
+                (ts, kind, text),
+            )
+            conn.commit()
+
+        await self.submit(_think)
+
+    async def thought_count(self) -> int:
+        rows = await self.execute_raw("SELECT COUNT(*) FROM thought_log")
+        return int(rows[0][0])
+
+    async def gaps(self, threshold_s: float, beat_type: str = "soul") -> list[tuple[float, float]]:
+        """心跳空洞：相邻间隔 > 阈值的区间 [(gap_start, gap_end), ...]。
+
+        验收门"心跳日志连续 24h 无中断"的检测器（默认检测灵魂心跳）。
         """
-        rows = await self.execute_raw("SELECT ts FROM heartbeats ORDER BY ts ASC")
+        rows = await self.execute_raw(
+            "SELECT ts FROM heartbeats WHERE beat_type = ? ORDER BY ts ASC",
+            (beat_type,),
+        )
         found: list[tuple[float, float]] = []
         for prev, cur in pairwise(rows):
             start, end = prev[0], cur[0]

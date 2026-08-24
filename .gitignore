@@ -17,7 +17,11 @@ htmlcov/
 data/logs/
 data/cache/
 data/tmp/
+data/run/
 *.log
+# SQLite WAL 模式伴生文件（随进程运行实时变化，不提交）
+*.db-wal
+*.db-shm
 
 # 密钥与本地配置（绝不进仓库）
 .env

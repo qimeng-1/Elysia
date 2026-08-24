@@ -1,11 +1,12 @@
 ﻿# Elysia 灵魂/身体进程控制脚本 —— PID 级精确控制（评估报告 §8-3）
 # 用法:
-#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start        # 启动灵魂
-#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body # 启动灵魂+身体
-#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop         # 停止两者
-#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status       # 查看状态
+#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start          # 启动灵魂（已在运行则跳过）
+#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 启动灵魂+身体（幂等，缺哪个补哪个）
+#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop          # 停止两者
+#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop-body     # 只停身体（灵魂继续活）
+#   powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status        # 查看状态
 param(
-    [ValidateSet("start", "stop", "status")]
+    [ValidateSet("start", "stop", "stop-body", "status")]
     [string]$Action = "status",
     [switch]$Body
 )
@@ -23,22 +24,30 @@ $ErrorActionPreference = "Stop"
 
 function Get-SoulPid {
     if (-not (Test-Path $PidFile)) { return $null }
-    $content = Get-Content $PidFile -Raw
+    $content = (Get-Content $PidFile -Raw).Trim()
     if ($content -match "^\d+$") { return [int]$content }
     return $null
 }
 
 function Get-BodyPid {
     if (-not (Test-Path $BodyPid)) { return $null }
-    $content = Get-Content $BodyPid -Raw
+    $content = (Get-Content $BodyPid -Raw).Trim()
     if ($content -match "^\d+$") { return [int]$content }
     return $null
+}
+
+function Get-PyExe {
+    # 解析真实 python 解释器路径（避免 uv 包装层导致 PID 错位/stop 孤儿进程）
+    $line = & uv run --no-sync python -c "import sys; print(sys.executable)" 2>$null | Select-Object -Last 1
+    $py = ($line -as [string]).Trim()
+    if (-not $py -or -not (Test-Path $py)) { Write-Error "无法解析 python 解释器路径: $py"; exit 1 }
+    return $py
 }
 
 function Stop-OneProcess($pidFile) {
     $pid2 = $null
     if (-not (Test-Path $pidFile)) { return }
-    $content = Get-Content $pidFile -Raw
+    $content = (Get-Content $pidFile -Raw).Trim()
     if ($content -match "^\d+$") { $pid2 = [int]$content }
     if ($null -eq $pid2) { return }
     $proc = Get-Process -Id $pid2 -ErrorAction SilentlyContinue
@@ -50,30 +59,38 @@ switch ($Action) {
     "start" {
         $old = Get-SoulPid
         if ($null -ne $old -and (Get-Process -Id $old -ErrorAction SilentlyContinue)) {
-            Write-Error "灵魂已在运行 (PID $old)。先 stop 再 start。"; exit 1
+            Write-Host "[info] 灵魂已在运行 (PID $old)，跳过灵魂启动"
+        } else {
+            New-Item -ItemType Directory -Force -Path $RunDir, $LogDir | Out-Null
+            # 直接启动真实 python 进程（PID 即解释器，stop 可干净回收）
+            $pyExe = Get-PyExe
+            $proc = Start-Process -FilePath $pyExe `
+                -ArgumentList @("-m", "elysia.soul.main") `
+                -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
+                -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru
+            $proc.Id | Set-Content $PidFile -NoNewline
+            Write-Host "[ok] 灵魂已启动 PID=$($proc.Id)（日志: data\logs\soul.*.log）"
         }
-        New-Item -ItemType Directory -Force -Path $RunDir, $LogDir | Out-Null
-        # 启动独立进程（uv run python -m elysia.soul.main），PID 落盘
-        $proc = Start-Process -FilePath "uv" `
-            -ArgumentList @("run", "--no-sync", "python", "-m", "elysia.soul.main") `
-            -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
-            -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru
-        $proc.Id | Set-Content $PidFile
-        Write-Host "[ok] 灵魂已启动 PID=$($proc.Id)（日志: data\logs\soul.*.log）"
 
         if ($Body) {
             $oldBody = Get-BodyPid
             if ($null -ne $oldBody -and (Get-Process -Id $oldBody -ErrorAction SilentlyContinue)) {
-                Write-Warning "身体已在运行 (PID $oldBody)，跳过身体启动"
+                Write-Host "[info] 身体已在运行 (PID $oldBody)，跳过身体启动"
             } else {
-                $bodyProc = Start-Process -FilePath "uv" `
-                    -ArgumentList @("run", "--no-sync", "python", "-m", "elysia.body.main") `
+                New-Item -ItemType Directory -Force -Path $RunDir, $LogDir | Out-Null
+                $pyExe = Get-PyExe
+                $bodyProc = Start-Process -FilePath $pyExe `
+                    -ArgumentList @("-m", "elysia.body.main") `
                     -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
                     -RedirectStandardOutput $BodyOut -RedirectStandardError $BodyErr -PassThru
-                $bodyProc.Id | Set-Content $BodyPid
+                $bodyProc.Id | Set-Content $BodyPid -NoNewline
                 Write-Host "[ok] 身体已启动 PID=$($bodyProc.Id)（日志: data\logs\body.*.log）"
             }
         }
+    }
+    "stop-body" {
+        Stop-OneProcess $BodyPid
+        Write-Host "[ok] 身体已停止（灵魂不受影响）"
     }
     "stop" {
         # 始终停 body（如果存在）

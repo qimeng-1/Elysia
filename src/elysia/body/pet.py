@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QPainter, QPaintEvent
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QMouseEvent, QPainter, QPaintEvent
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -46,6 +46,8 @@ class PetWindow(QMainWindow):
         self._heartbeat_db_path = heartbeat_db_path
         self._conn_state: sqlite3.Connection | None = None
         self._conn_heartbeat: sqlite3.Connection | None = None
+        self._last_thought_id = 0  # 念头流去重（仅追加新念头）
+        self._drag_pos: QPoint | None = None  # 无边框窗口拖拽
 
         self.setWindowTitle("Elysia 桌宠")
         self.setFixedSize(PET_WIDTH, PET_HEIGHT)
@@ -57,6 +59,23 @@ class PetWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         central.setStyleSheet("background-color: #1a1a2e; color: #e0e0e0;")
+
+        # ── 顶部标题栏（无边框窗口的手动关闭/拖动入口）──
+        bar = QHBoxLayout()
+        bar.setContentsMargins(4, 2, 4, 0)
+        title = QLabel("Elysia")
+        title.setStyleSheet("font-size: 12px; font-weight: bold; color: #7aa2f7;")
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setToolTip("关闭桌宠窗口")
+        close_btn.setStyleSheet(
+            "font-size: 11px; background-color: #3a3a5c; color: #e0e0e0; border: none;"
+        )
+        close_btn.clicked.connect(self.close)
+        bar.addWidget(title)
+        bar.addStretch(1)
+        bar.addWidget(close_btn)
+        layout.addLayout(bar)
 
         # 心跳光效画布
         self._canvas = _HeartbeatCanvas(self)
@@ -124,6 +143,21 @@ class PetWindow(QMainWindow):
                 c.close()
         super().closeEvent(event)
 
+    # ── 无边框窗口拖拽移动 ────────────────────────────
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_pos = None
+        event.accept()
+
     # ── 每帧 ──────────────────────────────────────
     def _tick(self) -> None:
         try:
@@ -144,8 +178,8 @@ class PetWindow(QMainWindow):
             self._status_label.setText(
                 f"模式: {payload.get('mode', '?')}  "
                 f"年龄: {time_data.get('age_days', 0):.2f} 天  "
-                f"离开: {time_data.get('body_away_s', 0) // 60} 分  "
-                f"距交互: {time_data.get('since_interaction_s', 0) // 60} 分  "
+                f"离开: {self._fmt_sec(time_data.get('body_away_s', 0))}  "
+                f"距交互: {self._fmt_sec(time_data.get('since_interaction_s', 0))}  "
                 f"相位: {time_data.get('day_phase', '?')}"
                 + (" [❄️ 冻结]" if payload.get("frozen") else "")
                 + (" [😫 难受]" if payload.get("distress") else "")
@@ -167,13 +201,21 @@ class PetWindow(QMainWindow):
             return None
 
     def _latest_thought(self) -> None:
+        """新念头追加进对话流（与你说的话交错成流）。"""
         rows = self.conn_hb.execute(
-            "SELECT text FROM thought_log ORDER BY id DESC LIMIT 1"
+            "SELECT id, text FROM thought_log ORDER BY id DESC LIMIT 1"
         ).fetchall()
-        if rows:
-            self._thought_display.setText(rows[0][0])
-        else:
-            self._thought_display.clear()
+        if rows and rows[0][0] != self._last_thought_id:
+            self._last_thought_id = rows[0][0]
+            self._thought_display.append(f"💭 {rows[0][1]}")
+
+    @staticmethod
+    def _fmt_sec(s: float) -> str:
+        """秒级时长显示：<60s 显示秒，否则 分+秒（让交互感知可见）。"""
+        s = int(s)
+        if s < 60:
+            return f"{s}秒"
+        return f"{s // 60}分{s % 60}秒"
 
     # ── 交互 ──────────────────────────────────────
     def _submit_interaction(self) -> None:
@@ -187,6 +229,8 @@ class PetWindow(QMainWindow):
         )
         self.conn.commit()
         self._input_field.clear()
+        # 即时反馈：你说的话进入对话流（她 1s 内感知 → 距交互归零）
+        self._thought_display.append(f"💬 你说：{text}")
 
 
 class _HeartbeatCanvas(QWidget):

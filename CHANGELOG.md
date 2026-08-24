@@ -28,3 +28,8 @@
 - 53 项全部通过（45 单元 + 8 验收）
 - 进程控制脚本支持 body 可选
 - 验收前检查点已生成
+
+### P0-D 修复补丁与技术架构文档（2026-08-24）
+- **fix**（d94997d）：soul.ps1 进程控制修复（真实 python 解析 / PID Trim / start 幂等）；pet.py 桌宠交互反馈（你说回显 / 念头去重流 / 关闭与拖拽）；.gitignore 补 data/run、*.db-wal、*.db-shm
+- **docs**（99777c9）：docs/OPERATION_GUIDE.md 傻瓜式操作手册；docs/TECHNICAL_DESIGN.md 技术架构设计（数据库/协议/模块/技术栈 + 运行时架构与数据流/核心概念代码映射/测试验收门）；README 文档索引；生命档案快照（data 库 WAL checkpoint 后提交）
+- 53 测试全绿，门禁四件套全绿

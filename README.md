@@ -46,6 +46,7 @@ powershell -ExecutionPolicy Bypass -File scripts\backup.ps1         # 备份到 
 | 文档 | 位置 |
 |------|------|
 | 架构决策记录 | [docs/ADR/](docs/ADR/) |
+| 技术架构设计（数据库/协议/模块/技术栈/运行时视图） | [../设计规划/TECHNICAL_DESIGN.md](../设计规划/TECHNICAL_DESIGN.md)（工作区主文档，仓库副本随提交同步） |
 | 设计宪法（路线图/路径图/工程标准/铁律手册/迁移手册） | [docs/](docs/)（与工作区 `设计规划/`、`工程标准/` 同步维护：修改以工作区为准，仓库副本随提交刷新） |
 
 ## 开发纪律（摘要）

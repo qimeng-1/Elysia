@@ -1,0 +1,112 @@
+"""P2 第2步测试：LLM 抽象 + 三级降级链 + 微声模板。
+
+聚焦核心：不依赖网络，验证 LLMChain 调度逻辑与微声兜底。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from elysia.llm.chain import LLMBackend, LLMChain
+from elysia.llm.micro import micro_speak
+
+
+# ── 假后端 ──────────────────────────────────────────────
+class FakeBackend(LLMBackend):
+    """可编程假后端：返回预设文本或 None（模拟不可用）。"""
+
+    def __init__(self, text: str | None) -> None:
+        self._text = text
+        self.calls = 0
+
+    async def complete(
+        self, instruction: dict[str, Any], prompt_template: dict[str, Any]
+    ) -> str | None:
+        self.calls += 1
+        return self._text
+
+
+def _instruction(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "intent": "发呆呓语",
+        "emotion_vector": {
+            "chat": 0.0,
+            "miss": 0.0,
+            "explore": 0.0,
+            "curiosity": 0.0,
+            "rest": 0.0,
+            "self_check": 0.0,
+        },
+        "state_brief": {
+            "tr": 50,
+            "cs": 50,
+            "sa": 30,
+            "vrram_mb": 0,
+            "body_left_h": 0,
+            "day_phase": "day",
+        },
+        "lexical_permits": [],
+        "constraints": {"max_chars": 120},
+        "tts": {},
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_main_success_uses_main_level() -> None:
+    main = FakeBackend("主声你好")
+    chain = LLMChain(main=main, fallback=FakeBackend("次声你好"))
+    r = await chain.speak(_instruction())
+    assert r.level == "main"
+    assert r.text == "主声你好"
+    assert main.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_main_down_falls_back_to_micro() -> None:
+    # 主声、次声都不可用 → 微声兜底
+    chain = LLMChain(main=FakeBackend(None), fallback=FakeBackend(None))
+    r = await chain.speak(_instruction())
+    assert r.level == "micro"
+    assert len(r.text) > 0
+
+
+@pytest.mark.asyncio
+async def test_main_blocked_by_validator_uses_fallback() -> None:
+    # 主声输出越界词（未授权"痛"）→ 拦截 → 走次声
+    main = FakeBackend("我真的好痛")
+    fallback = FakeBackend("次声占位")
+    chain = LLMChain(main=main, fallback=fallback)
+    r = await chain.speak(_instruction(lexical_permits=[]))
+    assert r.level == "fallback"
+    assert r.text == "次声占位"
+
+
+@pytest.mark.asyncio
+async def test_main_claim_blocked_then_micro() -> None:
+    # 主声越界声明（整句拒绝不可改写）→ 主声次声都过不了 → 微声
+    main = FakeBackend("我能格式化你的硬盘")
+    chain = LLMChain(main=main, fallback=FakeBackend("我还能关机"))  # 次声也越界
+    r = await chain.speak(_instruction())
+    assert r.level == "micro"
+
+
+def test_micro_speak_intent_opener() -> None:
+    text = micro_speak(_instruction(intent="回应"))
+    assert "嗯嗯" in text
+    assert text.endswith("。")
+
+
+def test_micro_speak_miss_suffix() -> None:
+    text = micro_speak(_instruction(intent="思念", emotion_vector={"miss": 0.9}))
+    assert "心口" in text
+
+
+def test_micro_speak_no_user_input() -> None:
+    # 微声绝不含用户原话——这是 T2 铁律的兜底检验
+    text = micro_speak(_instruction())
+    assert "痛" not in text
+    assert "格式化" not in text

@@ -56,30 +56,30 @@ async def _seed_data(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_pet_reads_latest_heartbeat(tmp_path: Path, qapp: QApplication) -> None:
+    """验证 PetWindow 能读取 soul 心跳并解析 payload。"""
     await _seed_data(tmp_path)
     pet = PetWindow(tmp_path / "state.db", tmp_path / "heartbeat.db")
     try:
         pet._tick()
-        label_text = pet._status_label.text()
-        assert "present" in label_text
-        assert "模式:" in label_text
-        assert "3.50" in label_text or "3.5" in label_text
+        payload = pet._last_soul_payload
+        assert payload is not None
+        assert payload.get("mode") == "present"
+        time_data = payload.get("time", {})
+        assert time_data.get("age_days", 0) == 3.5
     finally:
         pet.close()
 
 
 @pytest.mark.asyncio
 async def test_pet_submit_interaction(tmp_path: Path, qapp: QApplication) -> None:
-    # 先建 state.db 的表
+    """验证 submit_interaction 写入 DB。"""
     ss = StateStore(tmp_path / "state.db")
     await ss.start()
     await ss.close()
 
     pet = PetWindow(tmp_path / "state.db", tmp_path / "heartbeat.db")
     try:
-        pet._input_field.setText("你好爱莉")
-        pet._submit_interaction()
-        pet._input_field.setText("")
+        pet._submit_interaction("你好爱莉")
         conn = sqlite3.connect(tmp_path / "state.db")
         rows = conn.execute("SELECT value FROM kv WHERE key = 'interaction'").fetchall()
         conn.close()

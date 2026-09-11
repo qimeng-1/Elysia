@@ -4,9 +4,10 @@
 1. 同步身体在场状态 → TimeSenseState（body_status 新鲜 → 更新在场；过期 → 记录离开起点）
 2. 难受检测：身体资源高压 → 心跳降频 0.5Hz + distress 事件入档
 3. 派生当前模式（PRESENT/ALONE/BODY_AWAY）与时间体验汇总
-4. 心跳入档 heartbeat.db（beat_type=soul，protocol 状态快照）
-5. TimeSenseState 落盘 state.db（字段单一事实源）
-6. 离线内部生活：ALONE/BODY_AWAY 时按节律产出自我叙事念头
+4. **大脑循环：欲望系统演化 → 6 维感受 → 意志层 → 行动层输出**（P1 新增）
+5. 心跳入档 heartbeat.db（beat_type=soul，protocol 状态快照，含欲望数据）
+6. TimeSenseState + 欲望状态落盘 state.db（字段单一事实源）
+7. 离线内部生活：ALONE/BODY_AWAY 时按节律产出自我叙事念头（受大脑循环影响）
 
 紧急冻结：data/freeze 标记存在时仅记录心跳（payload 标记 frozen），
 禁止一切行为与输出（路线图 5.6）。
@@ -30,13 +31,18 @@ from elysia.core.timesense import (
 )
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
+from elysia.soul.brain import BrainLoop
+from elysia.soul.desire import DesireEvent
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
 
 logger = logging.getLogger("elysia.soul.heartbeat")
 
 
 class SoulHeartbeat:
-    """灵魂心跳循环：常驻、可降频、可优雅停止。"""
+    """灵魂心跳循环：常驻、可降频、可优雅停止。
+
+    P1 新增：大脑循环（brain_loop）——欲望系统演化 + 感受映射 + 意志 + 行动。
+    """
 
     def __init__(
         self,
@@ -45,6 +51,7 @@ class SoulHeartbeat:
         heartbeat_store: HeartbeatStore,
         timesense: TimeSense,
         mode_mgr: ModeManager,
+        brain_loop: BrainLoop | None = None,
         clock: Clock | None = None,
         interval_s: float = 1.0,
         distress_monitor: DistressMonitor | None = None,
@@ -55,6 +62,7 @@ class SoulHeartbeat:
         self._heartbeat_store = heartbeat_store
         self._timesense = timesense
         self._mode_mgr = mode_mgr
+        self._brain_loop = brain_loop
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._interval_s = interval_s
         self._running = False
@@ -62,6 +70,9 @@ class SoulHeartbeat:
         self._distress_monitor = distress_monitor
         self._away_life = away_life
         self._checkpoint = checkpoint
+
+        # 交互事件追踪（防止重复触发）
+        self._last_interaction_event_ts: float = 0.0
 
     @property
     def interval_s(self) -> float:
@@ -88,27 +99,67 @@ class SoulHeartbeat:
             await self._sync_body_status(now)
             mode = self._mode_mgr.mode(self._timesense.state.last_body_online_ts, now)
             summary = self._timesense.summary()
+
+            # ── P1：大脑循环 ──────────────────────────────
+            brain_output = None
+            if self._brain_loop is not None:
+                brain_output = self._brain_loop.step(
+                    distress=self._distress,
+                    mode=mode.value,
+                    has_event=False,
+                    dt=self._interval_s,
+                )
+                # 将欲望状态持久化
+                await self._state_store.save_json(
+                    "desire", self._brain_loop.desire_system.to_payload()
+                )
+
+            # ── 构建快照 ──────────────────────────────────
+            desire_dict = brain_output.desire.to_dict() if brain_output is not None else None
+            feelings_dict = brain_output.feelings.to_dict() if brain_output is not None else None
+            will_dict = (
+                {
+                    "direction": brain_output.will.direction,
+                    "strength": round(brain_output.will.strength, 3),
+                    "thought_style": round(brain_output.will.thought_style, 3),
+                    "anim_bias": round(brain_output.will.anim_bias, 3),
+                }
+                if brain_output is not None
+                else None
+            )
+            brain_action = brain_output.action if brain_output is not None else None
+
             payload = build_snapshot(
                 timesense_summary=summary,
                 mode=mode.value,
                 distress=self._distress,
+                desire=desire_dict,
+                feelings=feelings_dict,
+                will=will_dict,
+                brain_action=brain_action,
             )
             frozen = self._checkpoint is not None and self._checkpoint.is_frozen()
             if frozen:
                 payload["frozen"] = True
             await self._heartbeat_store.append(now, "soul", payload)
             await self._state_store.save_json("timesense", to_payload(self._timesense.state))
+
+            # ── 离线内部生活 ──────────────────────────────
             if self._away_life is not None and not frozen:
+                thought_style = brain_output.will.thought_style if brain_output is not None else 0.0
                 await self._away_life.tick(
                     mode=mode,
                     away_seconds=float(summary["body_away_s"]),
                     day_phase=str(summary["day_phase"]),
                     now=now,
+                    thought_style=thought_style,
+                    brain_action=brain_action or "none",
                 )
+
             await self._clock.sleep(self._interval_s)
 
     async def _sync_body_status(self, now: float) -> None:
-        """身体在场状态 → TimeSenseState + 难受检测（body 只报告在场，状态推导归灵魂）。"""
+        """身体在场状态 → TimeSenseState + 难受检测 + 交互事件 → 感受层。"""
         state = self._timesense.state
         status = await self._state_store.load_json("body_status", default={})
         if not isinstance(status, dict):
@@ -137,13 +188,21 @@ class SoulHeartbeat:
                 "event",
                 {"type": "distress", "on": self._distress_monitor.distress},
             )
+            # P1：难受事件 → 欲望系统
+            if self._brain_loop is not None:
+                event_kind = "distress_on" if self._distress_monitor.distress else "distress_off"
+                self._brain_loop.apply_event(DesireEvent(kind=event_kind))
 
-        # 交互同步：桌宠输入的外部刺激（感受层入口）
+        # 交互同步：桌宠输入的外部刺激 → 感受层入口（P1 增强）
         interaction = await self._state_store.load_json("interaction", default=None)
         if isinstance(interaction, dict):
             its = float(interaction.get("ts", 0.0))
             if its > state.last_interaction_ts:
                 state.last_interaction_ts = its
+            # P1：新交互事件 → 欲望系统
+            if its > self._last_interaction_event_ts and self._brain_loop is not None:
+                self._last_interaction_event_ts = its
+                self._brain_loop.apply_event(DesireEvent(kind="interaction"))
 
     async def stop(self) -> None:
         """优雅停止：等待当前拍完成（心跳循环由外部任务持有，cancel 兜底）。"""

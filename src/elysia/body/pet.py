@@ -1,12 +1,11 @@
-"""最小桌宠 v0：她怎么被你感知（P0 起，历史教训：交互通道是核心，不是附属品）。
+"""最小桌宠 v0（连续物理动画版）：她怎么被你感知。
 
-功能：
-- 心跳光效：QTimer 5Hz 脉冲，半径随 soul 心跳节律波动，distress 时变红
-- 状态流：最新 mode / age_days / away_s / since_interaction 文字展示
-- 文本输入：输入消息 → state.db interaction 事件（感受层入口）
-- 显示：无边框置顶，小窗口常驻桌面
-
-状态读取：pet 独立进程，直接同步 sqlite3（WAL 下读并发安全，毫秒级）。
+基于豆包桌宠的连续物理动画方案重构：
+- 单张角色图 + 连续物理动画（呼吸/摇摆/浮动/弹跳），30fps 渲染
+- 灵魂状态驱动动画参数（distress→sad, interaction→happy 等）
+- 参数平滑 lerp 过渡，无顿挫切换
+- 无角色图时自动降级为心跳光效
+- 仅角色可见，所有功能通过右键菜单访问
 """
 
 from __future__ import annotations
@@ -19,26 +18,288 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QMouseEvent, QPainter, QPaintEvent
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPixmap,
+    QTransform,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
+    QInputDialog,
     QMainWindow,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
+    QMenu,
+    QMessageBox,
     QWidget,
 )
 
-PET_WIDTH = 320
-PET_HEIGHT = 420
-POLL_INTERVAL_MS = 200  # 5Hz 渲染
+# ── 路径 ──────────────────────────────────────────────
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # elysia/
+_CHAR_PATH = _PROJECT_ROOT / "assets" / "pet" / "character.png"
+
+# ── 常量 ──────────────────────────────────────────────
+POLL_INTERVAL_MS = 200  # 5Hz 灵魂状态轮询
+ANIM_INTERVAL_MS = 33  # ~30fps 动画渲染
+CLICK_HAPPY_S = 2.0  # 点击后 happy 覆盖持续时长
+ZOOM_MIN = 0.3
+ZOOM_MAX = 3.0
+ZOOM_STEP = 1.1
+WINDOW_PADDING = 30  # 窗口边距（防浮动裁剪）
+CLICK_DRAG_THRESHOLD_PX = 5  # 鼠标移动量超过此值视为拖拽而非点击
+
+# ── 情绪参数预设（由灵魂状态映射）────────────────────
+# breath_speed: 呼吸频率  |  sway_speed: 摇摆频率
+# sway_amp: 摇摆幅度(度)  |  base_scale: 基础缩放
+# float_amp: 上下浮动幅度(px)
+EMOTION_PARAMS = {
+    "idle": {
+        "breath_speed": 1.1,
+        "sway_speed": 0.55,
+        "sway_amp": 1.4,
+        "base_scale": 1.00,
+        "float_amp": 6,
+    },
+    "happy": {
+        "breath_speed": 2.0,
+        "sway_speed": 1.10,
+        "sway_amp": 3.0,
+        "base_scale": 1.02,
+        "float_amp": 10,
+    },
+    "unhappy": {
+        "breath_speed": 0.55,
+        "sway_speed": 0.28,
+        "sway_amp": 0.7,
+        "base_scale": 0.96,
+        "float_amp": 3,
+    },
+    "tired": {
+        "breath_speed": 0.38,
+        "sway_speed": 0.18,
+        "sway_amp": 0.4,
+        "base_scale": 0.94,
+        "float_amp": 1,
+    },
+    "away": {
+        "breath_speed": 0.45,
+        "sway_speed": 0.22,
+        "sway_amp": 0.5,
+        "base_scale": 0.95,
+        "float_amp": 2,
+    },
+    "dragging": None,  # 拖拽时冻结动画
+}
+
+POKE_STRENGTH = 0.09
+
+
+class _CharacterWidget(QWidget):
+    """连续物理动画角色：呼吸缩放 + 左右摇摆 + 上下浮动 + 点击弹跳。
+
+    有角色图 → 连续物理动画；无角色图 → fallback 心跳光效。
+    """
+
+    def __init__(self, parent: QWidget, pixmap: QPixmap) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._pixmap = pixmap
+        self._valid = not pixmap.isNull()
+        self._scale = 1.0
+
+        # 当前动画参数
+        self._cur = {
+            "breath_speed": 1.1,
+            "sway_speed": 0.55,
+            "sway_amp": 1.4,
+            "base_scale": 1.0,
+            "float_amp": 6,
+        }
+        self._target = dict(self._cur)
+        self._phase_breath = 0.0
+        self._phase_sway = 0.0
+        self._float_phase = 0.0
+        self._bounce = 0.0
+        self._emotion = "idle"
+        self._dragging = False
+
+        # fallback 状态变量
+        self._beat_phase = 0.0
+        self._mode = "present"
+        self._distress = False
+
+        # 动画定时器 30fps
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._anim_tick)
+        self._anim_timer.start(ANIM_INTERVAL_MS)
+
+        if self._valid:
+            self.setMinimumSize(200, 200)
+        else:
+            self.setMinimumHeight(120)
+
+    # ── 公共接口 ──────────────────────────────────────
+
+    def set_emotion(self, key: str) -> None:
+        if key == "dragging":
+            self._dragging = True
+            return
+        self._dragging = False
+        self._emotion = key
+        params = EMOTION_PARAMS.get(key, EMOTION_PARAMS["idle"])
+        if params is not None:
+            self._target.update(params)
+
+    def poke(self, strength: float = POKE_STRENGTH) -> None:
+        self._bounce = max(self._bounce, strength)
+
+    @property
+    def current_emotion(self) -> str:
+        return self._emotion
+
+    def zoom_in(self) -> None:
+        self._scale = min(self._scale * ZOOM_STEP, ZOOM_MAX)
+        self.update()
+
+    def zoom_out(self) -> None:
+        self._scale = max(self._scale / ZOOM_STEP, ZOOM_MIN)
+        self.update()
+
+    def update_state(
+        self,
+        anim_state: str = "idle",
+        distress: bool = False,
+        desire: dict[str, float] | None = None,
+    ) -> None:
+        """每帧更新：灵魂状态 → 动画参数 + fallback 变量。
+
+        P1 新增：desire（TR/CS/SA）调制动画参数。
+        """
+        self._distress = distress
+        self._beat_phase += 0.3
+
+        if self._valid:
+            self.set_emotion(anim_state)
+            # P1：TR/CS/SA 调制目标参数
+            if desire is not None:
+                self._apply_desire_modulation(desire)
+
+    def _apply_desire_modulation(self, desire: dict[str, float]) -> None:
+        """TR/CS/SA 调制动画参数。
+
+        TR 高 → 呼吸加快，摇摆幅度增大
+        CS 高 → 浮动更活跃
+        SA 高 → 基础缩放缩小，浮动幅度减小
+        """
+        tr = desire.get("tr", 45)
+        cs = desire.get("cs", 60)
+        sa = desire.get("sa", 20)
+
+        tr_norm = (tr - 30) / 40  # 30-70 → 0-1
+        cs_norm = (cs - 40) / 40  # 40-80 → 0-1
+        sa_norm = (sa - 15) / 45  # 15-60 → 0-1
+
+        # TR 调制
+        self._target["breath_speed"] *= 1.0 + 0.3 * max(0, min(1, tr_norm))
+        self._target["sway_amp"] *= 1.0 + 0.4 * max(0, min(1, tr_norm))
+
+        # CS 调制
+        self._target["float_amp"] *= 1.0 + 0.5 * max(0, min(1, cs_norm))
+
+        # SA 调制
+        self._target["base_scale"] *= 1.0 - 0.04 * max(0, min(1, sa_norm))
+        self._target["float_amp"] *= 1.0 - 0.3 * max(0, min(1, sa_norm))
+
+    # ── 内部动画 ──────────────────────────────────────
+
+    def _anim_tick(self) -> None:
+        if not self._valid:
+            self.update()
+            return
+
+        dt = ANIM_INTERVAL_MS / 1000.0
+
+        if self._dragging:
+            self._bounce *= 0.88
+            if self._bounce < 0.0005:
+                self._bounce = 0.0
+            self.update()
+            return
+
+        # 参数平滑逼近目标（lerp）
+        k = 0.06
+        for key in self._cur:
+            self._cur[key] += (self._target[key] - self._cur[key]) * k
+
+        # 相位累加
+        self._phase_breath += self._cur["breath_speed"] * dt
+        self._phase_sway += self._cur["sway_speed"] * dt
+        self._float_phase += 0.7 * dt
+
+        # 弹跳衰减
+        self._bounce *= 0.88
+        if self._bounce < 0.0005:
+            self._bounce = 0.0
+
+        self.update()
+
+    # ── 绘制 ──────────────────────────────────────────
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 清除背景残留（CompositionMode_Clear 将像素设为全透明）
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+        if self._valid:
+            self._paint_character(painter)
+        else:
+            self._paint_fallback(painter)
+
+        painter.end()
+
+    def _paint_character(self, painter: QPainter) -> None:
+        """绘制角色（连续物理动画：呼吸缩放 + 摇摆 + 浮动 + 弹跳）。"""
+        cw, ch = self.width(), self.height()
+
+        scale = self._cur["base_scale"] + 0.022 * math.sin(self._phase_breath) + self._bounce
+        scale *= self._scale
+        rot = self._cur["sway_amp"] * math.sin(self._phase_sway)
+        float_y = self._cur["float_amp"] * math.sin(self._float_phase)
+
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+
+        t = QTransform()
+        t.translate(cw / 2, ch / 2 + float_y)
+        t.rotate(rot)
+        t.scale(scale, scale)
+        t.translate(-pw / 2, -ph / 2)
+
+        painter.setTransform(t)
+        painter.drawPixmap(0, 0, self._pixmap)
+
+    def _paint_fallback(self, painter: QPainter) -> None:
+        """无角色图时的降级心跳光效。"""
+        w, h = self.width(), self.height()
+        cx, cy = w // 2, h // 2
+        base_r = 30
+        pulse = math.sin(self._beat_phase) * 8
+        r = base_r + pulse
+        color = QColor(255, 60, 60, 200) if self._distress else QColor(120, 255, 180, 200)
+        painter.setBrush(QBrush(color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
 
 
 class PetWindow(QMainWindow):
-    """无边框置顶桌宠窗口（心跳光效 + 状态流 + 文本输入）。"""
+    """无边框透明置顶桌宠窗口（仅角色可见，右键菜单控制）。"""
 
     def __init__(self, state_db_path: Path, heartbeat_db_path: Path) -> None:
         super().__init__()
@@ -46,83 +307,51 @@ class PetWindow(QMainWindow):
         self._heartbeat_db_path = heartbeat_db_path
         self._conn_state: sqlite3.Connection | None = None
         self._conn_heartbeat: sqlite3.Connection | None = None
-        self._last_thought_id = 0  # 念头流去重（仅追加新念头）
-        self._drag_pos: QPoint | None = None  # 无边框窗口拖拽
+        self._last_thought_id = 0
+        self._last_thought_text = ""
+        self._dragging = False
+        self._moved = False
+        self._drag_offset = QPoint()
+        self._drag_global_pos = QPoint()
+        self._happy_until = 0.0
+        self._last_soul_payload: dict[str, Any] | None = None
 
-        self.setWindowTitle("Elysia 桌宠")
-        self.setFixedSize(PET_WIDTH, PET_HEIGHT)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        # ── 加载角色图 ──
+        pixmap = QPixmap(str(_CHAR_PATH))
+        self._has_character = not pixmap.isNull()
 
-        # ── 中央部件 ──
-        central = QWidget(self)
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        central.setStyleSheet("background-color: #1a1a2e; color: #e0e0e0;")
+        # ── 窗口设置 ──
+        self.setWindowTitle("Elysia")
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
-        # ── 顶部标题栏（无边框窗口的手动关闭/拖动入口）──
-        bar = QHBoxLayout()
-        bar.setContentsMargins(4, 2, 4, 0)
-        title = QLabel("Elysia")
-        title.setStyleSheet("font-size: 12px; font-weight: bold; color: #7aa2f7;")
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(20, 20)
-        close_btn.setToolTip("关闭桌宠窗口")
-        close_btn.setStyleSheet(
-            "font-size: 11px; background-color: #3a3a5c; color: #e0e0e0; border: none;"
-        )
-        close_btn.clicked.connect(self.close)
-        bar.addWidget(title)
-        bar.addStretch(1)
-        bar.addWidget(close_btn)
-        layout.addLayout(bar)
+        if self._has_character:
+            pw = pixmap.width() + WINDOW_PADDING * 2
+            ph = pixmap.height() + WINDOW_PADDING * 2
+        else:
+            pw, ph = 260, 260
+        self.setFixedSize(pw, ph)
 
-        # 心跳光效画布
-        self._canvas = _HeartbeatCanvas(self)
-        self._canvas.setMinimumHeight(120)
-        layout.addWidget(self._canvas)
-
-        # 状态流
-        self._status_label = QLabel(" 等待心跳连接…")
-        self._status_label.setStyleSheet("font-size: 11px; padding: 4px;")
-        layout.addWidget(self._status_label)
-
-        # 最近念头展示
-        self._thought_display = QTextEdit()
-        self._thought_display.setReadOnly(True)
-        self._thought_display.setMaximumHeight(120)
-        self._thought_display.setStyleSheet(
-            "font-size: 10px; background-color: #0f0f23; border: 1px solid #3a3a5c;"
-        )
-        layout.addWidget(self._thought_display)
-
-        # 输入区
-        input_layout = QHBoxLayout()
-        self._input_field = QLineEdit()
-        self._input_field.setPlaceholderText("说点什么…  （外部刺激 → 感受层）")
-        self._input_field.setStyleSheet(
-            "font-size: 12px; padding: 4px; background-color: #0f0f23;"
-            " border: 1px solid #3a3a5c; color: #e0e0e0;"
-        )
-        self._input_field.returnPressed.connect(self._submit_interaction)
-        submit_btn = QPushButton("发送")
-        submit_btn.setStyleSheet(
-            "font-size: 12px; padding: 4px 8px; background-color: #7aa2f7; color: #000;"
-        )
-        submit_btn.clicked.connect(self._submit_interaction)
-        input_layout.addWidget(self._input_field)
-        input_layout.addWidget(submit_btn)
-        layout.addLayout(input_layout)
+        # ── 角色画布 ──
+        self._canvas = _CharacterWidget(self, pixmap)
+        self.setCentralWidget(self._canvas)
 
         # ── 定时器 ──
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(POLL_INTERVAL_MS)
 
+        # ── 初始位置：屏幕右下角 ──
+        from PySide6.QtGui import QGuiApplication
+
+        ag = QGuiApplication.primaryScreen().availableGeometry()
+        self.move(ag.right() - pw - 20, ag.bottom() - ph - 20)
+
     # ── 数据库连接 ──────────────────────────────────
+
     @property
     def conn(self) -> sqlite3.Connection:
-        """state.db 连接（读 timesense/body_status/interaction）。"""
         if self._conn_state is None:
             self._conn_state = sqlite3.connect(str(self._state_db_path))
             self._conn_state.execute("PRAGMA busy_timeout=5000")
@@ -130,7 +359,6 @@ class PetWindow(QMainWindow):
 
     @property
     def conn_hb(self) -> sqlite3.Connection:
-        """heartbeat.db 连接（读 soul 心跳 payload/thought_log）。"""
         if self._conn_heartbeat is None:
             self._conn_heartbeat = sqlite3.connect(str(self._heartbeat_db_path))
             self._conn_heartbeat.execute("PRAGMA busy_timeout=5000")
@@ -143,51 +371,186 @@ class PetWindow(QMainWindow):
                 c.close()
         super().closeEvent(event)
 
-    # ── 无边框窗口拖拽移动 ────────────────────────────
+    # ── 鼠标事件（豆包方案：即时拖拽，移动量判断点击） ────
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._dragging = True
+            self._moved = False
+            self._drag_offset = event.position().toPoint()
+            self._drag_global_pos = event.globalPosition().toPoint()
+            self._canvas.set_emotion("dragging")
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
+        if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self._drag_global_pos
+            if delta.manhattanLength() > CLICK_DRAG_THRESHOLD_PX:
+                self._moved = True
+            new_pos = event.globalPosition().toPoint() - self._drag_offset
+            self.move(new_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        self._drag_pos = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self._canvas.set_emotion("idle")
+            if not self._moved:
+                self._on_character_click()
+            event.accept()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if event.angleDelta().y() > 0:
+            self._canvas.zoom_in()
+        else:
+            self._canvas.zoom_out()
         event.accept()
 
-    # ── 每帧 ──────────────────────────────────────
+    def contextMenuEvent(self, event: Any) -> None:
+        self._build_menu().exec(event.globalPos())
+
+    # ── 右键菜单 ──────────────────────────────────────
+
+    def _build_menu(self) -> QMenu:
+        menu = QMenu()
+        menu.setStyleSheet("QMenu{font-size:13px;}")
+
+        # 输入…
+        input_act = QAction("输入…", self)
+        input_act.triggered.connect(self._open_input_dialog)
+        menu.addAction(input_act)
+
+        # 状态
+        status_act = QAction("状态", self)
+        status_act.triggered.connect(self._show_status)
+        menu.addAction(status_act)
+
+        menu.addSeparator()
+
+        # 窗口置顶
+        top_act = QAction("窗口置顶", self)
+        top_act.setCheckable(True)
+        top_act.setChecked(bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint))
+        top_act.triggered.connect(self._toggle_topmost)
+        menu.addAction(top_act)
+
+        # 透明度
+        opm = menu.addMenu("透明度")
+        for v in (60, 80, 100):
+            act = QAction(f"{v}%", self)
+            act.triggered.connect(lambda _, x=v: self._set_opacity(x))
+            opm.addAction(act)
+
+        menu.addSeparator()
+
+        # 退出
+        quit_act = QAction("退出", self)
+        quit_act.triggered.connect(self._quit)
+        menu.addAction(quit_act)
+
+        return menu
+
+    def _quit(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _toggle_topmost(self, checked: bool) -> None:
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
+        self.show()
+
+    def _set_opacity(self, v: int) -> None:
+        self.setWindowOpacity(v / 100.0)
+
+    def _open_input_dialog(self) -> None:
+        text, ok = QInputDialog.getMultiLineText(self, "输入", "说点什么…")
+        if ok and text.strip():
+            self._submit_interaction(text.strip())
+
+    def _show_status(self) -> None:
+        p = self._last_soul_payload
+        if not p:
+            QMessageBox.information(self, "状态", "等待心跳连接…")
+            return
+
+        time_data = p.get("time", {})
+        desire_data = p.get("desire")
+        feelings_data = p.get("feelings")
+
+        lines = [
+            f"模式: {p.get('mode', '?')}",
+            f"年龄: {time_data.get('age_days', 0):.2f} 天",
+            f"离开: {self._fmt_sec(time_data.get('body_away_s', 0))}",
+            f"距交互: {self._fmt_sec(time_data.get('since_interaction_s', 0))}",
+            f"相位: {time_data.get('day_phase', '?')}",
+            f"情绪: {self._canvas.current_emotion}",
+        ]
+
+        # P1：欲望状态
+        if desire_data:
+            lines.append("")
+            lines.append(f"信任: {desire_data.get('tr', '?'):.0f}")
+            lines.append(f"眷恋: {desire_data.get('cs', '?'):.0f}")
+            lines.append(f"压力: {desire_data.get('sa', '?'):.0f}")
+
+        # P1：感受状态
+        if feelings_data:
+            lines.append("")
+            lines.append(f"聊天: {feelings_data.get('chat', 0) * 100:.0f}%")
+            lines.append(f"思念: {feelings_data.get('miss', 0) * 100:.0f}%")
+            lines.append(f"探索: {feelings_data.get('explore', 0) * 100:.0f}%")
+            lines.append(f"好奇: {feelings_data.get('curiosity', 0) * 100:.0f}%")
+            lines.append(f"休息: {feelings_data.get('rest', 0) * 100:.0f}%")
+            lines.append(f"自检: {feelings_data.get('self_check', 0) * 100:.0f}%")
+        if p.get("distress"):
+            lines.append("😫 难受中")
+        if p.get("frozen"):
+            lines.append("❄️ 冻结")
+        if self._last_thought_text:
+            lines.append("")
+            lines.append(f"💭 {self._last_thought_text}")
+
+        QMessageBox.information(self, "Elysia 状态", "\n".join(lines))
+
+    # ── 每帧（灵魂状态轮询） ────────────────────────
+
     def _tick(self) -> None:
         try:
             payload = self._latest_soul_payload()
             if payload is None:
                 return
-            time_data = payload.get("time", {})
+
+            self._last_soul_payload = payload
+
+            # 状态 → 动画映射
+            anim_state = self._map_state_to_animation(payload)
+
+            # 点击后 happy 覆盖
+            if time.time() < self._happy_until:
+                anim_state = "happy"
+
             self._canvas.update_state(
-                dp=True,
+                anim_state=anim_state,
                 distress=payload.get("distress", False),
-                age_days=time_data.get("age_days", 0),
-                mode=payload.get("mode", "?"),
-                away_s=time_data.get("body_away_s", 0),
-                interaction_s=time_data.get("since_interaction_s", 0),
-                phase=time_data.get("day_phase", "?"),
-            )
-            # 状态文本
-            self._status_label.setText(
-                f"模式: {payload.get('mode', '?')}  "
-                f"年龄: {time_data.get('age_days', 0):.2f} 天  "
-                f"离开: {self._fmt_sec(time_data.get('body_away_s', 0))}  "
-                f"距交互: {self._fmt_sec(time_data.get('since_interaction_s', 0))}  "
-                f"相位: {time_data.get('day_phase', '?')}"
-                + (" [❄️ 冻结]" if payload.get("frozen") else "")
-                + (" [😫 难受]" if payload.get("distress") else "")
+                desire=payload.get("desire"),
             )
 
+            # 读取最新念头
             self._latest_thought()
         except Exception:
-            pass  # DB 连接初期的空结果
+            pass
+
+    def _map_state_to_animation(self, payload: dict[str, Any]) -> str:
+        if payload.get("distress"):
+            return "unhappy"
+        if payload.get("mode") in ("alone", "body_away"):
+            return "away"
+        interaction_s = payload.get("time", {}).get("since_interaction_s", 9999)
+        if interaction_s < 60:
+            return "happy"
+        if interaction_s > 3600:
+            return "tired"
+        return "idle"
 
     def _latest_soul_payload(self) -> dict[str, Any] | None:
         try:
@@ -196,80 +559,51 @@ class PetWindow(QMainWindow):
             ).fetchall()
             if not rows:
                 return None
-            return json.loads(rows[0][0])  # type: ignore[no-any-return]
+            payload = json.loads(rows[0][0])
+            return payload if isinstance(payload, dict) else None
         except Exception:
             return None
 
     def _latest_thought(self) -> None:
-        """新念头追加进对话流（与你说的话交错成流）。"""
-        rows = self.conn_hb.execute(
-            "SELECT id, text FROM thought_log ORDER BY id DESC LIMIT 1"
-        ).fetchall()
-        if rows and rows[0][0] != self._last_thought_id:
-            self._last_thought_id = rows[0][0]
-            self._thought_display.append(f"💭 {rows[0][1]}")
+        try:
+            rows = self.conn_hb.execute(
+                "SELECT id, text FROM thought_log ORDER BY id DESC LIMIT 1"
+            ).fetchall()
+            if rows and rows[0][0] != self._last_thought_id:
+                self._last_thought_id = rows[0][0]
+                self._last_thought_text = rows[0][1]
+        except Exception:
+            pass
 
     @staticmethod
     def _fmt_sec(s: float) -> str:
-        """秒级时长显示：<60s 显示秒，否则 分+秒（让交互感知可见）。"""
         s = int(s)
         if s < 60:
             return f"{s}秒"
         return f"{s // 60}分{s % 60}秒"
 
-    # ── 交互 ──────────────────────────────────────
-    def _submit_interaction(self) -> None:
-        text = self._input_field.text().strip()
-        if not text:
-            return
+    # ── 交互 ──────────────────────────────────────────
+
+    def _on_character_click(self) -> None:
+        """点击角色 → 触发交互事件 + 即时 happy 反馈。"""
+        self._write_interaction("（点击）")
+        self._happy_until = time.time() + CLICK_HAPPY_S
+        self._canvas.poke()
+        self._canvas.set_emotion("happy")
+
+    def _submit_interaction(self, text: str) -> None:
+        """提交文本交互 → 写入 DB + 即时反馈。"""
+        self._write_interaction(text)
+        self._canvas.poke()
+        self._canvas.set_emotion("happy")
+
+    def _write_interaction(self, text: str) -> None:
         payload = json.dumps({"ts": time.time(), "text": text})
         self.conn.execute(
             "INSERT OR REPLACE INTO kv (key, value) VALUES ('interaction', ?)",
             (payload,),
         )
         self.conn.commit()
-        self._input_field.clear()
-        # 即时反馈：你说的话进入对话流（她 1s 内感知 → 距交互归零）
-        self._thought_display.append(f"💬 你说：{text}")
-
-
-class _HeartbeatCanvas(QWidget):
-    """心跳光效画布：半径呼吸脉冲，颜色反映情绪与模式。"""
-
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
-        self._beat_phase = 0.0
-        self._distress = False
-        self._age_days = 0.0
-        self._mode = "present"
-        self._away_s = 0.0
-        self._interaction_s = 0.0
-        self._phase = "day"
-
-    def update_state(self, **kwargs: Any) -> None:
-        self._beat_phase += 0.3  # 呼吸进度
-        for k, v in kwargs.items():
-            setattr(self, f"_{k}", v)
-        self.update()
-
-    def paintEvent(self, event: QPaintEvent) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        cx, cy = w // 2, h // 2
-        base_r = 30
-        pulse = math.sin(self._beat_phase) * 8
-        r = base_r + pulse
-        if self._distress:
-            color = QColor(255, 60, 60, 200)
-        elif self._mode in ("alone", "body_away"):
-            color = QColor(120, 160, 255, 180)
-        else:
-            color = QColor(120, 255, 180, 200)
-        painter.setBrush(QBrush(color))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-        painter.end()
 
 
 def run_pet(state_db_path: Path, heartbeat_db_path: Path) -> None:

@@ -1,0 +1,12 @@
+{
+  "frame_width": 272,
+  "frame_height": 544,
+  "frame_counts": {
+    "idle": 8,
+    "happy": 4,
+    "unhappy": 4,
+    "tired": 4,
+    "dragging": 4,
+    "away": 6
+  }
+}

@@ -1,12 +1,15 @@
-"""灵魂进程入口：常驻心跳（1Hz）+ 优雅关闭。
+"""灵魂进程入口：常驻心跳（1Hz）+ 大脑循环（P1）+ 优雅关闭。
 
 启动流程：ensure_dirs → 日志双通道 → 双库启动 → TimeSense 恢复/新生
-→ 心跳循环 → 阻塞等待停止信号 → 优雅关闭（排空写队列）。
+→ 欲望系统恢复/新生 → 大脑循环初始化 → 心跳循环 → 阻塞等待停止信号
+→ 优雅关闭（排空写队列）。
+
+P1 新增：欲望系统 DesireSystem + 大脑循环 BrainLoop 的恢复与初始化。
 
 停止路径（P0-A）：
 - Ctrl+C（KeyboardInterrupt）
 - Unix SIGTERM（add_signal_handler）
-- Windows 强杀（soul.ps1 stop）：数据损失 <= 1s，WAL 自动恢复（P0-C 完善 stop 文件机制）
+- Windows 强杀（soul.ps1 stop）：数据损失 <= 1s，WAL 自动恢复
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense, from_payload
 from elysia.soul.away_life import AwayLife
+from elysia.soul.brain import BrainLoop
+from elysia.soul.desire import DesireSystem
 from elysia.soul.distress import DistressMonitor
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state, stop_with_cancel
 
@@ -53,6 +58,19 @@ async def _build_timesense(state_store: StateStore, log: Any) -> TimeSense:
     return TimeSense(state)
 
 
+async def _build_desire(state_store: StateStore, log: Any) -> DesireSystem:
+    """欲望系统恢复/新生：已有档案恢复；无档案时新生（默认初始值）。"""
+    payload = await state_store.load_json("desire")
+    if payload is None:
+        log.info("desire system initialized：默认初始值 TR=45 CS=60 SA=20")
+        return DesireSystem()
+    try:
+        return DesireSystem.from_payload(payload)
+    except Exception:
+        log.warning("desire 恢复失败，新生", exc_info=True)
+        return DesireSystem()
+
+
 async def _run(settings: Settings) -> int:
     setup_logging(level=settings.log_level, log_dir=settings.log_dir)
     log = get_logger("soul")
@@ -64,12 +82,18 @@ async def _run(settings: Settings) -> int:
     await heartbeat_store.start()
 
     timesense = await _build_timesense(state_store, log)
+    desire = await _build_desire(state_store, log)
     mode_mgr = ModeManager()
+
+    # P1：大脑循环
+    brain_loop = BrainLoop(desire_system=desire)
+
     heartbeat = SoulHeartbeat(
         state_store=state_store,
         heartbeat_store=heartbeat_store,
         timesense=timesense,
         mode_mgr=mode_mgr,
+        brain_loop=brain_loop,
         clock=SystemClock(),
         interval_s=settings.heartbeat_interval_s,
         distress_monitor=DistressMonitor(),

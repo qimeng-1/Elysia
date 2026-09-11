@@ -21,6 +21,9 @@ data/logs/
 data/cache/
 data/tmp/
 data/run/
+# 运行时 SQLite 主体文件（进程持续锁定写入，改由 checkpoints/ 做快照版本化）
+data/heartbeat.db
+data/state.db
 *.log
 # SQLite WAL 模式伴生文件（随进程运行实时变化，不提交）
 *.db-wal

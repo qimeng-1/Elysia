@@ -12,6 +12,7 @@ P1 无 LLM、无复杂行动——她的"意志"只影响内部生活（念头�
 from __future__ import annotations
 
 import os
+import random
 from dataclasses import dataclass, field
 
 from elysia.soul.desire import DesireEvent, DesireState, DesireSystem
@@ -20,6 +21,19 @@ from elysia.soul.dimensions import FeelingMapper, FeelingState
 # 意志层参数
 WILL_NOISE_AMP = 0.15  # 真随机抖动幅度
 NO_ACTION_WEIGHT = 0.10  # 无行动权保底 10%
+
+
+class _CryptoRNG(random.Random):
+    """真随机源：用 os.urandom 提供随机性，覆写 random() 保证不可预测。
+
+    兼容 random.Random 的接口（测试可注入固定 random.Random(seed) 保证确定性）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def random(self) -> float:
+        return int.from_bytes(os.urandom(4), "big") / (2**32 - 1)
 
 
 @dataclass
@@ -58,9 +72,12 @@ class BrainLoop:
         self,
         desire_system: DesireSystem,
         feeling_mapper: FeelingMapper | None = None,
+        rng: random.Random | None = None,
     ) -> None:
         self._desire = desire_system
         self._feelings = feeling_mapper if feeling_mapper is not None else FeelingMapper()
+        # 意志/行动层的随机源：默认用 os.urandom 真随机；测试可注入固定 rng 保证确定性
+        self._rng = rng if rng is not None else _CryptoRNG()
         self._last_output: BrainOutput | None = None
 
     @property
@@ -132,8 +149,8 @@ class BrainLoop:
 
     # ── 意志层 ─────────────────────────────────────────
 
-    @staticmethod
     def _will_layer(
+        self,
         desire: DesireState,
         feelings: FeelingState,
         distress: bool,
@@ -143,7 +160,7 @@ class BrainLoop:
 
         方向 = 状态 + 感受（简化版，P4 才引入五条基石）
         力度 = TR/CS 加权
-        抖动 = 真随机（os.urandom）
+        抖动 = 随机（默认 os.urandom，测试可注入固定 rng）
         """
         # 方向判定
         if distress:
@@ -160,12 +177,12 @@ class BrainLoop:
         # 力度 = TR/CS 加权（0-1）
         strength = (desire.tr / 100.0 + desire.cs / 100.0) / 2.0
 
-        # 真随机抖动（os.urandom → 0-1）
-        jitter = int.from_bytes(os.urandom(1), "big") / 255.0
+        # 随机抖动（默认 os.urandom → 0-1）
+        jitter = self._rng.random()
         if jitter < WILL_NOISE_AMP:
             # 小概率随机转向
             directions = ["still", "reach", "retreat", "explore"]
-            direction = directions[int.from_bytes(os.urandom(1), "big") % len(directions)]
+            direction = directions[int(self._rng.random() * len(directions)) % len(directions)]
 
         # 念头风格：正值 = 活跃/胡思乱想，负值 = 安静/虚无
         thought_style = (desire.tr - 50.0) / 50.0  # -1 到 1
@@ -186,8 +203,7 @@ class BrainLoop:
 
     # ── 行动层 ─────────────────────────────────────────
 
-    @staticmethod
-    def _action_layer(will: WillOutput, mode: str) -> str:
+    def _action_layer(self, will: WillOutput, mode: str) -> str:
         """P1 决策集：{none, think_active, think_quiet, animate}。
 
         - none: 无行动
@@ -196,7 +212,7 @@ class BrainLoop:
         - animate: 影响动画基调（由桌宠端读取）
         """
         # 无行动权保底 10%
-        jitter = int.from_bytes(os.urandom(1), "big") / 255.0
+        jitter = self._rng.random()
         if jitter < NO_ACTION_WEIGHT:
             return "none"
 

@@ -239,11 +239,11 @@ heartbeat.db 新增表（P2）：
 
 ## 十一、实施顺序建议（开工时）
 
-1. **协议/校验先行**：expression.py Schema + validator.py + words.py（纯函数，可单测，T2 防线）
-2. **LLM 抽象**：llm/ 基类 + 微声模板（模板合成不依赖网络，先跑通闭环）
-3. **DeepSeek + Qwen 接入**：真实 API + 本地推理，接调度器
-4. **TTS + 缓存 + 熔断**：GPT-SoVITS 出声
-5. **桌宠集成 + 验收**：body/pet.py 接 text/tts，跑 §十 全套验收
+- [x] 1. **协议/校验先行**：expression.py Schema + validator.py + words.py（纯函数，可单测，T2 防线）— 已落地（commit d303dc1，15 测试）
+- [x] 2. **LLM 抽象**：llm/ 基类 + 微声模板（模板合成不依赖网络，先跑通闭环）— 已落地（commit 9fc0542，7 测试）
+- [ ] 3. **DeepSeek + Qwen 接入**：真实 API + 本地推理，接调度器
+- [ ] 4. **TTS + 缓存 + 熔断**：GPT-SoVITS 出声
+- [ ] 5. **桌宠集成 + 验收**：body/pet.py 接 text/tts，跑 §十 全套验收
 
 ---
 

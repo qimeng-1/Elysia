@@ -142,7 +142,7 @@ def test_personality_gene_sa_difference_2sigma() -> None:
 
 def test_dual_thought_mode_switching() -> None:
     """thought_style 正负切换 → 发呆双模态可观测变化。"""
-    brain = BrainLoop(DesireSystem(rng=random.Random(0)))
+    brain = BrainLoop(DesireSystem(rng=random.Random(0)), rng=random.Random(0))
     ds = brain._desire
 
     # TR 高 → 胡思乱想模式
@@ -214,7 +214,7 @@ def test_personality_gravity_convergence() -> None:
 
 def test_brain_loop_integration_1000_steps() -> None:
     """大脑循环连续 1000 步，所有输出在合理范围内。"""
-    brain = BrainLoop(DesireSystem(rng=random.Random(0)))
+    brain = BrainLoop(DesireSystem(rng=random.Random(0)), rng=random.Random(0))
     for i in range(1000):
         output = brain.step(distress=False, mode="present")
         d = output.desire

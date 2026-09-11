@@ -81,7 +81,7 @@ def test_feeling_mapper_inertia_smoothing() -> None:
 
 def test_brain_loop_step_returns_all_fields() -> None:
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
     output = brain.step()
     assert output.desire is not None
     assert output.feelings is not None
@@ -91,7 +91,7 @@ def test_brain_loop_step_returns_all_fields() -> None:
 
 def test_brain_loop_apply_event() -> None:
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
     initial_cs = ds.state.cs
     brain.apply_event(DesireEvent(kind="interaction"))
     assert ds.state.cs > initial_cs
@@ -99,7 +99,7 @@ def test_brain_loop_apply_event() -> None:
 
 def test_brain_loop_distress_affects_action() -> None:
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
     brain.step(distress=False)
     output_distress = brain.step(distress=True)
     # 难受时 direction 应为 retreat
@@ -109,7 +109,7 @@ def test_brain_loop_distress_affects_action() -> None:
 def test_brain_loop_consecutive_steps() -> None:
     """连续步进 100 步，确保状态不越界。"""
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
     for _ in range(100):
         output = brain.step()
         d = output.desire
@@ -124,7 +124,7 @@ def test_brain_loop_consecutive_steps() -> None:
 def test_will_strength_in_range() -> None:
     """意志力度应在 0-1 之间。"""
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
     for _ in range(50):
         output = brain.step()
         assert 0.0 <= output.will.strength <= 1.0
@@ -133,7 +133,7 @@ def test_will_strength_in_range() -> None:
 def test_will_anim_bias_in_range() -> None:
     """动画基调偏置应在 -0.5 到 0.5 之间。"""
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
     for _ in range(50):
         output = brain.step()
         assert -0.5 <= output.will.anim_bias <= 0.5
@@ -164,7 +164,7 @@ def test_mixed_emotions_cs_low_tr_high() -> None:
 def test_thought_style_dual_mode() -> None:
     """thought_style 正负对应发呆双模态。"""
     ds = DesireSystem(rng=random.Random(0))
-    brain = BrainLoop(ds)
+    brain = BrainLoop(ds, rng=random.Random(0))
 
     # TR 高 → thought_style 正
     ds._state.tr = 65.0

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,7 @@ def _make_soul(
             heartbeat_store=heartbeat_store,
             timesense=TimeSense(make_soul_state(T0), clock),
             mode_mgr=ModeManager(clock=clock),
-            brain_loop=BrainLoop(DesireSystem()) if with_brain else None,
+            brain_loop=BrainLoop(DesireSystem(), rng=random.Random(0)) if with_brain else None,
             clock=clock,
             interval_s=1.0,
         ),

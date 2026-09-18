@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import Any
 
 from elysia.core.checkpoint import CheckpointManager
 from elysia.core.clock import Clock, SystemClock
@@ -31,9 +32,10 @@ from elysia.core.timesense import (
 )
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
-from elysia.soul.brain import BrainLoop
+from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
+from elysia.soul.expression_service import ExpressionService
 
 logger = logging.getLogger("elysia.soul.heartbeat")
 
@@ -57,6 +59,7 @@ class SoulHeartbeat:
         distress_monitor: DistressMonitor | None = None,
         away_life: AwayLife | None = None,
         checkpoint: CheckpointManager | None = None,
+        expression: ExpressionService | None = None,
     ) -> None:
         self._state_store = state_store
         self._heartbeat_store = heartbeat_store
@@ -70,9 +73,13 @@ class SoulHeartbeat:
         self._distress_monitor = distress_monitor
         self._away_life = away_life
         self._checkpoint = checkpoint
+        self._expression = expression
 
         # 交互事件追踪（防止重复触发）
         self._last_interaction_event_ts: float = 0.0
+        # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
+        self._new_interaction = False
+        self._latest_resources: dict[str, Any] = {}
 
     @property
     def interval_s(self) -> float:
@@ -156,6 +163,18 @@ class SoulHeartbeat:
                     brain_action=brain_action or "none",
                 )
 
+            # ── P2：表达管线（LLM → 校验 → TTS → 气泡）────
+            if self._expression is not None and not frozen and brain_output is not None:
+                await self._expression.tick(
+                    brain_output,
+                    now=now,
+                    vrram_mb=self._latest_vrram_mb(),
+                    body_left_h=float(summary["body_away_s"]) / 3600.0,
+                    day_phase=str(summary["day_phase"]),
+                    force=self._new_interaction,
+                    env=self._expression_env(brain_output, summary),
+                )
+
             await self._clock.sleep(self._interval_s)
 
     async def _sync_body_status(self, now: float) -> None:
@@ -177,10 +196,11 @@ class SoulHeartbeat:
             state.body_away_start_ts = last_ts
         # 难受检测：喂入最新资源样本（缺失时忽略）
         resources = status.get("resources")
-        cpu = None
         if isinstance(resources, dict):
-            raw_cpu = resources.get("cpu_percent")
-            cpu = float(raw_cpu) if isinstance(raw_cpu, (int, float)) else None
+            self._latest_resources = resources
+        cpu = None
+        raw_cpu = self._latest_resources.get("cpu_percent")
+        cpu = float(raw_cpu) if isinstance(raw_cpu, (int, float)) else None
         if self._distress_monitor is not None and self._distress_monitor.update(now, cpu):
             self.set_distress(self._distress_monitor.distress)
             await self._heartbeat_store.append(
@@ -194,6 +214,7 @@ class SoulHeartbeat:
                 self._brain_loop.apply_event(DesireEvent(kind=event_kind))
 
         # 交互同步：桌宠输入的外部刺激 → 感受层入口（P1 增强）
+        self._new_interaction = False
         interaction = await self._state_store.load_json("interaction", default=None)
         if isinstance(interaction, dict):
             its = float(interaction.get("ts", 0.0))
@@ -203,6 +224,29 @@ class SoulHeartbeat:
             if its > self._last_interaction_event_ts and self._brain_loop is not None:
                 self._last_interaction_event_ts = its
                 self._brain_loop.apply_event(DesireEvent(kind="interaction"))
+                # P2：新交互 → 强制开口回应
+                self._new_interaction = True
+
+    # ── P2 表达辅助 ─────────────────────────────────────
+
+    def _latest_vrram_mb(self) -> float:
+        """最近一次资源快照的 VRAM 占用（MB），未知返回 0。"""
+        raw = self._latest_resources.get("vrram_mb")
+        return float(raw) if isinstance(raw, (int, float)) else 0.0
+
+    def _expression_env(self, output: BrainOutput, summary: dict[str, Any]) -> dict[str, object]:
+        """词汇表授权环境的实时状态（§六 词 → 触发状态）。"""
+        return {
+            "vrram_mb": self._latest_vrram_mb(),
+            "tr": output.desire.tr,
+            "cs": output.desire.cs,
+            "miss": output.feelings.miss,
+            "is_night": str(summary.get("day_phase", "")) == "night",
+            "cpu_pct": 0.0,
+            "q_len": 0,
+            "error_burst": 0,
+            "memory_gap": 0,
+        }
 
     async def stop(self) -> None:
         """优雅停止：等待当前拍完成（心跳循环由外部任务持有，cancel 兜底）。"""

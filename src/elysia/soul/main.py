@@ -27,11 +27,14 @@ from elysia.core.log import get_logger, setup_logging
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense, from_payload
+from elysia.llm import build_llm_chain
 from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop
-from elysia.soul.desire import DesireSystem
+from elysia.soul.desire import DesireEvent, DesireSystem
 from elysia.soul.distress import DistressMonitor
+from elysia.soul.expression_service import ExpressionService
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state, stop_with_cancel
+from elysia.tts import build_tts_chain
 
 
 async def _build_timesense(state_store: StateStore, log: Any) -> TimeSense:
@@ -88,6 +91,20 @@ async def _run(settings: Settings) -> int:
     # P1：大脑循环
     brain_loop = BrainLoop(desire_system=desire)
 
+    # P2：表达管线（LLM 主声 + TTS 出声）；降级即感受——写 DesireSystem SA
+    async def _on_degrade(kind: str, delta: float) -> None:
+        desire.apply_event(DesireEvent(kind="degrade", intensity=delta))
+
+    llm_chain = build_llm_chain(
+        settings,
+        on_degrade=lambda _reason: _on_degrade("llm", settings.llm_degrade_sa_delta),
+    )
+    tts_chain = build_tts_chain(
+        settings,
+        on_degrade=lambda _reason: _on_degrade("tts", settings.tts_degrade_sa_delta),
+    )
+    expression = ExpressionService(llm_chain, heartbeat_store, tts_chain=tts_chain)
+
     heartbeat = SoulHeartbeat(
         state_store=state_store,
         heartbeat_store=heartbeat_store,
@@ -99,6 +116,7 @@ async def _run(settings: Settings) -> int:
         distress_monitor=DistressMonitor(),
         away_life=AwayLife(heartbeat_store),
         checkpoint=CheckpointManager(settings.data_dir),
+        expression=expression,
     )
 
     stop = asyncio.Event()

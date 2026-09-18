@@ -40,6 +40,7 @@ EVENT_PULSES: dict[str, dict[str, float]] = {
     "distress_on": {"tr": -2.0, "cs": 0.0, "sa": 5.0},  # 难受
     "distress_off": {"tr": 1.0, "cs": 0.0, "sa": -3.0},  # 难受解除
     "silence": {"tr": -0.5, "cs": -1.0, "sa": 1.0},  # 长时间无交互衰减
+    "degrade": {"tr": 0.0, "cs": 0.0, "sa": 1.0},  # P2：表达/语音降级（SA 增量由 intensity 承载）
 }
 
 # ── 慢尺度演化阈值 ──────────────────────────────────────
@@ -72,7 +73,7 @@ class DesireState:
 class DesireEvent:
     """作用于欲望系统的外部事件。"""
 
-    kind: str  # "interaction" | "distress_on" | "distress_off" | "silence"
+    kind: str  # "interaction" | "distress_on" | "distress_off" | "silence" | "degrade"
     intensity: float = 1.0  # 0-1 事件强度缩放
 
 

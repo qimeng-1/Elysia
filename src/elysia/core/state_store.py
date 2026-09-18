@@ -48,6 +48,15 @@ CREATE TABLE IF NOT EXISTS thought_log (
     kind TEXT NOT NULL,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS expression_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    intent      TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    llm_text    TEXT NOT NULL,
+    validation  TEXT NOT NULL,
+    level       TEXT NOT NULL
+);
 """
 
 
@@ -189,6 +198,34 @@ class HeartbeatStore(_AsyncSQLite):
     async def thought_count(self) -> int:
         rows = await self.execute_raw("SELECT COUNT(*) FROM thought_log")
         return int(rows[0][0])
+
+    async def expression(
+        self,
+        ts: float,
+        intent: str,
+        instruction: dict[str, Any],
+        llm_text: str,
+        validation: dict[str, Any],
+        level: str,
+    ) -> None:
+        """记录一次表达全链路（P2 §九：表达日志 + 越权取证）。"""
+
+        def _expression(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO expression_log (ts, intent, instruction, llm_text, validation, level)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    ts,
+                    intent,
+                    json.dumps(instruction, ensure_ascii=False),
+                    llm_text,
+                    json.dumps(validation, ensure_ascii=False),
+                    level,
+                ),
+            )
+            conn.commit()
+
+        await self.submit(_expression)
 
     async def gaps(self, threshold_s: float, beat_type: str = "soul") -> list[tuple[float, float]]:
         """心跳空洞：相邻间隔 > 阈值的区间 [(gap_start, gap_end), ...]。

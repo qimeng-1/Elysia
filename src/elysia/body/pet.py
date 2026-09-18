@@ -32,6 +32,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -46,6 +47,7 @@ _CHAR_PATH = _PROJECT_ROOT / "assets" / "pet" / "character.png"
 POLL_INTERVAL_MS = 200  # 5Hz 灵魂状态轮询
 ANIM_INTERVAL_MS = 33  # ~30fps 动画渲染
 CLICK_HAPPY_S = 2.0  # 点击后 happy 覆盖持续时长
+BUBBLE_SHOW_S = 6.0  # 表达气泡显示时长
 ZOOM_MIN = 0.3
 ZOOM_MAX = 3.0
 ZOOM_STEP = 1.1
@@ -337,6 +339,24 @@ class PetWindow(QMainWindow):
         self._canvas = _CharacterWidget(self, pixmap)
         self.setCentralWidget(self._canvas)
 
+        # ── 表达气泡（P2：LLM 开口的文本显示） ──
+        self._bubble = QLabel(self._canvas)
+        self._bubble.setWordWrap(True)
+        self._bubble.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._bubble.setStyleSheet(
+            "QLabel {"
+            "  background: rgba(255, 255, 255, 235);"
+            "  color: #333;"
+            "  border: 1px solid #ddd;"
+            "  border-radius: 8px;"
+            "  padding: 6px 8px;"
+            "  font-size: 13px;"
+            "}"
+        )
+        self._bubble.setFixedWidth(int(pw * 0.5))
+        self._bubble.hide()
+        self._bubble_until = 0.0
+
         # ── 定时器 ──
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -535,8 +555,12 @@ class PetWindow(QMainWindow):
                 desire=payload.get("desire"),
             )
 
-            # 读取最新念头
+            # 读取最新念头（P2 表达气泡随 _latest_thought 更新）
             self._latest_thought()
+
+            # 气泡超时自动隐藏
+            if time.time() >= self._bubble_until and self._bubble.isVisible():
+                self._bubble.hide()
         except Exception:
             pass
 
@@ -567,11 +591,14 @@ class PetWindow(QMainWindow):
     def _latest_thought(self) -> None:
         try:
             rows = self.conn_hb.execute(
-                "SELECT id, text FROM thought_log ORDER BY id DESC LIMIT 1"
+                "SELECT id, kind, text FROM thought_log ORDER BY id DESC LIMIT 1"
             ).fetchall()
             if rows and rows[0][0] != self._last_thought_id:
                 self._last_thought_id = rows[0][0]
-                self._last_thought_text = rows[0][1]
+                self._last_thought_text = rows[0][2]
+                # P2：表达气泡——仅当最新念头是"表达"（LLM 开口）时显示
+                if rows[0][1] == "expression" and rows[0][2].strip():
+                    self._show_bubble(rows[0][2])
         except Exception:
             pass
 
@@ -581,6 +608,18 @@ class PetWindow(QMainWindow):
         if s < 60:
             return f"{s}秒"
         return f"{s // 60}分{s % 60}秒"
+
+    def _show_bubble(self, text: str) -> None:
+        """显示表达气泡：角色上方，展示 LLM 开口文本，BUBBLE_SHOW_S 后隐藏。"""
+        self._bubble.setText(text)
+        self._bubble.adjustSize()
+        cw, ch = self._canvas.width(), self._canvas.height()
+        bw = self._bubble.width()
+        x = max(0, (cw - bw) // 2)
+        self._bubble.move(x, int(ch * 0.08))
+        self._bubble.show()
+        self._bubble.raise_()
+        self._bubble_until = time.time() + BUBBLE_SHOW_S
 
     # ── 交互 ──────────────────────────────────────────
 

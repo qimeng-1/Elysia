@@ -37,7 +37,10 @@ function Get-BodyPid {
 }
 
 function Get-PyExe {
-    # 解析真实 python 解释器路径（避免 uv 包装层导致 PID 错位/stop 孤儿进程）
+    # 优先直接使用项目 .venv 解释器（确定性，避免 uv 解析回退到系统 Python 造成多环境冲突）
+    $venvPy = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy) { return $venvPy }
+    # 兜底：uv 解析（venv 缺失时）
     $line = & uv run --no-sync python -c "import sys; print(sys.executable)" 2>$null | Select-Object -Last 1
     $py = ($line -as [string]).Trim()
     if (-not $py -or -not (Test-Path $py)) { Write-Error "无法解析 python 解释器路径: $py"; exit 1 }

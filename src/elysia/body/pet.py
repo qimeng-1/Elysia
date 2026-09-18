@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QTransform,
     QWheelEvent,
 )
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
@@ -357,6 +358,12 @@ class PetWindow(QMainWindow):
         self._bubble.hide()
         self._bubble_until = 0.0
 
+        # ── 音频播放（P2 TTS 出声：播放最新缓存 wav） ──
+        self._audio_output = QAudioOutput(self)
+        self._player = QMediaPlayer(self)
+        self._player.setAudioOutput(self._audio_output)
+        self._last_played_audio = ""  # 去重：同一 wav 不重复播放
+
         # ── 定时器 ──
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -620,6 +627,27 @@ class PetWindow(QMainWindow):
         self._bubble.show()
         self._bubble.raise_()
         self._bubble_until = time.time() + BUBBLE_SHOW_S
+        self._play_latest_audio()
+
+    def _play_latest_audio(self) -> None:
+        """播放 TTS 缓存中最新合成的 wav（同一时刻刚合成，时序对应本次表达）。
+
+        缓存 key = SHA256(文本+情绪+语速)，桌宠无法反推，故直接取最新写入文件；
+        prewarm 未启用时缓存全部来自实时合成，最新即本次开口。失败静默降级为仅气泡。
+        """
+        try:
+            cache_dir = _PROJECT_ROOT / "data" / "cache" / "tts"
+            wavs = sorted(cache_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not wavs:
+                return
+            path = str(wavs[0])
+            if path == self._last_played_audio:
+                return
+            self._last_played_audio = path
+            self._player.setSource(QUrl.fromLocalFile(path))
+            self._player.play()
+        except Exception:
+            pass
 
     # ── 交互 ──────────────────────────────────────────
 

@@ -78,3 +78,44 @@
 - 单元测试 6 项（away_life P1 新增）：双模态节律、brain_action 强制覆盖
 - 验收门 7 项：取消测试、混合情绪、稳态自愈、性格基因（2σ）、发呆双模态、性格引力、大脑循环集成
 - 总计 88 测试全绿（含 P0 回归 53 项）
+
+## P2 — 表达实现（2026-09-18）
+
+### P2-A 协议/校验先行（d303dc1）
+- **feat**：`protocol/expression.py` 表达指令 Schema v1（intent/emotion_vector/state_brief/memory_hooks/lexical_permits/constraints/tts）
+- **feat**：`llm/words.py` 词汇表硬约束（词→触发状态，代码读取真实状态自动授权，虚构状态词被拦）
+- **feat**：`llm/validator.py` 输出校验器（长度/词汇许可/承诺检测/越界声明/越权意图；可改写→替换，不可改写→整句拒绝回退微声）
+- **feat**：`core/state_store.py` expression_log 表（id/ts/intent/instruction/llm_text/validation/level 全链路追溯+越权取证）
+- 15 项测试
+
+### P2-B LLM 抽象（9fc0542）
+- **feat**：`llm/` 子包 — LLMBackend Protocol + LLMChain 三级降级调度（主声→次声→微声）
+- **feat**：`llm/micro.py` 微声模板（指令序列化直接成句，无 LLM 兜底，失语不失灵）
+- **feat**：`llm/chain.py` SpeakResult（text+level）+ validator 集成
+- 7 项测试
+
+### P2-C 真实引擎接入（a7c01f2）
+- **feat**：`llm/deepseek.py` DeepSeek 主声引擎（标准库 urllib + asyncio.to_thread 零依赖）
+- **feat**：`llm/__init__.py` build_llm_chain 工厂（有 key 挂主声，VRAM 熔断阈值预留）
+- **feat**：chain 新增 on_degrade 回调（fallback/micro 触发，降级即感受 SA+2）
+- **feat**：config.py ELYSIA_LLM_*（base/key/model/超时/熔断阈值/降级SA增量）；.env 已建（真实 key，gitignore 排除）
+- 真实 DeepSeek 冒烟通过；测试覆盖 degrade 触发/抑制/异常吞没
+
+### P2-D TTS + 缓存 + 熔断（b54cfcb）
+- **feat**：`tts/` 子包 — backend.py（GPT-SoVITS /tts，4 情绪→参考音频映射，零依赖）
+- **feat**：`tts/cache.py` 磁盘缓存池（文本+情绪+语速为 key，低负载预合成高频短语）
+- **feat**：`tts/breaker.py` VRAM 熔断（不可知不武断，只出文本不阻塞）
+- **feat**：`tts/chain.py` 出声调度（缓存→合成→muted 三态，全程不抛出）
+- config ELYSIA_TTS_*；8 项测试
+
+### P2-E 灵魂接入 + 桌宠集成（eb47c90）
+- **feat**：`soul/expression_service.py` 表达服务（内部冲动双模态节流/外部交互强制开口→LLM→校验→TTS→落库）
+- **feat**：`soul/heartbeat.py` + `soul/main.py` 心跳接入表达管线，on_degrade 异步写 DesireSystem（LLM 降级 SA+2 / TTS 降级 SA+1）
+- **feat**：`body/pet.py` 表达气泡 QLabel（6s 自动隐藏）；`core/state_store.py` expression_log 持久化
+- 9 项验收测试
+
+### P2-F 桌宠出声 + 人设强化（67f889c / 698e8cc / 255148e）
+- **feat**（67f889c）：桌宠出声 — QMediaPlayer+QAudioOutput 播放 TTS 缓存音频，气泡显示即播放，失败静默降级仅气泡
+- **feat**（698e8cc）：爱莉希雅人设强化 — system prompt 注入语言风格（口头禅/句式/意象/真我性格，T2 硬约束不变），微声模板同步；真实冒烟「嗨♪ 傍晚的风轻轻吹过，我有一点想你……多夸夸我，好吗～♪」
+- **docs**（255148e）：OPERATION_GUIDE 全面更新（无边框窗口交互/右键输入说话/声音服务章节/故障排查对齐）
+- 144 测试全绿，ruff+mypy strict 全绿

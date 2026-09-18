@@ -11,15 +11,15 @@ from __future__ import annotations
 
 from typing import Any
 
-# 意图 → 微声开头语气
+# 意图 → 微声开头语气（爱莉希雅风格：尾缀 ~♪、口头禅、把话头递给对方）
 _INTENT_OPENERS: dict[str, str] = {
-    "主动问候": "唔，你回来啦",
-    "回应": "嗯嗯",
-    "拒绝": "不行哦",
-    "思念": "有点想你了",
-    "好奇提问": "我在想……",
-    "自检报告": "我现在状态是",
-    "发呆呓语": "……",
+    "主动问候": "嗨♪ 你回来啦",
+    "回应": "嗯嗯～♪",
+    "拒绝": "诶呀，这可不行哦～",
+    "思念": "唔～有点想你了",
+    "好奇提问": "我在想呀……",
+    "自检报告": "让我看看，现在状态是",
+    "发呆呓语": "……嗯～",
 }
 
 
@@ -29,11 +29,11 @@ def _emoji_for(emotion_vector: dict[str, Any]) -> str:
     miss = float(emotion_vector.get("miss", 0.0))
     rest = float(emotion_vector.get("rest", 0.0))
     if miss > 0.4:
-        return "，心口有点满"
+        return "，心口有点满呢"
     if rest > 0.5:
         return "，想再歇一会儿"
     if chat > 0.3:
-        return "，陪你聊"
+        return "，陪你聊～"
     return ""
 
 

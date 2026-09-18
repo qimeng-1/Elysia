@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     heartbeat_interval_s: float = 1.0
     body_heartbeat_interval_s: float = 5.0
 
+    # ── P2 LLM（§八）──────────────────────────────────────
+    llm_main_base: str = "https://api.deepseek.com"
+    llm_main_api_key: str = ""  # 真实 key 走 .env，绝不入库
+    llm_main_model: str = "deepseek-chat"
+    llm_main_timeout_s: float = 30.0
+    llm_fallback_base: str = ""
+    llm_fallback_api_key: str = ""
+    llm_fallback_model: str = "qwen:7b"
+    # 资源熔断：VRAM(MB) 超过阈值切次声/微声
+    llm_vram_threshold_mb: int = 9510
+    # 降级即感受：每次 fallback 写入感受层的 SA 增量
+    llm_degrade_sa_delta: float = 2.0
+
     def ensure_dirs(self) -> None:
         """确保运行时目录存在（灵魂/身体进程启动时调用）。"""
         for path in (self.data_dir, self.log_dir, self.run_dir):

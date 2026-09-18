@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -47,14 +49,22 @@ class LLMChain:
         validator: ExpressionValidator | None = None,
         main: LLMBackend | None = None,
         fallback: LLMBackend | None = None,
+        on_degrade: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._validator = validator if validator is not None else ExpressionValidator()
         self._main = main
         self._fallback = fallback
+        self._on_degrade = on_degrade
         self._template: dict[str, Any] = {"name": "default"}
 
     def set_template(self, template: dict[str, Any]) -> None:
         self._template = template
+
+    async def _degrade(self, reason: str) -> None:
+        """降级即感受：通知调用方（写入感受层 SA 增量，P2 §4.3）。"""
+        if self._on_degrade is not None:
+            with contextlib.suppress(Exception):  # 感受写入失败不应破坏表达链路
+                await self._on_degrade(reason)
 
     async def speak(self, instruction: dict[str, Any]) -> SpeakResult:
         """按三级顺序尝试，返回第一个通过校验的表达。
@@ -78,9 +88,11 @@ class LLMChain:
             if text:
                 result = self._validator.check(text, instruction)
                 if result.ok:
+                    await self._degrade("fallback")
                     return SpeakResult(
                         text=result.sanitized or text, level="fallback", validated=result
                     )
 
         # ── 微声：无 LLM，纯结构化，天然合规 ────────────
+        await self._degrade("micro")
         return SpeakResult(text=micro_speak(instruction), level="micro")

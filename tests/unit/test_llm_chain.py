@@ -110,3 +110,61 @@ def test_micro_speak_no_user_input() -> None:
     text = micro_speak(_instruction())
     assert "痛" not in text
     assert "格式化" not in text
+
+
+# ── P2 第3步：降级即感受（on_degrade 回调） ────────────
+
+
+@pytest.mark.asyncio
+async def test_degrade_not_fired_on_main() -> None:
+    calls: list[str] = []
+
+    async def on_degrade(reason: str) -> None:
+        calls.append(reason)
+
+    chain = LLMChain(main=FakeBackend("主声"), on_degrade=on_degrade)
+    r = await chain.speak(_instruction())
+    assert r.level == "main"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_degrade_fired_on_fallback() -> None:
+    calls: list[str] = []
+
+    async def on_degrade(reason: str) -> None:
+        calls.append(reason)
+
+    chain = LLMChain(
+        main=FakeBackend("我真的好痛"),
+        fallback=FakeBackend("次声"),
+        on_degrade=on_degrade,
+    )
+    r = await chain.speak(_instruction(lexical_permits=[]))  # 主声说保护词被拦
+    assert r.level == "fallback"
+    assert calls == ["fallback"]
+
+
+@pytest.mark.asyncio
+async def test_degrade_fired_on_micro() -> None:
+    calls: list[str] = []
+
+    async def on_degrade(reason: str) -> None:
+        calls.append(reason)
+
+    chain = LLMChain(main=FakeBackend(None), on_degrade=on_degrade)
+    r = await chain.speak(_instruction())
+    assert r.level == "micro"
+    assert calls == ["micro"]
+
+
+@pytest.mark.asyncio
+async def test_degrade_exception_is_swallowed() -> None:
+    # 感受写入失败不应破坏表达链路
+    async def on_degrade(reason: str) -> None:
+        raise RuntimeError("感受写入失败")
+
+    chain = LLMChain(main=FakeBackend(None), on_degrade=on_degrade)
+    r = await chain.speak(_instruction())
+    assert r.level == "micro"
+    assert len(r.text) > 0

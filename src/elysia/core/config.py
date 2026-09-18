@@ -48,9 +48,22 @@ class Settings(BaseSettings):
     # 降级即感受：每次 fallback 写入感受层的 SA 增量
     llm_degrade_sa_delta: float = 2.0
 
+    # ── P2 TTS（§七）──────────────────────────────────────
+    tts_gpt_sovits_url: str = "http://127.0.0.1:9880"
+    tts_cache_dir: Path = Field(default=PROJECT_ROOT / "data" / "cache" / "tts")
+    tts_text_lang: str = "zh"
+    tts_prompt_lang: str = "zh"
+    tts_timeout_s: float = 60.0
+    # 资源熔断：VRAM(MB) 超过阈值或队列拥塞 → 只输出文本不阻塞对话
+    tts_vram_threshold_mb: int = 10240
+    # 降级即感受：TTS 降级（熔断/合成失败）时写入感受层的 SA 增量
+    tts_degrade_sa_delta: float = 1.0
+    # 低负载期预合成的高频短语
+    tts_common_phrases: list[str] = Field(default_factory=lambda: ["我在", "好呀", "嗯嗯"])
+
     def ensure_dirs(self) -> None:
         """确保运行时目录存在（灵魂/身体进程启动时调用）。"""
-        for path in (self.data_dir, self.log_dir, self.run_dir):
+        for path in (self.data_dir, self.log_dir, self.run_dir, self.tts_cache_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 

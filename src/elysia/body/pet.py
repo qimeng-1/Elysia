@@ -359,9 +359,10 @@ class PetWindow(QMainWindow):
         self._bubble_until = 0.0
 
         # ── 音频播放（P2 TTS 出声：播放最新缓存 wav） ──
-        self._audio_output = QAudioOutput(self)
-        self._player = QMediaPlayer(self)
-        self._player.setAudioOutput(self._audio_output)
+        # 懒初始化：QMediaPlayer 创建时 FFmpeg 会探测系统 MFT 编解码器（H264/HEVC），
+        # HEVC 缺失会打红色 stderr 警告；仅播 wav 用不到视频编码器，故首次出声才创建。
+        self._player: QMediaPlayer | None = None
+        self._audio_output: QAudioOutput | None = None
         self._last_played_audio = ""  # 去重：同一 wav 不重复播放
 
         # ── 定时器 ──
@@ -616,8 +617,11 @@ class PetWindow(QMainWindow):
             return f"{s}秒"
         return f"{s // 60}分{s % 60}秒"
 
-    def _show_bubble(self, text: str) -> None:
-        """显示表达气泡：角色上方，展示 LLM 开口文本，BUBBLE_SHOW_S 后隐藏。"""
+    def _show_bubble(self, text: str, *, play_audio: bool = True) -> None:
+        """显示表达气泡：角色上方，展示 LLM 开口文本，BUBBLE_SHOW_S 后隐藏。
+
+        play_audio=False 时仅显示气泡（用于输入确认等非开口场景，不触发出声）。
+        """
         self._bubble.setText(text)
         self._bubble.adjustSize()
         cw, ch = self._canvas.width(), self._canvas.height()
@@ -627,7 +631,8 @@ class PetWindow(QMainWindow):
         self._bubble.show()
         self._bubble.raise_()
         self._bubble_until = time.time() + BUBBLE_SHOW_S
-        self._play_latest_audio()
+        if play_audio:
+            self._play_latest_audio()
 
     def _play_latest_audio(self) -> None:
         """播放 TTS 缓存中最新合成的 wav（同一时刻刚合成，时序对应本次表达）。
@@ -643,6 +648,11 @@ class PetWindow(QMainWindow):
             path = str(wavs[0])
             if path == self._last_played_audio:
                 return
+            # 懒初始化播放器：首次出声才创建，避免启动期 MFT 探测警告
+            if self._player is None:
+                self._audio_output = QAudioOutput(self)
+                self._player = QMediaPlayer(self)
+                self._player.setAudioOutput(self._audio_output)
             self._last_played_audio = path
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
@@ -663,6 +673,10 @@ class PetWindow(QMainWindow):
         self._write_interaction(text)
         self._canvas.poke()
         self._canvas.set_emotion("happy")
+        # 输入确认反馈：立即弹气泡，避免"点了没反应"；不出声（非开口场景）
+        self._show_bubble(f"听到啦～『{text}』", play_audio=False)
+        # 确认气泡只显示 2 秒，不占用表达气泡时长
+        self._bubble_until = time.time() + 2.0
 
     def _write_interaction(self, text: str) -> None:
         payload = json.dumps({"ts": time.time(), "text": text})

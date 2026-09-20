@@ -143,3 +143,8 @@
 - **feat**：core/state_store.py 扩展——memories/memory_index 建表 + 读写接口（add_memory/get_memory/count_memories/iterate_memories/update_memory_level/add_memory_index/decay_memory_index）；`_AsyncSQLite` 增 `submit_ret`（带返回值写操作，单写者纪律不变）
 - **决策**：记忆承载于 heartbeat.db（P0 D2 双库），表结构可导出 JSON 备异地同步（灵感池"记忆云端同步"）
 - 测试 11 项：打分边界/分层/落库往返/索引衰减；全量 147 绿，ruff+mypy strict 全绿
+
+### P3-B 三层晋升机制（9fe78b3）
+- **feat**：memory/promote.py——decide_promotion（浅层 importance/access 双阈值→工作层；工作层 importance→深层）、promote_batch、with_narrative（narrative 回退 content，情感核心永不空）、can_reach_deep
+- **设计**：细节模糊化——非珍贵记忆逐层 `detail×(1-DETAIL_DECAY_PER_LEVEL)`，珍贵 protected 永不模糊（§8.4 情感核心保留）
+- 测试 12 项；全量 159 绿，ruff+mypy strict 全绿

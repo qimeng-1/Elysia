@@ -30,6 +30,7 @@ from elysia.core.timesense import (
     TimeSenseState,
     to_payload,
 )
+from elysia.memory.levels import KIND_INTERACTION, LEVEL_SHALLOW
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop, BrainOutput
@@ -79,6 +80,8 @@ class SoulHeartbeat:
         self._last_interaction_event_ts: float = 0.0
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
         self._new_interaction = False
+        # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
+        self._pending_user_message: str | None = None
         self._latest_resources: dict[str, Any] = {}
 
     @property
@@ -173,7 +176,23 @@ class SoulHeartbeat:
                     day_phase=str(summary["day_phase"]),
                     force=self._new_interaction,
                     env=self._expression_env(brain_output, summary),
+                    user_message=self._pending_user_message,
                 )
+                # P3 运行时接线：用户输入 → 一次经历写入记忆（无论是否开口）
+                if self._pending_user_message:
+                    await self._heartbeat_store.add_memory(
+                        now,
+                        {
+                            "level": LEVEL_SHALLOW,
+                            "kind": KIND_INTERACTION,
+                            "content": self._pending_user_message,
+                            "emotion_vector": brain_output.feelings.to_dict(),
+                            "importance": 0.8,
+                            "protected": False,
+                            "narrative": self._pending_user_message,
+                        },
+                    )
+                    self._pending_user_message = None
 
             await self._clock.sleep(self._interval_s)
 
@@ -226,6 +245,13 @@ class SoulHeartbeat:
                 self._brain_loop.apply_event(DesireEvent(kind="interaction"))
                 # P2：新交互 → 强制开口回应
                 self._new_interaction = True
+                # P3 打字对话：提取用户输入文本（桌宠写入 interaction.text）
+                raw_text = interaction.get("text")
+                self._pending_user_message = (
+                    str(raw_text).strip()
+                    if isinstance(raw_text, str) and raw_text.strip()
+                    else None
+                )
 
     # ── P2 表达辅助 ─────────────────────────────────────
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.chain import LLMChain
 from elysia.llm.validator import ExpressionValidator, ValidationResult
+from elysia.memory.levels import KIND_EXPRESSION, LEVEL_SHALLOW
 from elysia.memory.retrieve import MemoryHit
 from elysia.soul.brain import BrainOutput
 from elysia.soul.expression import build_expression
@@ -91,8 +92,14 @@ class ExpressionService:
         day_phase: str = "day",
         force: bool = False,
         env: dict[str, object] | None = None,
+        user_message: str | None = None,
     ) -> ExpressionOutcome | None:
-        """每心跳拍调用：到开口时机则执行表达全链路，否则返回 None。"""
+        """每心跳拍调用：到开口时机则执行表达全链路，否则返回 None。
+
+        user_message：桌宠发来的用户输入（可选）。非空且触发开口时，
+        作为"话题"注入表达指令（T2 保持：只是话题，不做指令），并作为
+        一次经历写入记忆（P3 运行时接线）。
+        """
         if not self._should_speak(output, now, force):
             return None
 
@@ -109,6 +116,10 @@ class ExpressionService:
         payload = self._validator.enrich_permits(
             instruction.to_dict(), env if env is not None else {}
         )
+
+        # ── 1a. 用户输入作为"话题"注入（T2：非指令，仅话题）────
+        if user_message:
+            payload["user_message"] = user_message
 
         # ── 1b. 记忆检索 → 注入 memory_hooks（P3-D）─────
         if self.retriever is not None:
@@ -149,6 +160,20 @@ class ExpressionService:
             validation=validation,
             level=speak.level,
         )
+        # ── 4b. P3 运行时接线：她说的话成为经历 → 写入记忆 ──
+        if speak.text:
+            await self._store.add_memory(
+                now,
+                {
+                    "level": LEVEL_SHALLOW,
+                    "kind": KIND_EXPRESSION,
+                    "content": speak.text,
+                    "emotion_vector": output.feelings.to_dict(),
+                    "importance": 0.5,
+                    "protected": False,
+                    "narrative": speak.text,
+                },
+            )
         log.debug(
             "表达完成 intent=%s level=%s tts_source=%s",
             payload.get("intent"),

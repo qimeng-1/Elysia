@@ -28,6 +28,7 @@ from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense, from_payload
 from elysia.llm import build_llm_chain
+from elysia.memory.retrieve import retrieve_from_store
 from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireEvent, DesireSystem
@@ -103,7 +104,12 @@ async def _run(settings: Settings) -> int:
         settings,
         on_degrade=lambda _reason: _on_degrade("tts", settings.tts_degrade_sa_delta),
     )
-    expression = ExpressionService(llm_chain, heartbeat_store, tts_chain=tts_chain)
+    expression = ExpressionService(
+        llm_chain,
+        heartbeat_store,
+        tts_chain=tts_chain,
+        retriever=retrieve_from_store,
+    )
 
     heartbeat = SoulHeartbeat(
         state_store=state_store,

@@ -70,9 +70,23 @@ from elysia.memory.retrieve import (
     select_hooks,
 )
 from elysia.memory.scorer import emotion_strength, importance, record_importance
+from elysia.memory.sleep import (
+    DREAM_MAX_FRAGMENTS as DREAM_MAX_FRAGMENTS,
+)
+from elysia.memory.sleep import (
+    DREAM_MIN_FRAGMENTS as DREAM_MIN_FRAGMENTS,
+)
+from elysia.memory.sleep import (
+    Dream as Dream,
+)
+from elysia.memory.sleep import (
+    synthesize_dream,
+)
 
 __all__ = [
     "DETAIL_DECAY_PER_LEVEL",
+    "DREAM_MAX_FRAGMENTS",
+    "DREAM_MIN_FRAGMENTS",
     "GAP_EVENT_KIND",
     "GAP_INTENSITY_MAX",
     "KINDS",
@@ -94,6 +108,7 @@ __all__ = [
     "PROTECTED_DECAY_SLOWDOWN",
     "STRENGTH_RETRIEVE_FLOOR",
     "STRENGTH_TAU_DAYS",
+    "Dream",
     "GapSignal",
     "MemoryRecord",
     "Promotion",
@@ -113,5 +128,6 @@ __all__ = [
     "retrieve_latency_ms",
     "score_memory",
     "select_hooks",
+    "synthesize_dream",
     "with_narrative",
 ]

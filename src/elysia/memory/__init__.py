@@ -14,6 +14,24 @@
 
 from __future__ import annotations
 
+from elysia.memory.decay import (
+    LATENCY_30D_MS,
+    LATENCY_90D_MS,
+    LATENCY_365D_MS,
+    LATENCY_DAYS_BASE,
+    PROTECTED_DECAY_SLOWDOWN,
+    STRENGTH_RETRIEVE_FLOOR,
+    STRENGTH_TAU_DAYS,
+    decay_strength,
+    effective_age_days,
+    retrieve_latency_ms,
+)
+from elysia.memory.hooks import (
+    GAP_EVENT_KIND,
+    GAP_INTENSITY_MAX,
+    GapSignal,
+    detect_gap,
+)
 from elysia.memory.levels import (
     DETAIL_DECAY_PER_LEVEL,
     KIND_EXPRESSION,
@@ -43,11 +61,17 @@ from elysia.memory.scorer import emotion_strength, importance, record_importance
 
 __all__ = [
     "DETAIL_DECAY_PER_LEVEL",
+    "GAP_EVENT_KIND",
+    "GAP_INTENSITY_MAX",
     "KINDS",
     "KIND_EXPRESSION",
     "KIND_INTERACTION",
     "KIND_INTERNAL",
     "KIND_STATE",
+    "LATENCY_30D_MS",
+    "LATENCY_90D_MS",
+    "LATENCY_365D_MS",
+    "LATENCY_DAYS_BASE",
     "LEVELS",
     "LEVEL_DEEP",
     "LEVEL_SHALLOW",
@@ -55,15 +79,23 @@ __all__ = [
     "PROMOTE_SHALLOW_ACCESS",
     "PROMOTE_SHALLOW_IMPORTANCE",
     "PROMOTE_WORKING_IMPORTANCE",
+    "PROTECTED_DECAY_SLOWDOWN",
+    "STRENGTH_RETRIEVE_FLOOR",
+    "STRENGTH_TAU_DAYS",
+    "GapSignal",
     "MemoryRecord",
     "Promotion",
     "can_reach_deep",
+    "decay_strength",
     "decide_promotion",
     "default_narrative",
+    "detect_gap",
+    "effective_age_days",
     "emotion_strength",
     "importance",
     "level_rank",
     "promote_batch",
     "record_importance",
+    "retrieve_latency_ms",
     "with_narrative",
 ]

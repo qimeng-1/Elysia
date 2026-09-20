@@ -41,6 +41,7 @@ EVENT_PULSES: dict[str, dict[str, float]] = {
     "distress_off": {"tr": 1.0, "cs": 0.0, "sa": -3.0},  # 难受解除
     "silence": {"tr": -0.5, "cs": -1.0, "sa": 1.0},  # 长时间无交互衰减
     "degrade": {"tr": 0.0, "cs": 0.0, "sa": 1.0},  # P2：表达/语音降级（SA 增量由 intensity 承载）
+    "memory_gap": {"tr": 0.8, "cs": 0.0, "sa": 0.0},  # P3：记忆缺口 → 好奇（TR 微升，非焦虑）
 }
 
 # ── 慢尺度演化阈值 ──────────────────────────────────────

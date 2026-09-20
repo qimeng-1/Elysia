@@ -669,14 +669,14 @@ class PetWindow(QMainWindow):
         self._canvas.set_emotion("happy")
 
     def _submit_interaction(self, text: str) -> None:
-        """提交文本交互 → 写入 DB + 即时反馈。"""
+        """提交文本交互 → 写入 DB + 即时反馈。
+
+        现在有真实回复了，不再弹"听到啦"确认气泡——回复气泡由灵魂表达
+        管线产生（thought_log），认证反馈留给气泡自身即可。
+        """
         self._write_interaction(text)
         self._canvas.poke()
         self._canvas.set_emotion("happy")
-        # 输入确认反馈：立即弹气泡，避免"点了没反应"；不出声（非开口场景）
-        self._show_bubble(f"听到啦～『{text}』", play_audio=False)
-        # 确认气泡只显示 2 秒，不占用表达气泡时长
-        self._bubble_until = time.time() + 2.0
 
     def _write_interaction(self, text: str) -> None:
         payload = json.dumps({"ts": time.time(), "text": text})

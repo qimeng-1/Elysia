@@ -57,6 +57,18 @@ from elysia.memory.promote import (
     promote_batch,
     with_narrative,
 )
+from elysia.memory.retrieve import (
+    MAX_HOOKS as MAX_HOOKS,
+)
+from elysia.memory.retrieve import (
+    MemoryHit as MemoryHit,
+)
+from elysia.memory.retrieve import (
+    mood_similarity,
+    retrieve_from_store,
+    score_memory,
+    select_hooks,
+)
 from elysia.memory.scorer import emotion_strength, importance, record_importance
 
 __all__ = [
@@ -94,8 +106,12 @@ __all__ = [
     "emotion_strength",
     "importance",
     "level_rank",
+    "mood_similarity",
     "promote_batch",
     "record_importance",
+    "retrieve_from_store",
     "retrieve_latency_ms",
+    "score_memory",
+    "select_hooks",
     "with_narrative",
 ]

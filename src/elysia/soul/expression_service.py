@@ -11,16 +11,21 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.chain import LLMChain
 from elysia.llm.validator import ExpressionValidator, ValidationResult
+from elysia.memory.retrieve import MemoryHit
 from elysia.soul.brain import BrainOutput
 from elysia.soul.expression import build_expression
 from elysia.tts.chain import TTSChain, TTSRequest, TTSResult
 
 log = logging.getLogger("elysia.soul.expression")
+
+# 记忆检索回调：给定存储 + 当前感受 → 返回待注入表达的记忆
+MemoryRetriever = Callable[[HeartbeatStore, dict[str, float]], "Awaitable[list[MemoryHit]]"]
 
 # 内部冲动表达节流：与发呆双模态同节奏（3min / 10min）
 EXPRESS_ACTIVE_INTERVAL_S = 180.0
@@ -49,11 +54,13 @@ class ExpressionService:
         validator: ExpressionValidator | None = None,
         llm_degrade_sa_delta: float = 2.0,
         tts_degrade_sa_delta: float = 1.0,
+        retriever: MemoryRetriever | None = None,
     ) -> None:
         self._llm = llm_chain
         self._store = heartbeat_store
         self._tts = tts_chain
         self._validator = validator if validator is not None else ExpressionValidator()
+        self.retriever = retriever
         self._last_express_ts: float | None = None
         # 降级 SA 增量（由 DesireSystem 消费方注入 on_degrade 时生效）
         self.llm_degrade_sa_delta = llm_degrade_sa_delta
@@ -102,6 +109,12 @@ class ExpressionService:
         payload = self._validator.enrich_permits(
             instruction.to_dict(), env if env is not None else {}
         )
+
+        # ── 1b. 记忆检索 → 注入 memory_hooks（P3-D）─────
+        if self.retriever is not None:
+            hooks = await self.retriever(self._store, output.feelings.to_dict())
+            if hooks:
+                payload["memory_hooks"] = [h.narrative for h in hooks]
 
         # ── 2. LLM 翻译 → 校验 ───────────────────────────
         speak = await self._llm.speak(payload)

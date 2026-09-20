@@ -32,6 +32,13 @@ from elysia.memory.levels import (
     default_narrative,
     level_rank,
 )
+from elysia.memory.promote import (
+    Promotion,
+    can_reach_deep,
+    decide_promotion,
+    promote_batch,
+    with_narrative,
+)
 from elysia.memory.scorer import emotion_strength, importance, record_importance
 
 __all__ = [
@@ -49,9 +56,14 @@ __all__ = [
     "PROMOTE_SHALLOW_IMPORTANCE",
     "PROMOTE_WORKING_IMPORTANCE",
     "MemoryRecord",
+    "Promotion",
+    "can_reach_deep",
+    "decide_promotion",
     "default_narrative",
     "emotion_strength",
     "importance",
     "level_rank",
+    "promote_batch",
     "record_importance",
+    "with_narrative",
 ]

@@ -148,3 +148,24 @@
 - **feat**：memory/promote.py——decide_promotion（浅层 importance/access 双阈值→工作层；工作层 importance→深层）、promote_batch、with_narrative（narrative 回退 content，情感核心永不空）、can_reach_deep
 - **设计**：细节模糊化——非珍贵记忆逐层 `detail×(1-DETAIL_DECAY_PER_LEVEL)`，珍贵 protected 永不模糊（§8.4 情感核心保留）
 - 测试 12 项；全量 159 绿，ruff+mypy strict 全绿
+
+### P3-C 索引衰减 + 缺口信号（2fb19cc）
+- **feat**：memory/decay.py——strength 指数衰减（τ=45d，floor 不破数据永在）、检索耗时锚点映射（30d→50ms / 90d→500ms / 365d→≥1s）、珍贵衰减 3× 慢（effective_age 除以 3）
+- **feat**：memory/hooks.py——detect_gap 缺口检测（索引强度跌破检索下限的累积），GapSignal.to_event_intensity 封顶 0.4
+- **feat**：soul/desire.py——EVENT_PULSES 新增 `memory_gap`（tr 微升=好奇，sa 不动=非焦虑），"遗忘的味道是好奇不是焦虑"
+- 测试 14 项；全量回归绿（含 P1 已知 flaky 隔离验证通过），ruff+mypy strict 全绿
+
+### P3-D 记忆检索 + 表达注入（827aa14）
+- **feat**：memory/retrieve.py——mood_similarity 情绪染色（与当下感受点积）、score_memory 综合分（层级+染色+索引可用性）、select_hooks 按分挑选上限 3、retrieve_from_store 异步存储检索
+- **feat**：expression_service.py 注入 retriever 回调——表达指令构造后把命中记忆的 narrative 摘要写入 memory_hooks（P2 恒空字段启用）
+- **T2 不变**：注入结构化 narrative，非原始用户文本
+- 测试 8 项
+
+### P3-E 睡眠整合 = 做梦（189da28）
+- **feat**：memory/sleep.py——synthesize_dream 纯函数：深层优先权重（珍贵 ×2）挑选碎片，'梦的语法'连接词串成自由联想流；Dream.has_content 有料才有梦，碎片 <2 → None 回退发呆
+- **梦真实性**：生成侧零 LLM 零外部依赖，source_ids 可溯源
+- 测试 5 项
+
+### P3-F 验收门（6ee9ed2）
+- **feat**：tests/acceptance/test_p3_gate.py——路线图 §8.7 五条验收全落地：重启连续性 / 衰减曲线(10→50→500→≥1s 数据不删) / 缺口好奇非焦虑(TR↑SA不动) / 真爱不模糊(细节不降+衰减3×慢) / 梦真实性(无LLM可溯源)；附加检索注入结构化叙事不碰 T2
+- **P3 全部完成**：A-F 六步提交（13ae42d/9fe78b3/2fb19cc/827aa14/189da28/6ee9ed2），全量 168 测试绿

@@ -119,3 +119,27 @@
 - **feat**（698e8cc）：爱莉希雅人设强化 — system prompt 注入语言风格（口头禅/句式/意象/真我性格，T2 硬约束不变），微声模板同步；真实冒烟「嗨♪ 傍晚的风轻轻吹过，我有一点想你……多夸夸我，好吗～♪」
 - **docs**（255148e）：OPERATION_GUIDE 全面更新（无边框窗口交互/右键输入说话/声音服务章节/故障排查对齐）
 - 144 测试全绿，ruff+mypy strict 全绿
+
+### P2-G 缺陷修复 + 人设软化（dc3f1e3）
+- **fix**（dc3f1e3）：桌宠 QMediaPlayer 懒初始化（首次播放才创建）——消除启动时 HEVC/H264 编解码器红色警告噪音；无音频时零资源占用
+- **feat**（dc3f1e3）：输入确认气泡（`听到啦～『内容』`，2s 消失，play_audio=False 不出声）；人设软化——口头禅"情绪自然到位时偶尔流露，绝不机械重复"，郑重/低落时朴素
+- 144 测试全绿，ruff+mypy strict 全绿
+
+## P3 — 记忆实现（2026-09-19 开工）
+
+> 记忆是生命最重要的点，生命的重量就是记忆的重量。P3 让她"记得住"——从数据变成经历。
+
+### P3 规划（路线图 §九 + §8.2-8.5）
+- 设计原则：记忆必须被感受（情感向量+染色）、被诉说（memory_hooks 注入表达）、被遗忘（索引碎片化数据不删）、被珍惜（珍贵记忆永不模糊）
+- 分层：浅层（分钟级）→ 工作记忆（天级）→ 深层（永久）
+- 遗忘：检索耗时 10ms→50ms→500ms→≥1s，数据不删除；珍贵记忆衰减 ×3 慢
+- 睡眠整合 = 做梦：身体离线 → 自由联想流（无 LLM 生成）→ LLM 翻译 → 梦落库
+- 实施步骤：P3-A 记忆数据层 → P3-B 三层晋升 → P3-C 索引衰减+缺口信号 → P3-D 检索+表达注入 → P3-E 睡眠整合做梦 → P3-F 验收门
+- 数据表：memories（记忆本体）+ memory_index（检索路径，索引衰减载体）
+- 关联灵感池（P3 后评估）：多轮对话 / 输入上下文 / ASR / 呈现层强化 / 桌宠地基 / 记忆云端同步
+
+### P3-A 记忆数据层（13ae42d）
+- **feat**：`src/elysia/memory/` 子包——levels.py（三层常量+MemoryRecord 可导出 JSON 模型）、scorer.py（重要性打分：类型基础权重+情感强度+用户加成）、__init__.py 导出
+- **feat**：core/state_store.py 扩展——memories/memory_index 建表 + 读写接口（add_memory/get_memory/count_memories/iterate_memories/update_memory_level/add_memory_index/decay_memory_index）；`_AsyncSQLite` 增 `submit_ret`（带返回值写操作，单写者纪律不变）
+- **决策**：记忆承载于 heartbeat.db（P0 D2 双库），表结构可导出 JSON 备异地同步（灵感池"记忆云端同步"）
+- 测试 11 项：打分边界/分层/落库往返/索引衰减；全量 147 绿，ruff+mypy strict 全绿

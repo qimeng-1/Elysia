@@ -20,6 +20,7 @@ from elysia.memory.retrieve import (
     MemoryHit,
     mood_similarity,
     retrieve_from_store,
+    score_breakdown,
     score_memory,
     select_hooks,
 )
@@ -32,6 +33,7 @@ def _rec(
     narrative: str = "一段记忆叙事",
     mid: int | None = 1,
     created_ts: float = 1.0,
+    importance: float = 0.7,
 ) -> MemoryRecord:
     return MemoryRecord(
         id=mid,
@@ -39,7 +41,7 @@ def _rec(
         kind=KIND_INTERACTION,
         content="内容",
         emotion_vector=emotion if emotion is not None else {"chat": 0.5},
-        importance=0.7,
+        importance=importance,
         level=level,
         access_count=1,
         protected=False,
@@ -55,6 +57,14 @@ def test_mood_similarity_matches_overlapping_dims() -> None:
     assert score > 0.0  # 有共同感受 → 正匹配
     # 无关维度不算分
     assert mood_similarity({"explore": 0.8}, {"miss": 0.9}) == 0.0
+
+
+def test_mood_similarity_is_cosine_not_magnitude() -> None:
+    """情绪强度大 ≠ 更匹配：同一方向应得同一分（否则聊天时全体通吃）。"""
+    mood = {"miss": 0.4, "chat": 0.6}
+    strong = {"miss": 0.8, "chat": 1.2}
+    weak = {"miss": 0.2, "chat": 0.3}
+    assert mood_similarity(strong, mood) == pytest.approx(mood_similarity(weak, mood), abs=0.01)
 
 
 def test_mood_similarity_empty() -> None:
@@ -73,6 +83,24 @@ def test_score_memory_index_availability() -> None:
     fresh = score_memory(_rec(), current_mood={}, index_strength=0.9)
     faded = score_memory(_rec(), current_mood={}, index_strength=0.1)
     assert fresh > faded  # 索引强的记忆更易召回
+
+
+def test_score_breakdown_includes_importance() -> None:
+    """得分的"本身价值"项必须存在：重要度要真的参与打分，否则形同摆设。"""
+    parts = score_breakdown(_rec(importance=0.8), {"chat": 0.5})
+    assert set(parts) == {"level", "emotion", "index", "importance", "recency"}
+    assert parts["importance"] == pytest.approx(0.4)
+
+
+def test_score_memory_fact_beats_small_talk() -> None:
+    """回归：同类、同心情、同时间下，有意义的事（高重要度）必须压过闲聊。"""
+    mood = {"chat": 0.8, "explore": 0.5}
+    now = 10 * 86400.0
+    small_talk = _rec(
+        mid=1, level=LEVEL_SHALLOW, importance=0.37, created_ts=now - 3600, emotion=mood
+    )
+    fact = _rec(mid=2, level=LEVEL_DEEP, importance=0.97, created_ts=now - 3600, emotion=mood)
+    assert score_memory(fact, mood, now=now) > score_memory(small_talk, mood, now=now)
 
 
 def test_score_memory_recency_boosts_recent_over_old() -> None:

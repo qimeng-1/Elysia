@@ -37,6 +37,7 @@ from elysia.memory.levels import (
     MemoryRecord,
 )
 from elysia.memory.promote import promote_batch
+from elysia.memory.scorer import importance
 from elysia.memory.supersede import find_superseded
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
@@ -194,14 +195,21 @@ class SoulHeartbeat:
                 # P3 运行时接线：用户输入 → 一次经历写入记忆（无论是否开口）
                 if self._pending_user_message:
                     msg = self._pending_user_message
+                    feelings = brain_output.feelings.to_dict()
+                    # 重要性按内容信号评估（不再是固定值）：闲聊留浅层，事实才沉淀
                     new_id = await self._heartbeat_store.add_memory(
                         now,
                         {
                             "level": LEVEL_SHALLOW,
                             "kind": KIND_INTERACTION,
                             "content": msg,
-                            "emotion_vector": brain_output.feelings.to_dict(),
-                            "importance": 0.8,
+                            "emotion_vector": feelings,
+                            "importance": importance(
+                                kind=KIND_INTERACTION,
+                                emotion_vector=feelings,
+                                content=msg,
+                                user_related=True,
+                            ),
                             "protected": False,
                             "narrative": msg,
                         },

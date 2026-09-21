@@ -3,7 +3,7 @@
 检索流程（P2 表达链 P3-D 启用 memory_hooks）：
 1. 候选：从 memories 读取可用记忆（按层级/重要性倾向活跃记忆）
 2. 衰减过滤：memory_index 强度跌破下限的记忆索引弱化 → 降低候选分
-3. 情绪染色：候选记忆的情感向量与"当下感受"点积 → 匹配者优先
+3. 情绪染色：候选记忆的情感向量与"当下感受"的**余弦**相似度 → 同一种心情者优先
    （回忆被当下状态染色——"被感受"原则）
 4. 输出：返回 narrative 摘要数组，供表达指令 memory_hooks 注入
 
@@ -13,6 +13,7 @@ LLM 消费结构而非原始用户文本。
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from elysia.memory.levels import (
@@ -35,23 +36,44 @@ LEVEL_WEIGHT: dict[str, float] = {
 
 # 越权对抗：narrative 提供的情感词必须当下真实存在，否则 LLM 用词会被拦
 
+# 得分权重（score_memory = 下列各项之和）
+LEVEL_COEF = 0.6  # 层级：长期沉淀的深度
+EMOTION_COEF = 0.4  # 情绪染色：是否"同一种心情"
+INDEX_COEF = 0.3  # 索引可用性：好不好找（遗忘的物理体现）
+IMPORTANCE_COEF = 0.5  # 本身价值：由内容信号评估的重要性（scorer.py）
+
+# 情绪染色只看这 4 维（rest/self_check 是身体状态，不参与"感同身受"）
+_MOOD_DIMS = ("miss", "chat", "curiosity", "explore")
+
 
 def _level_weight(level: str) -> float:
     return LEVEL_WEIGHT.get(level, 0.5)
 
 
 def mood_similarity(emotion_vector: dict[str, float], current_mood: dict[str, float]) -> float:
-    """候选记忆情感向量与"当下感受"的匹配度（点积相似）。
+    """候选记忆情感向量与"当下感受"的**余弦**相似度（0-1）。
 
     - 记忆情感向量：该记忆记录时的感受
     - 当下感受：当前 6 维感受（发现"和现在一样的感觉"→ 想让对方知道）
+
+    用余弦而非点积（P3-N）：点积会按"情绪强度"放大——一场对话里所有记忆的
+    感受向量几乎相同，点积把它们一起抬高到上限，等于没有区分度；余弦只比方向
+    （是不是同一种心情），与强度无关。
     """
     if not emotion_vector or not current_mood:
         return 0.0
-    score = 0.0
-    for dim in ("miss", "chat", "curiosity", "explore"):
-        score += emotion_vector.get(dim, 0.0) * current_mood.get(dim, 0.0)
-    return round(score, 3)
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for dim in _MOOD_DIMS:
+        a = emotion_vector.get(dim, 0.0)
+        b = current_mood.get(dim, 0.0)
+        dot += a * b
+        norm_a += a * a
+        norm_b += b * b
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return round(dot / math.sqrt(norm_a * norm_b), 3)
 
 
 @dataclass
@@ -72,7 +94,7 @@ def score_breakdown(
     index_strength: float = 1.0,
     now: float | None = None,
 ) -> dict[str, float]:
-    """单条记忆的得分构成（观测/调试用）：层级 / 情绪 / 索引 / 新鲜度。
+    """单条记忆的得分构成（观测/调试用）：层级 / 情绪 / 索引 / 重要度 / 新鲜度。
 
     score_memory = 本函数各项之和（保持单一事实源，避免 UI 复刻打分逻辑）。
     """
@@ -81,9 +103,10 @@ def score_breakdown(
     availability = max(0.0, min(1.0, index_strength))
     recency = _recency_factor(record.created_ts, now) if now is not None else 0.0
     return {
-        "level": round(level_w * 0.6, 3),
-        "emotion": round(emotion * 0.8, 3),
-        "index": round(availability * 0.3, 3),
+        "level": round(level_w * LEVEL_COEF, 3),
+        "emotion": round(emotion * EMOTION_COEF, 3),
+        "index": round(availability * INDEX_COEF, 3),
+        "importance": round(record.importance * IMPORTANCE_COEF, 3),
         "recency": recency,
     }
 
@@ -97,7 +120,10 @@ def score_memory(
 ) -> float:
     """单条记忆的检索得分。
 
-    分数 = 层级权重 + 情绪染色 + 索引可用性 + 新鲜度（短期优先）。
+    分数 = 层级权重 + 情绪染色 + 索引可用性 + 本身价值 + 新鲜度（短期优先）。
+    两个问题分开回答：
+    - "值不值得被想起" → 层级 + 重要度（内容信号评估的结果）
+    - "此刻容不容易浮上来" → 情绪染色 + 索引 + 新鲜度
     短期记忆（几天内）应可靠召回——这是"记得上周的大餐"的保证；
     得分随年龄衰减，但多日记忆仍按重要性/情绪排序。
     """

@@ -369,7 +369,8 @@ class MemoryBrowser(QMainWindow):
             "",
             f"—— 当下得分 {total:.3f}（当前感受 {mood or '∅'}）——",
             f"  层级 {parts['level']:.3f}｜情绪 {parts['emotion']:.3f}"
-            f"｜索引 {parts['index']:.3f}｜新鲜 {parts['recency']:.3f}",
+            f"｜索引 {parts['index']:.3f}｜重要 {parts['importance']:.3f}"
+            f"｜新鲜 {parts['recency']:.3f}",
         ]
         self._detail.setPlainText("\n".join(lines))
 

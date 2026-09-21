@@ -19,6 +19,7 @@ from elysia.llm.chain import LLMChain
 from elysia.llm.validator import ExpressionValidator, ValidationResult
 from elysia.memory.levels import KIND_EXPRESSION, LEVEL_SHALLOW
 from elysia.memory.retrieve import MemoryHit
+from elysia.memory.scorer import importance
 from elysia.soul.brain import BrainOutput
 from elysia.soul.expression import build_expression
 from elysia.tts.chain import TTSChain, TTSRequest, TTSResult
@@ -162,14 +163,20 @@ class ExpressionService:
         )
         # ── 4b. P3 运行时接线：她说的话成为经历 → 写入记忆 ──
         if speak.text:
+            feelings = output.feelings.to_dict()
+            # 重要性按内容信号评估（不再是固定值）：呓语留浅层，有分量的话才沉淀
             await self._store.add_memory(
                 now,
                 {
                     "level": LEVEL_SHALLOW,
                     "kind": KIND_EXPRESSION,
                     "content": speak.text,
-                    "emotion_vector": output.feelings.to_dict(),
-                    "importance": 0.5,
+                    "emotion_vector": feelings,
+                    "importance": importance(
+                        kind=KIND_EXPRESSION,
+                        emotion_vector=feelings,
+                        content=speak.text,
+                    ),
                     "protected": False,
                     "narrative": speak.text,
                 },

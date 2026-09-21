@@ -179,3 +179,59 @@ async def test_retrieve_from_store(tmp_path: Path) -> None:
     assert hooks[0].narrative == "你在深夜陪我聊天的回忆"
     # 校验 hook 命中确实带叙事
     assert {"你在深夜陪我聊天的回忆", "普通日常"} == {h.narrative for h in hooks}
+
+
+@pytest.mark.asyncio
+async def test_retrieve_touches_access_count(tmp_path: Path) -> None:
+    """检索命中要递增 access_count（P3-B 浅层→工作晋升依据）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    mid = await store.add_memory(
+        1.0,
+        {
+            "level": LEVEL_SHALLOW,
+            "kind": KIND_INTERACTION,
+            "content": "昨天的经历",
+            "emotion_vector": {"chat": 0.9},
+            "importance": 0.3,
+            "protected": False,
+            "narrative": "昨天的经历",
+        },
+    )
+    hooks = await retrieve_from_store(store, {"chat": 1.0}, now=10.0)
+    rec = await store.get_memory(mid)
+    assert hooks  # 有命中
+    assert rec is not None
+    assert rec["access_count"] == 1  # 命中一次 → 计数 +1
+    assert rec["last_access_ts"] == 10.0
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_retrieve_uses_index_strength(tmp_path: Path) -> None:
+    """索引 strength 参与打分：同记忆索引弱 → 分更低（P3-C 遗忘消费方）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    mid = await store.add_memory(
+        1.0,
+        {
+            "level": LEVEL_SHALLOW,
+            "kind": KIND_INTERACTION,
+            "content": "一段往事",
+            "emotion_vector": {"chat": 0.9},
+            "importance": 0.5,
+            "protected": False,
+            "narrative": "一段往事",
+        },
+    )
+    idx_id = await store.add_memory_index(
+        memory_id=mid, path_key="main", strength=1.0, emotions=0.0
+    )
+    # 未衰减：默认可用性 1.0
+    hooks = await retrieve_from_store(store, {"chat": 1.0}, now=10.0)
+    assert hooks[0].score > 0.8
+    # 索引衰减到 floor 以下：可用性被拉低
+    await store.decay_memory_index([(idx_id, 0.1)])
+    hooks2 = await retrieve_from_store(store, {"chat": 1.0}, now=10.0)
+    assert hooks2[0].score < hooks[0].score
+    await store.close()

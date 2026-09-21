@@ -30,6 +30,7 @@ from elysia.core.timesense import (
     TimeSenseState,
     to_payload,
 )
+from elysia.memory.decay import STRENGTH_RETRIEVE_FLOOR, decay_strength
 from elysia.memory.levels import (
     KIND_INTERACTION,
     LEVEL_SHALLOW,
@@ -214,15 +215,23 @@ class SoulHeartbeat:
             await self._clock.sleep(self._interval_s)
 
     async def _maintain_memories(self, now: float) -> None:
-        """P3 记忆生命周期维护：扫描全部记忆，晋升浅层→工作→深层并落库。
+        """P3 记忆生命周期维护：晋升 + 索引衰减（遗忘的物理实现）。
 
         这是记忆"沉淀"的关键——否则所有经历永远停在浅层，无法在长期内
         以更高权重被召回（短期可靠性由新鲜度保证，这里管长期持久化）。
+
+        两个动作：
+        1. 晋升：浅层→工作→深层（P3-B decide_promotion 的运行时落库）
+        2. 索引衰减：为每条记忆建/维护 memory_index strength——
+           按年龄指数衰减（P3-C decay_strength），protected 慢 3 倍。
+           检索时索引 strength 拉低 score → "越久越难被想起"。
         """
         records = await self._heartbeat_store.iterate_memories()
         if not records:
             return
         mem_records = [MemoryRecord.from_dict(d) for d in records]
+
+        # ── 1. 晋升 ──────────────────────────────────────
         promotions = promote_batch(mem_records)
         for promo in promotions:
             if promo.memory_id is None:
@@ -232,6 +241,44 @@ class SoulHeartbeat:
                 level=promo.level,
                 detail_level=promo.detail_level,
             )
+
+        # ── 2. 索引衰减：建缺失索引 + 按年龄衰减 strength ──
+        index_rows = await self._heartbeat_store.iterate_memory_index()
+        strength_by_mid: dict[int, float] = {mid: s for _, mid, s, _ in index_rows}
+        index_id_by_mid: dict[int, int] = {mid: iid for iid, mid, _, _ in index_rows}
+
+        for rec in mem_records:
+            mid = rec.id
+            if mid is None:
+                continue
+            if mid not in strength_by_mid:
+                # 新记忆：建索引（默认 strength 1.0，fresh）
+                iid = await self._heartbeat_store.add_memory_index(
+                    memory_id=mid,
+                    path_key="main",
+                    strength=1.0,
+                    emotions=0.0,
+                    last_retrieve_ts=now,
+                )
+                index_id_by_mid[mid] = iid
+                strength_by_mid[mid] = 1.0
+
+        updates: list[tuple[int, float]] = []
+        for rec in mem_records:
+            mid = rec.id
+            if mid is None or mid not in strength_by_mid:
+                continue
+            age_days = max(0.0, (now - rec.created_ts) / 86400.0)
+            new_strength = decay_strength(
+                strength_by_mid[mid],
+                age_days,
+                protected=rec.protected,
+                floor=STRENGTH_RETRIEVE_FLOOR,
+            )
+            updates.append((index_id_by_mid[mid], new_strength))
+
+        if updates:
+            await self._heartbeat_store.decay_memory_index(updates)
 
     async def _sync_body_status(self, now: float) -> None:
         """身体在场状态 → TimeSenseState + 难受检测 + 交互事件 → 感受层。"""

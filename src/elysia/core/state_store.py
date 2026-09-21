@@ -360,18 +360,20 @@ class HeartbeatStore(_AsyncSQLite):
         strength: float,
         emotions: float,
         last_retrieve_ts: float | None = None,
-    ) -> None:
-        """为记忆建立检索索引路径（P3 §8.3 索引衰减的载体）。"""
+    ) -> int:
+        """为记忆建立检索索引路径（P3 §8.3 索引衰减的载体），返回索引行 id。"""
 
-        def _add(conn: sqlite3.Connection) -> None:
-            conn.execute(
+        def _add(conn: sqlite3.Connection) -> int:
+            cur = conn.execute(
                 "INSERT INTO memory_index (memory_id, path_key, last_retrieve_ts,"
                 " strength, emotions) VALUES (?, ?, ?, ?, ?)",
                 (memory_id, path_key, last_retrieve_ts, strength, emotions),
             )
             conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
 
-        await self.submit(_add)
+        return int(await self.submit_ret(_add))
 
     async def decay_memory_index(self, updated: list[tuple[int, float]]) -> None:
         """批量更新索引 strength（P3-C 索引衰减落库）。"""
@@ -385,6 +387,29 @@ class HeartbeatStore(_AsyncSQLite):
             conn.commit()
 
         await self.submit(_decay)
+
+    async def touch_memory(self, memory_id: int, ts: float) -> None:
+        """检索命中记忆：递增 access_count + 更新 last_access_ts（P3-B 晋升依据）。"""
+
+        def _touch(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE memories SET access_count = access_count + 1,"
+                " last_access_ts = ? WHERE id = ?",
+                (ts, memory_id),
+            )
+            conn.commit()
+
+        await self.submit(_touch)
+
+    async def iterate_memory_index(self) -> list[tuple[int, int, float, float]]:
+        """遍历全部索引行：(index_id, memory_id, strength, last_retrieve_ts)。"""
+        rows = await self.execute_raw(
+            "SELECT id, memory_id, strength, last_retrieve_ts FROM memory_index"
+        )
+        return [
+            (int(r[0]), int(r[1]), float(r[2]), float(r[3]) if r[3] is not None else 0.0)
+            for r in rows
+        ]
 
     async def gaps(self, threshold_s: float, beat_type: str = "soul") -> list[tuple[float, float]]:
         """心跳空洞：相邻间隔 > 阈值的区间 [(gap_start, gap_end), ...]。

@@ -18,6 +18,7 @@ from elysia.core.clock import SimulatedClock
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense
+from elysia.memory.levels import KIND_INTERACTION
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireSystem
 from elysia.soul.distress import DISTRESS_INTERVAL_S
@@ -141,3 +142,50 @@ class _FakeStore:
 class _FakeHB:
     async def append(self, *args, **kwargs):
         return None
+
+
+@pytest.mark.asyncio
+async def test_maintain_memories_promotes_and_decays_index(tmp_path: Path) -> None:
+    """记忆维护：高重要性记忆晋升 working，旧索引 strength 衰减（遗忘接线）。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=False)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        # 高重要性 interaction（≥0.4 应浅层→工作）+ 低重要性（不晋升）
+        high = await heartbeat_store.add_memory(
+            1.0,
+            {
+                "level": "shallow",
+                "kind": KIND_INTERACTION,
+                "content": "重要约定",
+                "emotion_vector": {"chat": 0.8},
+                "importance": 0.8,
+                "protected": False,
+                "narrative": "重要约定",
+            },
+        )
+        await heartbeat_store.add_memory(
+            1.0,
+            {
+                "level": "shallow",
+                "kind": KIND_INTERACTION,
+                "content": "琐事",
+                "emotion_vector": {"chat": 0.2},
+                "importance": 0.2,
+                "protected": False,
+                "narrative": "琐事",
+            },
+        )
+        now = 30 * 86400.0  # 30 天后维护（同时验证索引衰减）
+        await soul._maintain_memories(now)
+        rec = await heartbeat_store.get_memory(high)
+        assert rec is not None
+        assert rec["level"] == "working"  # importance 0.8 ≥ 0.4 → 晋升
+        # 索引已建且旧记忆强度衰减（30 天：1.0 × e^(-30/45) ≈ 0.51）
+        idx = await heartbeat_store.iterate_memory_index()
+        assert len(idx) == 2  # 两条记忆都建了索引
+        strengths = {mid: s for _, mid, s, _ in idx}
+        assert 0.2 < strengths[high] < 0.9  # 30 天衰减后显著低于 1.0
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()

@@ -192,6 +192,13 @@
 - **定位**：存储与检索均正常（真实库探针验证 88 条记忆全落盘，生日记忆在任意情绪下都能召回进 hooks）。断点在 **LLM 消费端**——`_SYSTEM_PROMPT` 只教她消费 `user_message`，从未告诉她 `memory_hooks` 是什么/要不要用
 - **机制**：同一会话内"记住"其实是复述 `user_message`（用户刚说的含日期）；重启后 `user_message` 只剩问句、不含事实，被忽略的 hooks 无法补位 → 只能回避"哪一天不重要/记不太清了"。这与"重启是分水岭"完全吻合
 - **fix**：`deepseek.py` 系统提示新增 memory_hooks 指令——对方明确问具体事实（生日/名字/约定）时，从 hooks 中挑对应那条**直接说出事实本身**，不用回避话术；hooks 无确切答案再如实说不记得。T2 不变（仅作记忆参考，非逐条复述）
+- **方向修正（能力与选择权分离）**：memory_hooks 指令收敛为——她**有能力**想起这些事实，但**用不用、怎么回应是她自己的权力**（如实/含糊/只字不提/装不记得，全凭性格与心情）。定位明确：程序管"会不会"（把事实可靠递到手），她管"用不用"；LLM 只是帮她说话的工具。早期 T2 的"不承诺/不编造"仍是测试期脚手架，后期真实电子生命不以此作硬锁
+
+### P3-K 记忆生命周期接线补齐：access_count 递增 + 索引衰减（遗忘落地）
+- **fix（access_count 从不变）**：检索是纯只读路径，`PROMOTE_SHALLOW_ACCESS=2` 永远无法触发。`state_store` 新增 `touch_memory`（命中递增 access_count + 更新 last_access_ts），`retrieve_from_store` 命中后触碰——"被想起的次数"真正成为晋升依据
+- **feat（遗忘接线）**：`decay.py` 的索引衰减（strength 指数衰减 / protected 慢 3× / floor）此前零调用者，`memory_index` 表从不写入。`_maintain_memories` 现补全两件事：①晋升 ②为每条记忆建索引 + 按年龄衰减 strength 落库。检索时从 `memory_index` 读 strength 参与打分（索引弱 → 分低 → 更难被想起）
+- **根因核实（88 条全浅层）**：真实库探针验证——非规则问题，是**旧代码未含维护循环**。重启新代码后 97 条记忆已沉淀为 working=60 / deep=36 / shallow=1，晋升运行正常；memory_index=0 行证实衰减确为本次新接线
+- 新增单测：检索命中递增 access_count / 索引 strength 参与打分 / 维护晋升+衰减落库；全量门禁绿
 
 ---
 

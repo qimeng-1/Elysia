@@ -145,9 +145,33 @@ async def retrieve_from_store(
 
     只读路径：遍历 memories → 转换 MemoryRecord → 用 select_hooks 挑选。
     store 需提供 iterate_memories() -> list[dict]（HeartbeatStore 已具备）。
+
+    接线（P3-I 修复）：
+    - 读取 memory_index strength 作为索引可用性（若有 iterate_memory_index）
+    - 命中返回前 touch 记忆（递增 access_count，驱动浅层→工作晋升）
     """
     records = await store.iterate_memories()  # type: ignore[attr-defined]
     if not records:
         return []
     mem_records = [MemoryRecord.from_dict(d) for d in records]
-    return select_hooks(mem_records, current_mood, max_hooks=max_hooks, now=now)
+
+    # 索引可用性：memory_index 表持久化的 strength（P3-C 衰减的消费方）
+    index_strengths: dict[int, float] | None = None
+    if hasattr(store, "iterate_memory_index"):
+        rows = await store.iterate_memory_index()
+        index_strengths = {mid: strength for _, mid, strength, _ in rows}
+
+    hooks = select_hooks(
+        mem_records,
+        current_mood,
+        max_hooks=max_hooks,
+        now=now,
+        index_strengths=index_strengths,
+    )
+
+    # 检索命中 → 触碰记忆（访问计数递增，被想起的次数是晋升依据）
+    if hooks and hasattr(store, "touch_memory"):
+        ts = now if now is not None else 0.0
+        for h in hooks:
+            await store.touch_memory(h.memory_id, ts)
+    return hooks

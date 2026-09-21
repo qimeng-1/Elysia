@@ -65,6 +65,29 @@ class MemoryHit:
     protected: bool
 
 
+def score_breakdown(
+    record: MemoryRecord,
+    current_mood: dict[str, float],
+    *,
+    index_strength: float = 1.0,
+    now: float | None = None,
+) -> dict[str, float]:
+    """单条记忆的得分构成（观测/调试用）：层级 / 情绪 / 索引 / 新鲜度。
+
+    score_memory = 本函数各项之和（保持单一事实源，避免 UI 复刻打分逻辑）。
+    """
+    level_w = _level_weight(record.level)
+    emotion = mood_similarity(record.emotion_vector, current_mood)
+    availability = max(0.0, min(1.0, index_strength))
+    recency = _recency_factor(record.created_ts, now) if now is not None else 0.0
+    return {
+        "level": round(level_w * 0.6, 3),
+        "emotion": round(emotion * 0.8, 3),
+        "index": round(availability * 0.3, 3),
+        "recency": recency,
+    }
+
+
 def score_memory(
     record: MemoryRecord,
     current_mood: dict[str, float],
@@ -78,11 +101,8 @@ def score_memory(
     短期记忆（几天内）应可靠召回——这是"记得上周的大餐"的保证；
     得分随年龄衰减，但多日记忆仍按重要性/情绪排序。
     """
-    level_w = _level_weight(record.level)
-    emotion = mood_similarity(record.emotion_vector, current_mood)
-    availability = max(0.0, min(1.0, index_strength))
-    recency = _recency_factor(record.created_ts, now) if now is not None else 0.0
-    return round(level_w * 0.6 + emotion * 0.8 + availability * 0.3 + recency, 3)
+    parts = score_breakdown(record, current_mood, index_strength=index_strength, now=now)
+    return round(sum(parts.values()), 3)
 
 
 # 检索新鲜度：近 7 天内给显著加成，之后衰减到 0（短期记忆可靠召回的保证）

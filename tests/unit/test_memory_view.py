@@ -1,0 +1,128 @@
+"""记忆浏览器数据读取单测（只读路径，不涉及 Qt 实例）。"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from elysia.core.state_store import HeartbeatStore
+from elysia.memory.levels import KIND_INTERACTION, LEVEL_SHALLOW
+from elysia.tools.memory_view import (
+    load_current_mood,
+    load_index_strengths,
+    load_memories,
+)
+
+
+def test_load_memories_missing_db(tmp_path: Path) -> None:
+    assert load_memories(tmp_path / "nope.db") == []
+    assert load_index_strengths(tmp_path / "nope.db") == {}
+    assert load_current_mood(tmp_path / "nope.db") == {}
+
+
+@pytest.mark.asyncio
+async def test_load_memories_parses_fields(tmp_path: Path) -> None:
+    db = tmp_path / "heartbeat.db"
+    store = HeartbeatStore(db)
+    await store.start()
+    mid = await store.add_memory(
+        1.0,
+        {
+            "level": LEVEL_SHALLOW,
+            "kind": KIND_INTERACTION,
+            "content": "我的生日是11月11日",
+            "emotion_vector": {"chat": 0.5},
+            "importance": 0.8,
+            "protected": True,
+            "narrative": "生日",
+        },
+    )
+    await store.close()
+
+    records = load_memories(db)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.id == mid
+    assert rec.emotion_vector == {"chat": 0.5}  # JSON 已解析为字典
+    assert rec.protected is True
+    assert rec.superseded_by is None
+
+
+@pytest.mark.asyncio
+async def test_load_index_strengths(tmp_path: Path) -> None:
+    db = tmp_path / "heartbeat.db"
+    store = HeartbeatStore(db)
+    await store.start()
+    mid = await store.add_memory(
+        1.0,
+        {
+            "level": LEVEL_SHALLOW,
+            "kind": KIND_INTERACTION,
+            "content": "往事",
+            "emotion_vector": {"chat": 0.5},
+            "importance": 0.5,
+            "narrative": "往事",
+        },
+    )
+    await store.add_memory_index(memory_id=mid, path_key="main", strength=0.42, emotions=0.0)
+    await store.close()
+
+    assert load_index_strengths(db) == {mid: 0.42}
+
+
+@pytest.mark.asyncio
+async def test_load_current_mood_from_latest_beat(tmp_path: Path) -> None:
+    db = tmp_path / "heartbeat.db"
+    store = HeartbeatStore(db)
+    await store.start()
+    await store.append(1.0, "soul", {"feelings": {"chat": 0.7, "miss": 0.2}})
+    await store.append(2.0, "soul", {"feelings": {"chat": 0.3}})
+    await store.append(2.5, "body", {"feelings": {"chat": 0.9}})  # 身体拍不算
+    await store.close()
+
+    assert load_current_mood(db) == {"chat": 0.3}  # 取最近一次灵魂拍
+
+
+def test_load_current_mood_tolerates_bad_payload(tmp_path: Path) -> None:
+    import sqlite3
+
+    db = tmp_path / "heartbeat.db"
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "CREATE TABLE heartbeats (id INTEGER PRIMARY KEY, ts REAL, beat_type TEXT, payload TEXT)"
+    )
+    con.execute(
+        "INSERT INTO heartbeats (ts, beat_type, payload) VALUES (1.0, 'soul', ?)", (json.dumps({}),)
+    )
+    con.commit()
+    con.close()
+    assert load_current_mood(db) == {}  # 无 feelings 字段 → 空心境
+
+
+def test_load_memories_tolerates_missing_superseded_column(tmp_path: Path) -> None:
+    """旧库（未执行迁移、无 superseded_by 列）仍可观测，按"未取代"处理。"""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "CREATE TABLE memories (id INTEGER PRIMARY KEY, created_ts REAL, level TEXT,"
+        " kind TEXT, content TEXT, emotion_vector TEXT, importance REAL,"
+        " access_count INTEGER, last_access_ts REAL, protected INTEGER,"
+        " detail_level REAL, narrative TEXT)"
+    )
+    con.execute(
+        "INSERT INTO memories (created_ts, level, kind, content, emotion_vector,"
+        " importance, access_count, protected, detail_level, narrative)"
+        " VALUES (1.0, 'shallow', 'interaction', '旧记忆', ?, 0.5, 0, 0, 1.0, '旧记忆')",
+        (json.dumps({"chat": 0.5}),),
+    )
+    con.commit()
+    con.close()
+
+    records = load_memories(db)
+    assert len(records) == 1
+    assert records[0].content == "旧记忆"
+    assert records[0].superseded_by is None

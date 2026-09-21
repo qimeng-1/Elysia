@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS memories (
     last_access_ts REAL,
     protected      INTEGER NOT NULL DEFAULT 0,
     detail_level   REAL NOT NULL DEFAULT 1.0,
-    narrative      TEXT NOT NULL DEFAULT ''
+    narrative      TEXT NOT NULL DEFAULT '',
+    superseded_by  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_memories_level ON memories (level);
@@ -95,12 +96,25 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _run_migration(conn: sqlite3.Connection, stmt: str) -> None:
+    """执行一条迁移语句；列已存在则跳过（幂等，兼容新旧库）。"""
+    try:
+        conn.execute(stmt)
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+
+
 class _AsyncSQLite:
     """单写者队列底座：连接生命周期在事件循环内，写操作串行落盘。"""
 
-    def __init__(self, db_path: Path, *, schema: str | None = None) -> None:
+    def __init__(
+        self, db_path: Path, *, schema: str | None = None, migrations: tuple[str, ...] = ()
+    ) -> None:
         self._db_path = db_path
         self._schema = schema
+        self._migrations = migrations
         self._conn: sqlite3.Connection | None = None
         self._queue: asyncio.Queue[_QUEUE_ITEM] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
@@ -110,6 +124,8 @@ class _AsyncSQLite:
         if self._schema is not None:
             # executescript 支持多语句 schema（建表 + 索引），自带 commit
             await asyncio.to_thread(self._conn.executescript, self._schema)
+        for stmt in self._migrations:
+            await asyncio.to_thread(_run_migration, self._conn, stmt)
         self._writer = asyncio.create_task(self._write_loop(), name=f"writer-{self._db_path.stem}")
 
     async def _write_loop(self) -> None:
@@ -190,7 +206,12 @@ class HeartbeatStore(_AsyncSQLite):
     """生命档案库（heartbeat.db）：只追加心跳，永不修改历史。"""
 
     def __init__(self, db_path: Path) -> None:
-        super().__init__(db_path, schema=_HEARTBEAT_SCHEMA)
+        super().__init__(
+            db_path,
+            schema=_HEARTBEAT_SCHEMA,
+            # 旧库补列（新库已在 schema 内含）：记忆修正/覆盖标记
+            migrations=("ALTER TABLE memories ADD COLUMN superseded_by INTEGER",),
+        )
 
     @staticmethod
     def _memory_row_to_dict(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
@@ -208,6 +229,7 @@ class HeartbeatStore(_AsyncSQLite):
             "protected": bool(row[9]),
             "detail_level": row[10],
             "narrative": row[11],
+            "superseded_by": row[12],
         }
 
     async def append(self, ts: float, beat_type: str, payload: dict[str, Any]) -> None:
@@ -400,6 +422,18 @@ class HeartbeatStore(_AsyncSQLite):
             conn.commit()
 
         await self.submit(_touch)
+
+    async def mark_superseded(self, memory_id: int, superseded_by: int) -> None:
+        """标记旧记忆被新记忆取代（修正/覆盖）：保留数据，但不再被检索召回。"""
+
+        def _mark(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE memories SET superseded_by = ? WHERE id = ?",
+                (superseded_by, memory_id),
+            )
+            conn.commit()
+
+        await self.submit(_mark)
 
     async def iterate_memory_index(self) -> list[tuple[int, int, float, float]]:
         """遍历全部索引行：(index_id, memory_id, strength, last_retrieve_ts)。"""

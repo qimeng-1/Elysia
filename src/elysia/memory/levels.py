@@ -62,6 +62,7 @@ class MemoryRecord:
     protected: bool = False
     detail_level: float = 1.0
     narrative: str = ""
+    superseded_by: int | None = None  # 被更正的记忆：指向取代它的新记忆 id（None=现行）
     id: int | None = None  # 落库后由存储层回填
 
     def to_dict(self) -> dict[str, Any]:
@@ -79,6 +80,7 @@ class MemoryRecord:
             "protected": self.protected,
             "detail_level": self.detail_level,
             "narrative": self.narrative,
+            "superseded_by": self.superseded_by,
         }
 
     @staticmethod
@@ -97,6 +99,7 @@ class MemoryRecord:
             protected=bool(d.get("protected", False)),
             detail_level=d.get("detail_level", 1.0),
             narrative=d.get("narrative", ""),
+            superseded_by=d.get("superseded_by"),
         )
 
 

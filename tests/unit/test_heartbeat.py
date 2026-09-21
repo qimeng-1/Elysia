@@ -189,3 +189,73 @@ async def test_maintain_memories_promotes_and_decays_index(tmp_path: Path) -> No
     finally:
         await state_store.close()
         await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_maintain_memories_decay_is_idempotent(tmp_path: Path) -> None:
+    """衰减按绝对年龄幂等：连跑多次与跑一次结果一致（不随运行次数复合塌缩）。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=False)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        mid = await heartbeat_store.add_memory(
+            1.0,
+            {
+                "level": "shallow",
+                "kind": KIND_INTERACTION,
+                "content": "一条旧记忆",
+                "emotion_vector": {"chat": 0.5},
+                "importance": 0.3,
+                "narrative": "一条旧记忆",
+            },
+        )
+        now = 10 * 86400.0  # 10 天龄
+        await soul._maintain_memories(now)
+        first = {m: s for _, m, s, _ in await heartbeat_store.iterate_memory_index()}
+        for _ in range(20):  # 再跑 20 次（模拟高频维护周期）
+            await soul._maintain_memories(now)
+        second = {m: s for _, m, s, _ in await heartbeat_store.iterate_memory_index()}
+        assert first == second  # 幂等：不因多跑而额外衰减
+        # 且与绝对年龄一致：e^(-10/45) ≈ 0.801
+        assert abs(second[mid] - 0.801) < 0.01
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_supersede_conflicts_marks_old_fact(tmp_path: Path) -> None:
+    """修正/覆盖接线：新事实写入 → 同话题旧事实被标记取代。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=False)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        old = await heartbeat_store.add_memory(
+            1.0,
+            {
+                "level": "shallow",
+                "kind": KIND_INTERACTION,
+                "content": "我的生日是11月11日",
+                "emotion_vector": {"chat": 0.5},
+                "importance": 0.8,
+                "narrative": "我的生日是11月11日",
+            },
+        )
+        new = await heartbeat_store.add_memory(
+            2.0,
+            {
+                "level": "shallow",
+                "kind": KIND_INTERACTION,
+                "content": "其实我的生日是12月12日",
+                "emotion_vector": {"chat": 0.5},
+                "importance": 0.8,
+                "narrative": "其实我的生日是12月12日",
+            },
+        )
+        await soul._supersede_conflicts(new, "其实我的生日是12月12日", 2.0)
+        rec = await heartbeat_store.get_memory(old)
+        assert rec is not None
+        assert rec["superseded_by"] == new
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()

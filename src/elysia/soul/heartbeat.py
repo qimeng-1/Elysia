@@ -37,6 +37,7 @@ from elysia.memory.levels import (
     MemoryRecord,
 )
 from elysia.memory.promote import promote_batch
+from elysia.memory.supersede import find_superseded
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop, BrainOutput
@@ -192,18 +193,21 @@ class SoulHeartbeat:
                 )
                 # P3 运行时接线：用户输入 → 一次经历写入记忆（无论是否开口）
                 if self._pending_user_message:
-                    await self._heartbeat_store.add_memory(
+                    msg = self._pending_user_message
+                    new_id = await self._heartbeat_store.add_memory(
                         now,
                         {
                             "level": LEVEL_SHALLOW,
                             "kind": KIND_INTERACTION,
-                            "content": self._pending_user_message,
+                            "content": msg,
                             "emotion_vector": brain_output.feelings.to_dict(),
                             "importance": 0.8,
                             "protected": False,
-                            "narrative": self._pending_user_message,
+                            "narrative": msg,
                         },
                     )
+                    # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
+                    await self._supersede_conflicts(new_id, msg, now)
                     self._pending_user_message = None
 
             # ── P3 记忆生命周期维护：周期性晋升（浅层→工作→深层）──
@@ -213,6 +217,13 @@ class SoulHeartbeat:
                 await self._maintain_memories(now)
 
             await self._clock.sleep(self._interval_s)
+
+    async def _supersede_conflicts(self, new_id: int, content: str, now: float) -> None:
+        """修正/覆盖：新记忆与更早记忆同话题 → 旧记忆标记取代（不再被召回）。"""
+        records = await self._heartbeat_store.iterate_memories()
+        mem_records = [MemoryRecord.from_dict(d) for d in records]
+        for stale_id in find_superseded(content, now, mem_records):
+            await self._heartbeat_store.mark_superseded(stale_id, new_id)
 
     async def _maintain_memories(self, now: float) -> None:
         """P3 记忆生命周期维护：晋升 + 索引衰减（遗忘的物理实现）。
@@ -225,11 +236,19 @@ class SoulHeartbeat:
         2. 索引衰减：为每条记忆建/维护 memory_index strength——
            按年龄指数衰减（P3-C decay_strength），protected 慢 3 倍。
            检索时索引 strength 拉低 score → "越久越难被想起"。
+
+        已被更正/取代的记忆不参与维护（不晋升、不建索引）。
         """
         records = await self._heartbeat_store.iterate_memories()
         if not records:
             return
-        mem_records = [MemoryRecord.from_dict(d) for d in records]
+        mem_records: list[MemoryRecord] = []
+        for d in records:
+            rec = MemoryRecord.from_dict(d)
+            if rec.superseded_by is None:
+                mem_records.append(rec)
+        if not mem_records:
+            return
 
         # ── 1. 晋升 ──────────────────────────────────────
         promotions = promote_batch(mem_records)
@@ -242,35 +261,34 @@ class SoulHeartbeat:
                 detail_level=promo.detail_level,
             )
 
-        # ── 2. 索引衰减：建缺失索引 + 按年龄衰减 strength ──
+        # ── 2. 索引衰减：建缺失索引 + 按绝对年龄幂等重算 strength ──
         index_rows = await self._heartbeat_store.iterate_memory_index()
-        strength_by_mid: dict[int, float] = {mid: s for _, mid, s, _ in index_rows}
         index_id_by_mid: dict[int, int] = {mid: iid for iid, mid, _, _ in index_rows}
 
         for rec in mem_records:
             mid = rec.id
-            if mid is None:
+            if mid is None or mid in index_id_by_mid:
                 continue
-            if mid not in strength_by_mid:
-                # 新记忆：建索引（默认 strength 1.0，fresh）
-                iid = await self._heartbeat_store.add_memory_index(
-                    memory_id=mid,
-                    path_key="main",
-                    strength=1.0,
-                    emotions=0.0,
-                    last_retrieve_ts=now,
-                )
-                index_id_by_mid[mid] = iid
-                strength_by_mid[mid] = 1.0
+            # 新记忆：建索引（strength 由年龄推导，见下）
+            iid = await self._heartbeat_store.add_memory_index(
+                memory_id=mid,
+                path_key="main",
+                strength=1.0,
+                emotions=0.0,
+                last_retrieve_ts=now,
+            )
+            index_id_by_mid[mid] = iid
 
+        # 从固定基线（1.0）按"绝对年龄"重算：跑 N 次与跑 1 次结果一致
+        # （若以上次 strength 为基线会按运行次数复合塌缩，与机器转速耦合）
         updates: list[tuple[int, float]] = []
         for rec in mem_records:
             mid = rec.id
-            if mid is None or mid not in strength_by_mid:
+            if mid is None or mid not in index_id_by_mid:
                 continue
             age_days = max(0.0, (now - rec.created_ts) / 86400.0)
             new_strength = decay_strength(
-                strength_by_mid[mid],
+                1.0,
                 age_days,
                 protected=rec.protected,
                 floor=STRENGTH_RETRIEVE_FLOOR,

@@ -118,6 +118,9 @@ def select_hooks(
         # 排除她自己的发言回声：hooks 用于"记起你/世界"，不应复述刚说过的自己
         if rec.kind == KIND_EXPRESSION:
             continue
+        # 排除已被更正/取代的旧事实：准确率保障——改过的就是准的
+        if rec.superseded_by is not None:
+            continue
         mid = rec.id if rec.id is not None else -1
         strength = index_strengths.get(mid, 1.0) if index_strengths else 1.0
         score = score_memory(rec, current_mood, index_strength=strength, now=now)

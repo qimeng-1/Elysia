@@ -8,6 +8,7 @@ import pytest
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.memory.levels import (
+    KIND_EXPRESSION,
     KIND_INTERACTION,
     LEVEL_DEEP,
     LEVEL_SHALLOW,
@@ -30,10 +31,11 @@ def _rec(
     emotion: dict[str, float] | None = None,
     narrative: str = "一段记忆叙事",
     mid: int | None = 1,
+    created_ts: float = 1.0,
 ) -> MemoryRecord:
     return MemoryRecord(
         id=mid,
-        created_ts=1.0,
+        created_ts=created_ts,
         kind=KIND_INTERACTION,
         content="内容",
         emotion_vector=emotion if emotion is not None else {"chat": 0.5},
@@ -71,6 +73,45 @@ def test_score_memory_index_availability() -> None:
     fresh = score_memory(_rec(), current_mood={}, index_strength=0.9)
     faded = score_memory(_rec(), current_mood={}, index_strength=0.1)
     assert fresh > faded  # 索引强的记忆更易召回
+
+
+def test_score_memory_recency_boosts_recent_over_old() -> None:
+    """短期记忆可靠召回：同样条件下，昨天的大餐该比一月前的记忆分高。"""
+    now = 10 * 86400.0  # 第 10 天
+    yesterday = _rec(
+        created_ts=now - 1 * 86400.0,
+        level=LEVEL_SHALLOW,
+        emotion={"chat": 0.5},
+        narrative="昨天的大餐",
+    )
+    month_ago = _rec(
+        created_ts=now - 30 * 86400.0,
+        level=LEVEL_SHALLOW,
+        emotion={"chat": 0.5},
+        narrative="一个月前的事",
+    )
+    recent = score_memory(yesterday, {"chat": 0.5}, now=now)
+    stale = score_memory(month_ago, {"chat": 0.5}, now=now)
+    assert recent > stale  # 新鲜度让短期记忆被优先召回
+
+
+def test_select_hooks_excludes_own_expression_echo() -> None:
+    """检索不应把她自己刚说过的话当"记起你"注入，避免重启重复她上次的话。"""
+    own_echo = MemoryRecord(
+        id=2,
+        created_ts=2.0,
+        kind=KIND_EXPRESSION,
+        content="上次我说的话",
+        emotion_vector={"chat": 0.9},
+        importance=0.5,
+        level=LEVEL_SHALLOW,
+        access_count=1,
+        protected=False,
+        narrative="上次我说的话",
+    )
+    hooks = select_hooks([own_echo, _rec(mid=1, narrative="真正的经历")], {"chat": 1.0})
+    # 她的发言回声被排除，只保留真实经历
+    assert [h.memory_id for h in hooks] == [1]
 
 
 # ── 挑选 hooks ──────────────────────────────────────────

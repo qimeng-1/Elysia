@@ -30,7 +30,12 @@ from elysia.core.timesense import (
     TimeSenseState,
     to_payload,
 )
-from elysia.memory.levels import KIND_INTERACTION, LEVEL_SHALLOW
+from elysia.memory.levels import (
+    KIND_INTERACTION,
+    LEVEL_SHALLOW,
+    MemoryRecord,
+)
+from elysia.memory.promote import promote_batch
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop, BrainOutput
@@ -39,6 +44,10 @@ from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
 from elysia.soul.expression_service import ExpressionService
 
 logger = logging.getLogger("elysia.soul.heartbeat")
+
+
+# P3 记忆维护：每 N 拍晋升扫描一次（心跳 1s → 约每 5 分钟）
+MEMORY_MAINTAIN_EVERY_N = 300
 
 
 class SoulHeartbeat:
@@ -78,6 +87,8 @@ class SoulHeartbeat:
 
         # 交互事件追踪（防止重复触发）
         self._last_interaction_event_ts: float = 0.0
+        # P3 记忆生命周期维护：按心跳计数节流（每 MEMORY_MAINTAIN_EVERY_N 拍一次晋升扫描）
+        self._memory_maintain_tick = 0
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
         self._new_interaction = False
         # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
@@ -194,7 +205,33 @@ class SoulHeartbeat:
                     )
                     self._pending_user_message = None
 
+            # ── P3 记忆生命周期维护：周期性晋升（浅层→工作→深层）──
+            self._memory_maintain_tick += 1
+            if self._memory_maintain_tick >= MEMORY_MAINTAIN_EVERY_N:
+                self._memory_maintain_tick = 0
+                await self._maintain_memories(now)
+
             await self._clock.sleep(self._interval_s)
+
+    async def _maintain_memories(self, now: float) -> None:
+        """P3 记忆生命周期维护：扫描全部记忆，晋升浅层→工作→深层并落库。
+
+        这是记忆"沉淀"的关键——否则所有经历永远停在浅层，无法在长期内
+        以更高权重被召回（短期可靠性由新鲜度保证，这里管长期持久化）。
+        """
+        records = await self._heartbeat_store.iterate_memories()
+        if not records:
+            return
+        mem_records = [MemoryRecord.from_dict(d) for d in records]
+        promotions = promote_batch(mem_records)
+        for promo in promotions:
+            if promo.memory_id is None:
+                continue
+            await self._heartbeat_store.update_memory_level(
+                promo.memory_id,
+                level=promo.level,
+                detail_level=promo.detail_level,
+            )
 
     async def _sync_body_status(self, now: float) -> None:
         """身体在场状态 → TimeSenseState + 难受检测 + 交互事件 → 感受层。"""

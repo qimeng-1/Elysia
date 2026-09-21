@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from elysia.memory.levels import LEVEL_DEEP, LEVEL_WORKING, MemoryRecord, default_narrative
+from elysia.memory.levels import (
+    KIND_EXPRESSION,
+    LEVEL_DEEP,
+    LEVEL_WORKING,
+    MemoryRecord,
+    default_narrative,
+)
 
 # 表达一次最多注入多少条记忆（防止 LLM 提示过长/分心）
 MAX_HOOKS = 3
@@ -64,16 +70,33 @@ def score_memory(
     current_mood: dict[str, float],
     *,
     index_strength: float = 1.0,
+    now: float | None = None,
 ) -> float:
-    """单条记忆的检索得分（不包含衰减过滤外的其他条件）。
+    """单条记忆的检索得分。
 
-    分数 = 层级权重 + 情绪染色 + 索引可用性
+    分数 = 层级权重 + 情绪染色 + 索引可用性 + 新鲜度（短期优先）。
+    短期记忆（几天内）应可靠召回——这是"记得上周的大餐"的保证；
+    得分随年龄衰减，但多日记忆仍按重要性/情绪排序。
     """
     level_w = _level_weight(record.level)
     emotion = mood_similarity(record.emotion_vector, current_mood)
-    # 索引强度弱 → 降低可达性（仍然可召回，只是优先级低）
     availability = max(0.0, min(1.0, index_strength))
-    return round(level_w * 0.6 + emotion * 0.8 + availability * 0.3, 3)
+    recency = _recency_factor(record.created_ts, now) if now is not None else 0.0
+    return round(level_w * 0.6 + emotion * 0.8 + availability * 0.3 + recency, 3)
+
+
+# 检索新鲜度：近 7 天内给显著加成，之后衰减到 0（短期记忆可靠召回的保证）
+RECENCY_BOOST = 0.55
+RECENCY_DAYS = 7
+
+
+def _recency_factor(created_ts: float, now: float) -> float:
+    """新鲜度因子：创建越近越高，RECENCY_DAYS 天后为 0。"""
+    age_s = max(0.0, now - created_ts)
+    age_d = age_s / 86400.0
+    if age_d >= RECENCY_DAYS:
+        return 0.0
+    return round(RECENCY_BOOST * (1.0 - age_d / RECENCY_DAYS), 3)
 
 
 def select_hooks(
@@ -82,18 +105,22 @@ def select_hooks(
     *,
     index_strengths: dict[int, float] | None = None,
     max_hooks: int = MAX_HOOKS,
+    now: float | None = None,
 ) -> list[MemoryHit]:
     """从候选记忆挑选要注入表达的 hooks（按得分降序）。
 
     index_strengths：memory_id → 索引强度（可选，默认 1.0 视为可用新鲜）。
-    低于 STRENGTH_RETRIEVE_FLOOR 的记忆仍可召回（只是 score 被拉低），
-    体现"数据永在、索引碎"——这正是缺口信号的来源。
+    低于 STRENGTH_RETRIEVE_FLOOR 的记忆仍可召回（只是 score 被拉低）。
+    now：用于短期新鲜度加成（短期记忆可靠召回）。
     """
     hits: list[MemoryHit] = []
     for rec in records:
+        # 排除她自己的发言回声：hooks 用于"记起你/世界"，不应复述刚说过的自己
+        if rec.kind == KIND_EXPRESSION:
+            continue
         mid = rec.id if rec.id is not None else -1
         strength = index_strengths.get(mid, 1.0) if index_strengths else 1.0
-        score = score_memory(rec, current_mood, index_strength=strength)
+        score = score_memory(rec, current_mood, index_strength=strength, now=now)
         hits.append(
             MemoryHit(
                 memory_id=mid,
@@ -112,6 +139,7 @@ async def retrieve_from_store(
     current_mood: dict[str, float],
     *,
     max_hooks: int = MAX_HOOKS,
+    now: float | None = None,
 ) -> list[MemoryHit]:
     """从记忆存储检索几条待注入表达的记忆（异步）。
 
@@ -122,4 +150,4 @@ async def retrieve_from_store(
     if not records:
         return []
     mem_records = [MemoryRecord.from_dict(d) for d in records]
-    return select_hooks(mem_records, current_mood, max_hooks=max_hooks)
+    return select_hooks(mem_records, current_mood, max_hooks=max_hooks, now=now)

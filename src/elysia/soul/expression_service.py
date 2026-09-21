@@ -25,8 +25,8 @@ from elysia.tts.chain import TTSChain, TTSRequest, TTSResult
 
 log = logging.getLogger("elysia.soul.expression")
 
-# 记忆检索回调：给定存储 + 当前感受 → 返回待注入表达的记忆
-MemoryRetriever = Callable[[HeartbeatStore, dict[str, float]], "Awaitable[list[MemoryHit]]"]
+# 记忆检索回调：给定存储 + 当前感受（+ 可选的 now 新鲜度参考）→ 返回注入的记忆
+RetrieverWithNow = Callable[..., "Awaitable[list[MemoryHit]]"]
 
 # 内部冲动表达节流：与发呆双模态同节奏（3min / 10min）
 EXPRESS_ACTIVE_INTERVAL_S = 180.0
@@ -55,7 +55,7 @@ class ExpressionService:
         validator: ExpressionValidator | None = None,
         llm_degrade_sa_delta: float = 2.0,
         tts_degrade_sa_delta: float = 1.0,
-        retriever: MemoryRetriever | None = None,
+        retriever: RetrieverWithNow | None = None,
     ) -> None:
         self._llm = llm_chain
         self._store = heartbeat_store
@@ -123,7 +123,7 @@ class ExpressionService:
 
         # ── 1b. 记忆检索 → 注入 memory_hooks（P3-D）─────
         if self.retriever is not None:
-            hooks = await self.retriever(self._store, output.feelings.to_dict())
+            hooks = await self.retriever(self._store, output.feelings.to_dict(), now=now)
             if hooks:
                 payload["memory_hooks"] = [h.narrative for h in hooks]
 

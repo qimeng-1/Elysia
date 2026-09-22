@@ -21,16 +21,20 @@ uv run pre-commit run --all-files   # 提交门禁四件套
 ```
 elysia/
 ├── src/elysia/
-│   ├── soul/       # 灵魂进程（常驻，1Hz 心跳 + TimeSense）
-│   ├── body/       # 身体进程（本地，5s 心跳）
+│   ├── soul/       # 灵魂进程（常驻，1Hz 心跳 + TimeSense + 欲望/大脑/表达）
+│   ├── body/       # 身体进程（本地，5s 心跳 + 桌宠）
 │   ├── core/       # 共享核心：状态库、时间、日志（structlog）、配置（pydantic-settings）
+│   ├── memory/     # 记忆系统（三层晋升 / 索引衰减 / 检索染色 / 修正取代 / 做梦）
+│   ├── llm/        # 表达引擎（三级降级链 + 输出校验器）
+│   ├── tts/        # 出声（GPT-SoVITS + 缓存池 + 熔断）
 │   ├── protocol/   # 双进程通信协议（版本化）
+│   ├── tools/      # 观测工具（记忆浏览器）
 │   └── utils/      # 通用工具
 ├── tests/          # unit（单元）+ acceptance（验收门）
+├── assets/pet/     # 桌宠素材（character.png）
 ├── data/           # 运行时数据（进 git 做记忆快照版本化；logs/cache/tmp 除外）
-├── config/         # 默认配置
-├── scripts/        # soul.ps1（PID 级进程控制）/ backup.ps1（每日备份 D 盘，保留 30 份）
-└── docs/           # ADR、设计宪法副本
+├── scripts/        # soul.ps1（进程控制）/ memory_view.ps1（记忆浏览器）/ backup.ps1（每日备份 D 盘，保留 30 份）
+└── docs/           # ADR + 设计宪法副本 + 仓库独有文档（操作手册 / P2·P3 规划与工作日志 / 人设）
 ```
 
 ## 常用命令

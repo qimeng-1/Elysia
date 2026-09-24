@@ -13,6 +13,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+# ── 表达异步化（《运行时可靠性收口》阶段 1）────────────────────
+# 有界表达队列容量：1 在跑 + 1 等待。内部念头遇满即丢（＝「她这次决定不说」），
+# 用户输入永不丢，可挤掉队列里最旧的内部念头（D1）。
+EXPRESS_QUEUE_CAPACITY = 2
+# 关停宽限（≈ 10 拍）：关闭时等在跑任务至多这么久，超时则取消并登记 `status=timeout`。
+# **D3 澄清（2026-09-24，用户裁决）：只作关闭宽限**——正常运行不给单任务设上限，
+# 否则 LLM 主声自身 30s 的超时会先被这里误判成"她这次没说成"。
+EXPRESS_TIMEOUT_S = 10.0
+
 
 class Settings(BaseSettings):
     """Elysia 运行时配置。"""

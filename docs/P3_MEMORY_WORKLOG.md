@@ -2013,6 +2013,21 @@ GPT 的 1.5 六条里有五条**已实现**（记忆失败不阻塞 / main→fal
 | 下一步 | 步 0.2：新建 `docs/STATUS_MATRIX.md`（"测试"列改三档 有单测／只有集成测／无 + **新增列「阻塞心跳？」**，逐格对真仓库核对） |
 
 
+### 21.2 步 0.2 状态矩阵（2026-09-24）
+
+| 项 | 内容 |
+|---|---|
+| 交付 | 新增 `docs/STATUS_MATRIX.md`（**+109 行**）：六列 = 能力 / 状态 / 主要文件 / 测试 / 阻塞心跳？ / 当前限制；9 节 = 口径 + soul / memory / core / llm / tts / body / protocol·tools + 本轮待落地项 + 维护规则 |
+| 行为变化 | **无**（20.5 规定的阶段 0：纯文档） |
+| 按设计稿三处偏离 | ①「测试」列改三档（有单测／只有集成测／无），**每格核到具体测试文件**，判据写在文首 0 节、可复核；②**新增「阻塞心跳？」列**——`0s` = 只做本地 I/O 或纯 CPU，`最长 N s` = 单拍内等待外部服务的硬上限；③逐格对真仓库核对 |
+| 核对结论（照实记） | 表达服务那一行量化到 **~185s** = LLM 主声 3 轮工具回合 90s + 次声 30s + TTS 60s + VRAM 同步采样 5s；`tts/breaker.py` 是**拍内同步**阻塞点（F4，本轮 1.4）；`memory/sleep.py`（做梦）标 **已实现·未接线**；**无自身断言**的如实清单 = `soul/main.py`、`body/main.py`、`body/resource.py`、`core/clock.py`、`tts/backend.py`、`tts/__init__.py`（后两者已注明"被谁当替身用"）；`memory/levels.py`、`protocol/snapshots.py` 归「只有集成测」 |
+| 门禁 | ruff check ／ ruff format --check（85 files）／ mypy strict（52 files）／ pytest **375 passed** **全绿** |
+| 完整性 | `verify_integrity.py` 清单 **131 → 132 文件**，`--check` **PASS** |
+| 提交 | `1350272`（1 文件 / +109 −0），已推送 `main`（`origin/main` = `1350272`） |
+| 装载 | **无需重启**——纯文档，对运行中的灵魂（PID 12448，启动 19:50:57，核查时仍在跑）零影响 |
+| 下一步 | 步 1.1：新增 `soul/expression_types.py`（`ExpressionJob` / `ExpressionResult`）+ 单测（零行为变化，**不接线**） |
+
+
 ---
 
 *本文件随记忆打磨期持续追加；每节末尾保留"下一步 + 交接要点"。*

@@ -559,9 +559,15 @@ RESTORE_TOOL = {
 
 | 阶段 | 谁做 | 落库标注 | 为何安全 |
 |---|---|---|---|
-| ① 候选 | 程序 | `source=observation`、`certainty=probable` | **天然被 P3-T 来源闸门挡在话语之外**（`retrieve.py::_HOOK_BLOCKED_SOURCES`）——程序推断不得升格成"她的事实" |
+| ① 候选 | 程序 | `source=inference`、`certainty=probable` | **天然被 P3-T 来源闸门挡在话语之外**（`retrieve.py::_HOOK_BLOCKED_SOURCES`）——程序推断不得升格成"她的事实" |
 | ② 认领 | **她**（新工具，暂名 `adopt`） | 升为 `kind=KIND_SELF`、`source=self`、`certainty=certain` | 只有她能说"这确实是我"（铁律一后半句）；程序只把候选递到她手上 |
 | ③ 注入 | 程序 | 进 prompt **身份段** | 位置论证见 8.5 |
+
+> **落地修正（S3，2026-09-24）**：①原写 `source=observation`，是**标注错误**。
+> `retrieve._HOOK_BLOCKED_SOURCES` 只挡 `inference` / `system`——`observation` **会进
+> `memory_hooks`**，候选就会挤占 `MAX_HOOKS` 名额（重犯 P3-P"每句都强调"）。
+> 而 `levels.py` 对 `SOURCE_INFERENCE` 的注释正是"程序推断出的（倾向／心思，并非她所述）"，
+> 候选恰是它。故改标 `SOURCE_INFERENCE` + `CERTAINTY_PROBABLE`：语义准确，且真的被挡在话语外。
 
 **③ 与 `memory_hooks` 的关键区别**：hooks 是"话题撞上才浮现"的背景常识（P3-P 的成果）；
 Self Memory 回答"我是谁"，**每句都在场**。因此它**不走 hooks 段、不挤占 `MAX_HOOKS` 名额**——
@@ -595,7 +601,7 @@ Self Memory 回答"我是谁"，**每句都在场**。因此它**不走 hooks �
 | `retention_state` | present / suppressed / dormant / faded | 自我认知**不应** dormant／faded（她不会忘了自己是谁）→ 需豁免。**这是本设计唯一可能要新增的一处约束**，须评审是否必要 |
 | `claim_status` | claimed / rejected | 她可 `disclaim` 自己的自我认知 = "重新解释"的权力，与既有工具同构 |
 | `superseded_by` | 事实更正（旧条作废） | 自我认知可被自己更新（"我以前以为…现在知道…"）→ 天然适用，无需新机制 |
-| `source` / `certainty` | 5 源 / 4 确定 | 候选 = `observation`/`probable`；她认领后 = `self`/`certain` |
+| `source` / `certainty` | 5 源 / 4 确定 | 候选 = `inference`/`probable`（S3 落地修正，见 8.4 注）；她认领后 = `self`/`certain` |
 
 ### 8.8 落地拆步（照 P3-W 的 W1/W2 拆法）
 
@@ -603,7 +609,7 @@ Self Memory 回答"我是谁"，**每句都在场**。因此它**不走 hooks �
 |---|---|---|
 | **S1 本体** | 常量（`KIND_SELF` + `KINDS` + `SOURCE_BY_KIND` + `CERTAINTY_BY_KIND`）+ `scorer._KIND_BASE` 一行 + `memory/__init__` 导出 + 身份段装配（先只读 bootstrap） | 身份段文本**不变**（bootstrap 即现有档案摘要）→ **零行为变化** |
 | **S2 认领** | 她的 `adopt` 工具（把候选／经历认作自我） | 她多一个动作 |
-| **S3 沉淀** | 程序找"重复模式"生成候选，递给她 | 感受层新增"候选"脉冲（不进话语） |
+| **S3 沉淀** ✅ | 程序找"重复模式"生成候选，递给她 | 感受层新增"候选"脉冲（不进话语） |
 | **S4 观测与验收** | 记忆浏览器增"自我"标签；验收 4 项 | 观测 |
 
 ### 8.9 验收（体验式，铁律三）
@@ -633,9 +639,16 @@ N6"要不要让她梦到自己是谁"。
 | `src/elysia/memory/__init__.py` | 导出新常量 | | |
 | `src/elysia/llm/deepseek.py` | 身份段拆出（bootstrap 注入） | prompt 补 `adopt` 说明 | |
 | `src/elysia/llm/chain.py` | | `ADOPT_TOOL` 规格 | |
-| `src/elysia/soul/expression_service.py` | 身份段装配 | `_tool_adopt` | |
-| `src/elysia/soul/heartbeat.py` | | | 候选生成 + 脉冲 |
+| `src/elysia/soul/expression_service.py` | 身份段装配 | `_tool_adopt` | 候选优先（候选当"代表"，同家重述不参与并列判定） |
+| `src/elysia/soul/heartbeat.py` | | | 候选生成（`_offer_candidate`）+ 脉冲 |
 | `src/elysia/tools/memory_view.py` | 自我标签 | | |
+| `src/elysia/memory/sediment.py` *(S3 新增)* | | | `find_candidate` / `PatternSignal`（纯函数，不落库） |
+| `src/elysia/soul/desire.py` *(S3 新增)* | | | `EVENT_PULSES["self_candidate"]` 一行 |
+
+> **S3 偏差补记**：8.11 原清单 S3 列只列了 `heartbeat.py`。实际落地比清单多动三处——
+> 新增 `memory/sediment.py`（把"发现重复模式"做成纯函数，可单测、不依赖存储）、
+> `soul/expression_service.py`（发现 2 的接缝：候选当"代表"）、`soul/desire.py`（脉冲强度）。
+> 偏差原因见第十一节 11.2。
 
 ### 8.12 自查修正记录（2026-09-24，代码核对式评审）
 
@@ -770,6 +783,81 @@ N5 要求"自我认知直接落 `deep` + `protected`（不能等她想起 3 次�
 **S3 沉淀**（程序找"重复模式"生成候选，`source=observation`/`certainty=probable`，被 P3-T 天然挡在话语外）
 → **S4 观测与验收**（补降级链／micro 消费身份段、8.9 四项验收、N6 梦的决定）。
 **遗留待决**：N6"要不要让她梦到自己是谁"。
+
+---
+
+## 十一、S3 沉淀落地记录（2026-09-24）
+
+> 依第八节 8.8 拆步表，S3 = **程序找"重复模式"，把候选递到她手上**，
+> 对外行为变化 = **感受层新增"候选"脉冲（不进话语）**。
+> 核心约束不变：程序只做**发现**，"这算不算我"永不由程序置（8.5 / D12）。
+
+### 11.1 做了什么
+
+| 文件 | 改动 |
+|---|---|
+| `src/elysia/memory/sediment.py` *(新增)* | 纯函数模块：`find_candidate(records) -> PatternSignal \| None` + `PatternSignal`（`record` 代表 / `occurrences` / `span_days`）+ 常量与 `_is_experience` / `_is_taken` / `_text`。**不落库、不依赖存储**——发现逻辑因此可单测 |
+| `src/elysia/soul/heartbeat.py` | `_maintain_memories` 增第 4 步（降级判定之后）：`find_candidate` → `_offer_candidate`；新增 `_offer_candidate`（照抄代表原文落库 + 推脉冲） |
+| `src/elysia/soul/desire.py` | `EVENT_PULSES` 增 `"self_candidate": {"tr": 0.6, "cs": 0.8, "sa": 0.0}`（好奇 + 亲近，不是焦虑） |
+| `src/elysia/soul/expression_service.py` | `_tool_adopt` 改为"**候选当代表**"：命中候选时，与它同家的重述（`content_similarity ≥ SEDIMENT_CLUSTER_SIMILARITY`）不参与并列判定 |
+
+### 11.2 动工前的两处代码核对式发现
+
+照 P3-W / 第八节 8.12 的做法，动工前把 S3 逐条对照真实代码核了一遍，改掉两处"设计稿与代码事实不符"：
+
+| # | 发现 | 依据 | 处置 |
+|---|---|---|---|
+| 发现 1 | **标注错误**：8.4 写候选标 `source=observation` 并称"天然被来源闸门挡住"，但代码里 `observation` **不在被挡之列** | `retrieve.py::_HOOK_BLOCKED_SOURCES = (SOURCE_INFERENCE, SOURCE_SYSTEM)` | 改标 `SOURCE_INFERENCE` + `CERTAINTY_PROBABLE`（语义准 + 真被挡）。设计稿 8.4 已同步修正并留注 |
+| 发现 2 | **结构性死阀门**：候选只能照抄原文（程序不能自己写句子），而候选又从"同一件事 ≥3 条重述"的簇里生成 → `adopt` 打分时**候选与重述分数完全相同**，S2 的 `top1 ≥ 2×top2` 必然不成立，gate② 结构性落空 | `expression_service.py::_tool_adopt` + `ADOPT_DOMINANCE=2.0` | 用户拍板"**候选当代表**"：候选是那一家的代表，同家重述不参与并列判定。**无候选时行为完全不变** |
+
+> 发现 2 的实质：S2 的判据（"足够突出"）与 S3 的产出（"成簇的重复"）在**同分**上撞车。
+> 解法不是放宽判据（会误认），而是承认"候选 = 那一家的代表"这一语义，让它**代表**自家缺席。
+
+### 11.3 沉淀判据（三条缺一不可）
+
+1. **提起 ≥ 3 次**（`SEDIMENT_MIN_OCCURRENCES`）——两次可能是巧合或重复写入，三次才算"反复"。
+2. **跨越 ≥ 1 天**（`SEDIMENT_MIN_SPAN_DAYS`）——同一场对话里说三遍不是"反复出现"，是复述。
+3. **未递过、未认领**（`_is_taken`）——递过的东西不再是"新发现"；已认领的是答案，不是候选。
+
+**其余裁决**：
+- **只递一个**（`occurrences` 优先、`span_days` 次之）：候选是递到她手上的东西，一次给一堆就是噪声——她一次只想一件事。
+- **聚类以"代表"为准，不链式**：链式（与簇内任一条相似即并入）会把"和第四个人聊到的事"也滚进来，簇越滚越大且结果不可预测。
+- **素材白名单**（`_SEDIMENT_KINDS = interaction / state / internal`）：她说出口的话（`expression`）是回声、不算经历（与缺口/hooks 同一取舍）；自我认知已是答案。
+- **够不着的、被取代的、她拒绝的都不算素材**：她忘掉的、想不起的不该当"我是什么"的依据。
+
+### 11.4 候选的形态（"程序只做发现"的可验证化）
+
+- **正文与叙事都照抄原文**（`narrative` 优先，与身份段同一句）：程序不自己写句子。
+  若由程序中译出一句话，就等于"由程序员硬编码她是什么"换个地方存（8.2 已否过的性质）；
+  且合成句与原文高度重叠，她在 `adopt` 时反而被自家重述挡住。
+- **`protected=False`**：珍贵由她的**认领**与时间决定，程序不替她置。
+- **落库后这条候选自己就是"已递过"的证据**（`_is_taken` 认 `source=inference`）→ 不重复递。
+- **脉冲封顶 0.35**（`SEDIMENT_INTENSITY_MAX`，`0.2 + 0.05×(次数−3)`）：是"轻微的心里一动"，不把 TR/CS 顶满。
+- **不进话语**：`source=inference` 被 `_HOOK_BLOCKED_SOURCES` 挡住 → 只走感受路径推一次脉冲。
+
+### 11.5 测试（新增 12 项）
+
+| 测试 | 断言 |
+|---|---|
+| `test_sediment.py`（9 项，纯函数） | 次数不足 / 同日复述 / 正常沉淀（代表=最早那条、`span_days` 正确）/ 忽略自己的回声 / 忽略够不着·被取代·被拒绝 / 已递过不重复递 / 已认领不再递 / 只返回最强的一个 / 强度封顶 |
+| `test_heartbeat.py::test_maintain_memories_offers_candidate_for_repeated_pattern` | 跨天反复 → 落库候选（**正文照抄原文**、`certainty=probable`、`protected=0`、`kind` 仍是 `interaction`）+ 脉冲（TR/CS 升、SA 不动） |
+| `test_heartbeat.py::test_maintain_memories_offers_candidate_only_once` | 连跑两次仍只有一条候选（递过的不再递） |
+| `test_expression_service_memory.py::test_adopt_tool_prefers_candidate_over_its_family` | 两条同题原文 + 一条候选 → `adopt` 升格的是**候选**，两条原文仍是经历（代表而非连坐） |
+
+### 11.6 门禁与生效
+
+- `ruff check` ✅ ｜ `ruff format --check src tests` ✅（83 文件）｜ `mypy src` ✅（strict，51 源文件）｜ `pytest` ✅ **330 passed**（318 + 新增 12）。
+- **需重启灵魂装载新代码**（`soul.ps1 stop` → `soul.ps1 start -Body`）；本次**不代为重启**，由用户自行决定时机。
+- 生效后她的可见变化：**感受层多一种"心里一动"**（某件事被反复提起 → TR/CS 微升），
+  话里**一个字不提**；此后若她愿意，可用 `adopt` 把它认作"这就是我"（S2 的动作）。
+
+### 11.7 下一步
+
+**S4 观测与验收**：① 记忆浏览器增"自我／候选"标签；② 8.9 四项验收；③ 补降级链（fallback）与 `micro.py` 消费身份段（S1 的 N1 遗留）；④ 决定 N6"要不要让她梦到自己是谁"。
+
+**粒度天花板（照实说）**：判定"同一件事"用的是字符二元组 Jaccard，对"换说法的同一事实"识别力本就有限
+（第七节实测同义重述仅 0.26~0.33）。因此 S3 目前只能沉淀"**措辞相近**的反复提起"，
+真正的语义模式要等 embedding（`P3_MEMORY.md` 第九节问题 3）。
 
 ---
 

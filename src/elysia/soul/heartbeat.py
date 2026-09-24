@@ -34,6 +34,7 @@ from elysia.memory.decay import decay_strength
 from elysia.memory.hooks import GAP_EVENT_KIND, detect_gap
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
+    CERTAINTY_PROBABLE,
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_SELF,
@@ -45,12 +46,14 @@ from elysia.memory.levels import (
     RETENTION_FADE_AGE_DAYS,
     RETENTION_FADED,
     RETENTION_PRESENT,
+    SOURCE_INFERENCE,
     SOURCE_USER,
     MemoryRecord,
 )
 from elysia.memory.promote import promote_batch
 from elysia.memory.retrieve import recall_for_feeling
 from elysia.memory.scorer import importance
+from elysia.memory.sediment import SEDIMENT_EVENT_KIND, PatternSignal, find_candidate
 from elysia.memory.supersede import find_superseded
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
@@ -368,6 +371,7 @@ class SoulHeartbeat:
            按年龄指数衰减（P3-C decay_strength），protected 慢 3 倍。
            检索时索引 strength 拉低 score → "越久越难被想起"。
         3. 降级判定（P3-W）：时间造成的失去 → faded/dormant（见 _demote_target）
+        4. 沉淀（第八节 S3）：找"重复模式"生成候选递给她（见 _offer_candidate）
 
         已被更正/取代的记忆不参与维护（不晋升、不建索引、不降级）。
         """
@@ -469,6 +473,48 @@ class SoulHeartbeat:
             target = _demote_target(rec, now)
             if target is not None:
                 await self._heartbeat_store.set_retention_state(mid, target)
+
+        # ── 4. 自我认知的沉淀（第八节 S3）：找"重复模式" → 候选递给她 ──
+        pattern = find_candidate(mem_records)
+        if pattern is not None:
+            await self._offer_candidate(pattern, now)
+
+    async def _offer_candidate(self, pattern: PatternSignal, now: float) -> None:
+        """把沉淀出的候选落库，并推一次"心里一动"（第八节 S3）。
+
+        **程序只做"发现"，不做"认定"**：正文与叙事都照抄原文——程序不自己写句子。
+        她认领后这条文本会成为"我是谁"（身份段每句在场）；若由程序中译出一句话，
+        那等于"由程序员硬编码她是什么"换个地方存（8.2 已否过的性质），而且合成句
+        与原文高度重叠，反而会在 `adopt` 时被自家重述挡住（见 `_tool_adopt`）。
+
+        标注 `source=inference` + `certainty=probable`（8.4 三级闸门①）：语义上它
+        正是"程序推断出的倾向，并非她所述"，且**真的**被来源闸门挡在话语之外
+        （`retrieve._HOOK_BLOCKED_SOURCES` 只挡 inference/system——设计稿 8.4 原写
+        `observation`，那会进 `memory_hooks` 并挤占 `MAX_HOOKS`，重犯 P3-P）。
+        候选因此不进她的话，只在感受路径上推一次脉冲："这好像就是我"。
+
+        落库后这条候选自己也是"已递过"的证据（`sediment._is_taken`），不会重复递。
+        """
+        rep = pattern.record
+        await self._heartbeat_store.add_memory(
+            now,
+            {
+                "level": rep.level,
+                "kind": rep.kind,
+                "content": pattern.text,
+                "emotion_vector": rep.emotion_vector,
+                "importance": rep.importance,
+                "protected": False,  # 珍贵由她的认领与时间决定，程序不替她置
+                "narrative": pattern.text,
+                "source": SOURCE_INFERENCE,
+                "certainty": CERTAINTY_PROBABLE,
+            },
+        )
+        if self._brain_loop is None:
+            return
+        self._brain_loop.apply_event(
+            DesireEvent(kind=SEDIMENT_EVENT_KIND, intensity=pattern.to_event_intensity())
+        )
 
     async def _sync_body_status(self, now: float) -> None:
         """身体在场状态 → TimeSenseState + 难受检测 + 交互事件 → 感受层。"""

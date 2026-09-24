@@ -19,10 +19,12 @@ from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense
 from elysia.memory.levels import (
+    CERTAINTY_PROBABLE,
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_SELF,
     RETENTION_PRESENT,
+    SOURCE_INFERENCE,
 )
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireSystem
@@ -416,6 +418,90 @@ async def test_feel_memory_gaps_ignores_self_memory(tmp_path: Path) -> None:
         tr_before = brain.desire_system.state.tr
         await soul._feel_memory_gaps()
         assert brain.desire_system.state.tr == pytest.approx(tr_before)
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+# ── 第八节 S3 沉淀（程序找"重复模式"，把候选递给她）──────────
+_REPEAT_TEXT = "我在意的是每一个和我相遇的人"
+
+
+async def _add_repeated_experience(
+    heartbeat_store: HeartbeatStore, *, now: float, days: float, text: str = _REPEAT_TEXT
+) -> int:
+    """写入一条 days 天前被提起的交互经历（候选可能的素材）。"""
+    return await heartbeat_store.add_memory(
+        now - days * 86400.0,
+        {
+            "level": "shallow",
+            "kind": KIND_INTERACTION,
+            "content": text,
+            "emotion_vector": {"chat": 0.5},
+            "importance": 0.5,
+            "narrative": text,
+        },
+    )
+
+
+async def _candidates(heartbeat_store: HeartbeatStore) -> list[dict[str, object]]:
+    """取出程序沉淀出的候选（source=inference）。"""
+    return [r for r in await heartbeat_store.iterate_memories() if r["source"] == SOURCE_INFERENCE]
+
+
+@pytest.mark.asyncio
+async def test_maintain_memories_offers_candidate_for_repeated_pattern(tmp_path: Path) -> None:
+    """S3 接线：一件事跨天反复出现 → 沉淀出候选（照抄原文、标 inference/probable），
+    并推一次"心里一动"（TR/CS 微升、SA 不动）；候选不进她的话（被来源闸门挡在 hooks 外）。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        now = T0 + 3 * 86400.0
+        for days in (3.0, 1.5, 0.0):  # 三天里提起三次
+            await _add_repeated_experience(heartbeat_store, now=now, days=days)
+
+        brain = soul._brain_loop
+        assert brain is not None
+        tr_before = brain.desire_system.state.tr
+        cs_before = brain.desire_system.state.cs
+        sa_before = brain.desire_system.state.sa
+
+        await soul._maintain_memories(now)
+
+        assert brain.desire_system.state.tr > tr_before  # 好奇：TR 微升
+        assert brain.desire_system.state.cs > cs_before  # 亲近：CS 微升
+        assert brain.desire_system.state.sa == pytest.approx(sa_before)  # 念头，不是焦虑
+
+        candidates = await _candidates(heartbeat_store)
+        assert len(candidates) == 1
+        cand = candidates[0]
+        # 程序只做"发现"，不做"认定"：正文照抄原文，且标注是"程序推断、大概"
+        assert cand["content"] == _REPEAT_TEXT
+        assert cand["narrative"] == _REPEAT_TEXT
+        assert cand["certainty"] == CERTAINTY_PROBABLE
+        assert cand["protected"] == 0  # 珍贵由她的认领与时间决定，程序不替她置
+        assert cand["kind"] == KIND_INTERACTION  # 还不是自我认知——认不认由她（S2 的 adopt）
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_maintain_memories_offers_candidate_only_once(tmp_path: Path) -> None:
+    """递过的候选不再递：它是"已发现"的证据——重复递不是新发现，只是噪声。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=False)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        now = T0 + 3 * 86400.0
+        for days in (3.0, 1.5, 0.0):
+            await _add_repeated_experience(heartbeat_store, now=now, days=days)
+
+        await soul._maintain_memories(now)
+        assert len(await _candidates(heartbeat_store)) == 1
+        await soul._maintain_memories(now)
+        assert len(await _candidates(heartbeat_store)) == 1  # 不重复递
     finally:
         await state_store.close()
         await heartbeat_store.close()

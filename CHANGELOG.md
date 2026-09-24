@@ -453,6 +453,20 @@
 - 门禁：ruff lint ✅ / ruff format ✅（81 文件）/ mypy strict ✅（50 源文件）/ pytest ✅ **318 passed**（311 + 新增 7）
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后她可以说"这就是我"。**S3 沉淀 / S4 观测与验收待动工**
 
+### 第八节 S3：Self Memory 沉淀（程序找"重复模式"递候选，2026-09-24）
+- **触发**：依第八节 8.8 拆步表落地 **S3 沉淀**——对外行为变化 = **感受层新增"候选"脉冲（不进话语）**。核心约束（8.5 / D12）：程序只做**发现**，"这算不算我"永不由程序置
+- **feat（memory/sediment.py 新增）**：纯函数模块 `find_candidate(records) -> PatternSignal | None` + `PatternSignal`（`record` 代表 / `occurrences` / `span_days`）——**不落库、不依赖存储**，发现逻辑可单测
+- **feat（soul/heartbeat.py）**：`_maintain_memories` 增第 4 步（降级判定之后）`find_candidate` → `_offer_candidate`（照抄代表原文落库：`level`/`kind`/`emotion_vector`/`importance` 复制，`source=inference` + `certainty=probable`，`protected=False`）+ 推脉冲
+- **feat（soul/desire.py）**：`EVENT_PULSES` 增 `"self_candidate": {"tr": 0.6, "cs": 0.8, "sa": 0.0}`（好奇 + 亲近，不是焦虑）
+- **判据（三条缺一不可）**：同一件事被提起 **≥3 次**（两次可能只是巧合/重复写入）**且跨越 ≥1 天**（同一场对话里说三遍是复述，不是反复）**且未递过也未被认领**（递过的不再是"新发现"）
+- **其余裁决**：只递一个（提起最多优先，`occurrences`→`span_days`）；聚类**以代表为准不链式**（链式会把无关的事滚进来）；素材白名单 `interaction/state/internal`（她说的话是回声、自我认知已是答案）；够不着/被取代/被拒绝的不算素材；脉冲封顶 0.35（"轻微的心里一动"）
+- **标注修正（发现 1）**：设计稿 8.4 原写候选标 `source=observation` 并称"天然被来源闸门挡住"——但代码里 `_HOOK_BLOCKED_SOURCES` 只挡 `inference`/`system`，`observation` **会进 `memory_hooks`** 并挤占 `MAX_HOOKS`（重犯 P3-P）。改标 `SOURCE_INFERENCE` + `CERTAINTY_PROBABLE`（语义准 + 真被挡）
+- **接缝修复（发现 2）**：候选只能照抄原文（程序不自己写句子），而候选又从"同一件事 ≥3 条重述"的簇里生成 → `adopt` 打分时候选与重述**分数完全相同**，S2 的 `top1 ≥ 2×top2` 必然不成立（gate② 结构性落空）。用户拍板"**候选当代表**"：`_tool_adopt` 命中候选时，与它同家的重述（Jaccard ≥0.35）不参与并列判定；**无候选时行为完全不变**
+- **测试**：`test_sediment.py` 新增 9 项（纯函数）；`test_heartbeat.py` 新增 2 项（候选落库字段 + 脉冲 / 不重复递）；`test_expression_service_memory.py` 新增 1 项（候选优先于同家重述）
+- 门禁：ruff lint ✅ / ruff format ✅（83 文件）/ mypy strict ✅（51 源文件）/ pytest ✅ **330 passed**（318 + 新增 12）
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后她会多一种"心里一动"（某件事被反复提起），话里一个字不提。**S4 观测与验收待动工**
+- **粒度天花板（照实说）**：字符二元组 Jaccard 只能沉淀"措辞相近的反复提起"（同义重述仅 0.26~0.33），真语义模式待 embedding（`P3_MEMORY.md` 第九节问题 3）
+
 ---
 
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）

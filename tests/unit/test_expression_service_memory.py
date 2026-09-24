@@ -19,6 +19,7 @@ from elysia.llm.identity import IDENTITY_FIELD, MAX_IDENTITY_LINES
 from elysia.llm.validator import ValidationResult
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
+    CERTAINTY_PROBABLE,
     CLAIM_CLAIMED,
     CLAIM_REJECTED,
     KIND_EXPRESSION,
@@ -27,6 +28,7 @@ from elysia.memory.levels import (
     LEVEL_DEEP,
     RETENTION_PRESENT,
     RETENTION_SUPPRESSED,
+    SOURCE_INFERENCE,
     SOURCE_SELF,
 )
 from elysia.memory.retrieve import retrieve_from_store
@@ -698,5 +700,48 @@ async def test_adopt_tool_reports_when_identity_is_full(store: HeartbeatStore) -
         assert result == "（你心里的位置满了——先放下一条旧的，再认领新的）"
         rec = await store.get_memory(mid)
         assert rec is not None and rec["kind"] == KIND_INTERACTION
+    finally:
+        await store.close()
+
+
+# ── 第八节 S3 候选当"代表"（他递来的候选优先于自家重述）────
+async def _add_candidate(store: HeartbeatStore, content: str) -> int:
+    """落一条程序沉淀出的候选（照抄原文，标 inference/probable）。"""
+    return await store.add_memory(
+        1.0,
+        {
+            "level": "shallow",
+            "kind": KIND_INTERACTION,
+            "content": content,
+            "emotion_vector": {"chat": 0.5},
+            "importance": 0.5,
+            "protected": False,
+            "narrative": content,
+            "source": SOURCE_INFERENCE,
+            "certainty": CERTAINTY_PROBABLE,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_prefers_candidate_over_its_family(store: HeartbeatStore) -> None:
+    """S3：候选是那一家的"代表"——同家的重述不参与并列判定。
+
+    否则"自家重述互相占位"，判据（top1 ≥ 2×top2）必然并列，她永远认领不到
+    程序递来的候选。原文仍是经历——候选是代表，不是把原文一起升格。
+    """
+    await store.start()
+    try:
+        await _add_forgettable(store, _ADOPTED_TEXT)
+        await _add_forgettable(store, _ADOPTED_TEXT)
+        cand_id = await _add_candidate(store, _ADOPTED_TEXT)
+
+        result = await _tick_with_tool(store, "adopt", "在意的人")
+        assert result is not None and "认作自己的一部分" in result
+        rec = await store.get_memory(cand_id)
+        assert rec is not None
+        assert rec["kind"] == KIND_SELF  # 升格的是候选，不是那两条原文
+        originals = [r for r in await store.iterate_memories() if r["kind"] == KIND_INTERACTION]
+        assert len(originals) == 2
     finally:
         await store.close()

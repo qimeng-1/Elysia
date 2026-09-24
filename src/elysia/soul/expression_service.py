@@ -26,6 +26,10 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`�
 
 第八节 S2：工具增至五个——再加 `adopt`（把某段经历认作"这就是我"）。
 认领是**她的动作**：程序只产生候选（S3），"算不算我"永不由程序置。
+
+第八节 S3：候选由心跳的沉淀循环生成（程序只做"发现"，正文照抄原文）。
+`adopt` 里候选**优先于同家的重述**（它是那一家的代表）——否则自家重述互相占位，
+判据必然并列，她永远认领不到程序递来的候选。
 """
 
 from __future__ import annotations
@@ -49,11 +53,14 @@ from elysia.memory.levels import (
     LEVEL_SHALLOW,
     RETENTION_PRESENT,
     RETENTION_SUPPRESSED,
+    SOURCE_INFERENCE,
     SOURCE_SELF,
     MemoryRecord,
 )
 from elysia.memory.retrieve import MemoryHit, topic_match
 from elysia.memory.scorer import importance
+from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
+from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
 from elysia.soul.expression import build_expression
 from elysia.tts.chain import TTSChain, TTSRequest, TTSResult
@@ -349,13 +356,18 @@ class ExpressionService:
         判据见 `ADOPT_DOMINANCE`：不设绝对覆盖度下限（换说法的同一件事相似度本就低），
         只要求"足够突出"；并列/模糊时如实回"没找到"，不抓错。
 
+        **候选优先（第八节 S3）**：候选（`source=inference`）是程序从"同一件事的
+        多条重述"里挑出的**代表**，因此命中候选时，与它同家的重述不参与并列判定。
+        否则自家重述互相占位（候选与原文分数完全相同），`top1 ≥ 2×top2` 必然不成立，
+        认领永远落空——S3 递出的候选会变成"造好没插电"的死阀门。
+
         不给她**已经不认**或**已不想再想起**的记忆（那是她自己的决定，程序不代她翻案），
         也不给已被取代的旧事实与已是自我认知的条目。
         """
         query = topic.strip()
         if not query:
             return ""
-        scored: list[tuple[float, int, str]] = []
+        scored: list[tuple[float, int, str, bool]] = []  # (分数, id, 那句话, 是否候选)
         for d in await self._store.iterate_memories():
             if d.get("superseded_by") is not None:
                 continue  # 旧事实已作废（事实更正），不能认作"我"
@@ -365,15 +377,29 @@ class ExpressionService:
                 continue  # 她说过"我不认这个"
             if str(d.get("retention_state") or "") == RETENTION_SUPPRESSED:
                 continue  # 她说过"不想再想起"
-            text = str(d.get("content") or "")
-            score = max(topic_match(query, text), topic_match(query, str(d.get("narrative") or "")))
+            # 认作"我"之后，这句话会成为身份段文本（`_identity_lines` 也取 narrative 优先）
+            text = str(d.get("narrative") or "") or str(d.get("content") or "")
+            score = max(topic_match(query, text), topic_match(query, str(d.get("content") or "")))
             if score > 0.0:
-                scored.append((score, int(d["id"]), text))
+                is_candidate = str(d.get("source") or "") == SOURCE_INFERENCE
+                scored.append((score, int(d["id"]), text, is_candidate))
         if not scored:
             return "（你没找到想认作自己的那件事）"
-        scored.sort(key=lambda item: item[0], reverse=True)
-        best_score, best_id, best_text = scored[0]
-        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        candidate = max(
+            (item for item in scored if item[3]), key=lambda item: item[0], default=None
+        )
+        if candidate is not None and candidate[0] > 0.0:
+            pool = [
+                item
+                for item in scored
+                if item is candidate
+                or content_similarity(candidate[2], item[2]) < SEDIMENT_CLUSTER_SIMILARITY
+            ]
+        else:
+            pool = scored
+        pool.sort(key=lambda item: item[0], reverse=True)
+        best_score, best_id, best_text, _ = pool[0]
+        runner_up = pool[1][0] if len(pool) > 1 else 0.0
         if best_score < ADOPT_DOMINANCE * runner_up:
             return "（你没找到想认作自己的那件事）"
         # 身份段是"少而稳"的（8.9 验收 4）：位置满了就如实告诉她，

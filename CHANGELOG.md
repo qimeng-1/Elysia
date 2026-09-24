@@ -423,7 +423,7 @@
 - 门禁：ruff lint ✅ / ruff format ✅（79 文件）/ mypy strict ✅（49 源文件）/ pytest ✅ **297 passed**（W1 时 290 + W2 新增 7）
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——W2 是她的新能力，重启后即可在对话中调用。**P3-W 整体完成**
 
-### 第八节 S1：Self Memory 本体（身份段通电，2026-09-24，无 commit）
+### 第八节 S1：Self Memory 本体（身份段通电，2026-09-24，f2a9242）
 - **触发**：Self Memory（"我是谁"）设计稿评审通过并拍板三点——**D1 形态 = 正交 `KIND_SELF`**（不新增层、零 DDL）／**D2 产生机制 = 出生设定 bootstrap + 沉淀**／**D3 注入位置 = 身份段**（每句在场）。本条落地 **S1 本体**，硬约束是**对外行为零变化**
 - **feat（memory/levels.py）**：新增 `KIND_SELF = "self"`（正交维度——`kind` 列是 `TEXT` 无 CHECK，**零 DDL 变更**）+ 入 `KINDS`；`SOURCE_BY_KIND[KIND_SELF]=SOURCE_SELF`、`CERTAINTY_BY_KIND[KIND_SELF]=CERTAINTY_CERTAIN`
 - **feat（memory/scorer.py）**：`_KIND_BASE[KIND_SELF]=0.30`——所有类型里最重的一类

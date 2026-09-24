@@ -491,6 +491,7 @@
 - **S7 观测（tools/memory_view.py）**：新增第三档标签 `TAG_SEED="出生设定"`（`kind=self` 且 `source=system`）+ 纯函数 `_is_seed` / `_in_identity`（与 `expression_service._self_records` **同一套闸门**）；状态栏给「**身份段 x/5＝出生设定 n＋自我 m**」；明细面板给提示"她可 disclaim/forget/adopt"；6.1 增**身份连续性速查 SQL**（在册自我认知 + `expression_log` 最近一次开口的 `identity` 实况）——**不加表不加列**
 - **测试**：`test_identity.py` 契约按 S5 重写（`None` 才回退种子 / `[]` = 她此刻真的没有自我认知 / 种子声明）+ 新增 3 项种子接线（幂等、进身份段但不进 hooks、她可 `disclaim` 掉种子）；`test_expression_service_memory.py` 席位守卫改按总行数；`test_llm_chain.py` 新增 3 项 fallback 接线 / `require_key`；`test_memory_view.py` 新增"出生设定"标签与名额计数
 - 门禁：ruff lint ✅ / ruff format ✅（83 文件）/ mypy strict ✅（51 源文件）/ pytest ✅ **346 passed**
+- **提交**：`4bd1bc0`（15 文件 / +649 −71），已推送（`3754556..4bd1bc0`）；pre-commit 四件套（ruff lint / ruff format check / mypy strict / pytest regression）全部 Passed
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后库里出现 **3 条可见的身份种子**；身份段的来源由"代码常量"变为"库里在册的数据"（重启 / 换模型 / 断网 / 换库四情形逐字不变）。**本次唯一对外变化**：身份段由 1 行（出生设定）增至 3 行（原出生设定一字未改 ＋ D-S2 拍板补的两条边界种子，均为档案原文）。**本次不代为重启**，由用户自行决定时机
 
 ---

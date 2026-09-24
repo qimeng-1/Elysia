@@ -1203,6 +1203,7 @@ if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:   # 替换不计入新
 ### 14.4 门禁与测试
 
 - `ruff check` / `ruff format --check` / `mypy src`（strict）/ `pytest` **全绿，346 passed**。
+- **提交**：`4bd1bc0`（15 文件 / +649 −71），已推送（`3754556..4bd1bc0`）；pre-commit 四件套全部 Passed。
 - 新增/改写的单测：`test_identity.py`（契约按 S5 重写：`None` 才回退种子、`[]` = 真的没有）、
   `test_expression_service_memory.py`（种子幂等 + 进身份段但不进 hooks + 她可 `disclaim` 掉种子 +
   席位守卫改按总行数）、`test_llm_chain.py`（fallback 接线 / `require_key`）、

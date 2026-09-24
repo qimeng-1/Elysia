@@ -27,8 +27,12 @@ def _normalize(text: str) -> str:
     return "".join(ch for ch in text if ch.isalnum())
 
 
-def _bigrams(text: str) -> set[str]:
-    """字符二元组集合（单字符则取自身）。"""
+def bigrams(text: str) -> set[str]:
+    """字符二元组集合（单字符则取自身）。
+
+    中文友好、无 NLP 依赖的文本粒度——同话题判定（本模块）与
+    话题相关性判定（retrieve.py）共用同一粒度，避免两处实现分叉。
+    """
     t = _normalize(text)
     if len(t) < 2:
         return {t} if t else set()
@@ -37,7 +41,7 @@ def _bigrams(text: str) -> set[str]:
 
 def content_similarity(a: str, b: str) -> float:
     """两段内容的二元组 Jaccard 相似度（0-1）。"""
-    ga, gb = _bigrams(a), _bigrams(b)
+    ga, gb = bigrams(a), bigrams(b)
     if not ga or not gb:
         return 0.0
     union = ga | gb

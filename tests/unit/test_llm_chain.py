@@ -168,3 +168,79 @@ async def test_degrade_exception_is_swallowed() -> None:
     r = await chain.speak(_instruction())
     assert r.level == "micro"
     assert len(r.text) > 0
+
+
+# ── P3-V / P3-W2 工具装配（四个工具都是她的动作）─────────────
+class FakeToolBackend:
+    """具备工具能力的主声替身：记录拿到的工具规格，并调用一次指定工具。"""
+
+    def __init__(self, tool: str, args: dict[str, Any]) -> None:
+        self._tool = tool
+        self._args = args
+        self.tools: list[dict[str, Any]] = []
+
+    async def complete(
+        self, instruction: dict[str, Any], prompt_template: dict[str, Any]
+    ) -> str | None:  # pragma: no cover - 具备工具能力时不该走单轮
+        return None
+
+    async def complete_with_tools(
+        self,
+        instruction: dict[str, Any],
+        prompt_template: dict[str, Any],
+        *,
+        tools: list[dict[str, Any]],
+        run_tool: Any,
+    ) -> str | None:
+        self.tools = tools
+        await run_tool(self._tool, self._args)
+        return "嗯，我记得的。"
+
+
+@pytest.mark.asyncio
+async def test_tool_capable_main_receives_four_tools() -> None:
+    """主声拿到 recall + disclaim + forget + restore 四个工具，执行器按（名, 参数）派发。"""
+    backend = FakeToolBackend("disclaim", {"topic": "生日"})
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    async def runner(name: str, args: dict[str, Any]) -> str:
+        seen.append((name, args))
+        return "（你不再把「生日」当作自己的记忆）"
+
+    chain = LLMChain(main=backend)
+    chain.set_tool_runner(runner)
+    r = await chain.speak(_instruction())
+    assert [t["function"]["name"] for t in backend.tools] == [
+        "recall",
+        "disclaim",
+        "forget",
+        "restore",
+    ]
+    assert seen == [("disclaim", {"topic": "生日"})]
+    assert r.level == "main"
+
+
+async def _speak_with_tool(
+    tool_name: str, args: dict[str, Any]
+) -> tuple[list[tuple[str, dict[str, Any]]], str]:
+    """用指定工具跑一次开口，返回（执行器收到的调用, 表达级别）。"""
+    backend = FakeToolBackend(tool_name, args)
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    async def runner(name: str, got: dict[str, Any]) -> str:
+        seen.append((name, got))
+        return "（好的）"
+
+    chain = LLMChain(main=backend)
+    chain.set_tool_runner(runner)
+    r = await chain.speak(_instruction())
+    return seen, r.level
+
+
+@pytest.mark.asyncio
+async def test_forget_and_restore_tools_are_dispatched() -> None:
+    """forget / restore 同样是她的动作——规格递到她手上，执行器按名派发。"""
+    for tool_name in ("forget", "restore"):
+        seen, level = await _speak_with_tool(tool_name, {"topic": "那次争吵"})
+        assert seen == [(tool_name, {"topic": "那次争吵"})]
+        assert level == "main"

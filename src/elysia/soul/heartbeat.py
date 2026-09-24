@@ -30,13 +30,25 @@ from elysia.core.timesense import (
     TimeSenseState,
     to_payload,
 )
-from elysia.memory.decay import STRENGTH_RETRIEVE_FLOOR, decay_strength
+from elysia.memory.decay import decay_strength
+from elysia.memory.hooks import GAP_EVENT_KIND, detect_gap
 from elysia.memory.levels import (
+    CERTAINTY_CERTAIN,
+    KIND_EXPRESSION,
     KIND_INTERACTION,
+    LEVEL_DEEP,
     LEVEL_SHALLOW,
+    PROTECT_DEEP_ACCESS,
+    RETENTION_DORMANT,
+    RETENTION_DORMANT_AGE_DAYS,
+    RETENTION_FADE_AGE_DAYS,
+    RETENTION_FADED,
+    RETENTION_PRESENT,
+    SOURCE_USER,
     MemoryRecord,
 )
 from elysia.memory.promote import promote_batch
+from elysia.memory.retrieve import recall_for_feeling
 from elysia.memory.scorer import importance
 from elysia.memory.supersede import find_superseded
 from elysia.protocol.snapshots import build_snapshot
@@ -51,6 +63,44 @@ logger = logging.getLogger("elysia.soul.heartbeat")
 
 # P3 记忆维护：每 N 拍晋升扫描一次（心跳 1s → 约每 5 分钟）
 MEMORY_MAINTAIN_EVERY_N = 300
+
+# P3-O 记忆感受路径：每 N 拍静默唤起一次（同 5 分钟节律，小脉冲不冲保护带）
+MEMORY_FEELING_EVERY_N = 300
+
+# 遗忘状态的"深度序"（P3-W）：程序只降不升——唤醒走检索路径（被话题提起），
+# 不在这里。suppressed 不在表内：她的决定不属于"时间造成的失去"，程序不碰。
+_RETENTION_DEPTH: dict[str, int] = {
+    RETENTION_PRESENT: 0,
+    RETENTION_FADED: 1,
+    RETENTION_DORMANT: 2,
+}
+
+
+def _demote_target(rec: MemoryRecord, now: float) -> str | None:
+    """按"距上次被想起"判定时间造成的降级（P3-W）；不该降则返回 None。
+
+    计时口径是 `since_last_access = now − (last_access_ts or created_ts)`，
+    **不是绝对年龄**：若按 created_ts 计，一条 200 天的记忆被话题唤醒回 present 后，
+    下一轮维护会立刻把它打回 dormant——永远醒不过来。用"距上次被想起"计时后，
+    唤醒即 touch → 重新计时，"你一提，它又活过来了"才是真的。
+
+    `faded` 额外要求 `access_count == 0`：被想起过的事至少曾经重要，
+    不该连细节都淡掉（它是"从没被翻过的那本旧相册"）。
+    """
+    current_depth = _RETENTION_DEPTH.get(rec.retention_state)
+    if current_depth is None:  # suppressed：她的决定，程序不碰
+        return None
+    last_ts = rec.last_access_ts if rec.last_access_ts is not None else rec.created_ts
+    since_days = max(0.0, (now - last_ts) / 86400.0)
+    if since_days >= RETENTION_DORMANT_AGE_DAYS:
+        target = RETENTION_DORMANT
+    elif since_days >= RETENTION_FADE_AGE_DAYS and rec.access_count == 0:
+        target = RETENTION_FADED
+    else:
+        return None
+    if _RETENTION_DEPTH[target] <= current_depth:
+        return None  # 只降不升（已沉睡的不会被"降"回淡化）
+    return target
 
 
 class SoulHeartbeat:
@@ -92,6 +142,8 @@ class SoulHeartbeat:
         self._last_interaction_event_ts: float = 0.0
         # P3 记忆生命周期维护：按心跳计数节流（每 MEMORY_MAINTAIN_EVERY_N 拍一次晋升扫描）
         self._memory_maintain_tick = 0
+        # P3-O 记忆感受路径：按心跳计数节流（静默唤起，只推心情）
+        self._memory_feeling_tick = 0
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
         self._new_interaction = False
         # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
@@ -133,6 +185,8 @@ class SoulHeartbeat:
                     has_event=False,
                     dt=self._interval_s,
                 )
+                # P3-O 记忆感受路径：静默唤起 → 只推心情（落盘前生效，本拍即体现）
+                await self._feel_memories(brain_output)
                 # 将欲望状态持久化
                 await self._state_store.save_json(
                     "desire", self._brain_loop.desire_system.to_payload()
@@ -212,6 +266,9 @@ class SoulHeartbeat:
                             ),
                             "protected": False,
                             "narrative": msg,
+                            # P3-T 来源标注：这是用户告知，不是她自己的话
+                            "source": SOURCE_USER,
+                            "certainty": CERTAINTY_CERTAIN,
                         },
                     )
                     # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
@@ -226,6 +283,67 @@ class SoulHeartbeat:
 
             await self._clock.sleep(self._interval_s)
 
+    async def _feel_memories(self, output: BrainOutput) -> None:
+        """P3-O 记忆的感受路径：被"心境共鸣"唤起 → 只推心情，不进入她的话。
+
+        与话语路径（表达服务的 memory_hooks / recall 工具）完全分离——
+        她"记得你"因此是能被感觉到的，而不是被念出来的。
+        节流到 MEMORY_FEELING_EVERY_N 拍，用小脉冲注入：恢复项会把它们
+        拉回平衡点，长期平均不会冲上保护带。
+        """
+        self._memory_feeling_tick += 1
+        if self._memory_feeling_tick < MEMORY_FEELING_EVERY_N:
+            return
+        self._memory_feeling_tick = 0
+        intensity = await recall_for_feeling(self._heartbeat_store, output.feelings.to_dict())
+        if intensity > 0 and self._brain_loop is not None:
+            self._brain_loop.apply_event(DesireEvent(kind="memory_recall", intensity=intensity))
+        # P3-U 记忆缺口：想不起某些事的感觉（同样是感受路径，不进话语）
+        await self._feel_memory_gaps()
+
+    async def _feel_memory_gaps(self) -> None:
+        """P3-U 记忆缺口：索引强度跌破检索下限 → "有些事想不起来了"。
+
+        与感受路径同一条路——缺口只推心情（memory_gap 脉冲：TR 微升=好奇，
+        SA 不动=不是焦虑），**不进话语、不新增任何约束**。数据从未删除，只是
+        索引弱了（可召回，只是慢）；"记不清"本就是真实状态的一半。
+        """
+        if self._brain_loop is None:
+            return
+        rows = await self._heartbeat_store.iterate_memory_index()
+        if not rows:
+            return
+        records = await self._heartbeat_store.iterate_memories()
+        if not records:
+            return
+
+        # 她的发言回声与已被取代的旧事实不参与缺口（与话语/感受路径同一取舍）
+        # P3-W：沉睡/淡化/抑制的记忆同样不计入——状态机已经表达了"够不着"，
+        # 若再让它们的低强度索引每 300 拍推一次 TR，就是同一件事双报 + 噪声源。
+        created_by_mid: dict[int, float] = {}
+        for d in records:
+            rec = MemoryRecord.from_dict(d)
+            if rec.id is None or rec.kind == KIND_EXPRESSION or rec.superseded_by is not None:
+                continue
+            if rec.retention_state != RETENTION_PRESENT:
+                continue
+            created_by_mid[rec.id] = rec.created_ts
+
+        now = self._clock.now()
+        samples: list[tuple[float, float]] = []
+        for _, mid, strength, _ in rows:
+            created_ts = created_by_mid.get(mid)
+            if created_ts is None:
+                continue
+            samples.append((strength, max(0.0, (now - created_ts) / 86400.0)))
+
+        gap = detect_gap(samples)
+        if gap is None:
+            return
+        self._brain_loop.apply_event(
+            DesireEvent(kind=GAP_EVENT_KIND, intensity=gap.to_event_intensity())
+        )
+
     async def _supersede_conflicts(self, new_id: int, content: str, now: float) -> None:
         """修正/覆盖：新记忆与更早记忆同话题 → 旧记忆标记取代（不再被召回）。"""
         records = await self._heartbeat_store.iterate_memories()
@@ -239,13 +357,14 @@ class SoulHeartbeat:
         这是记忆"沉淀"的关键——否则所有经历永远停在浅层，无法在长期内
         以更高权重被召回（短期可靠性由新鲜度保证，这里管长期持久化）。
 
-        两个动作：
+        三个动作：
         1. 晋升：浅层→工作→深层（P3-B decide_promotion 的运行时落库）
         2. 索引衰减：为每条记忆建/维护 memory_index strength——
            按年龄指数衰减（P3-C decay_strength），protected 慢 3 倍。
            检索时索引 strength 拉低 score → "越久越难被想起"。
+        3. 降级判定（P3-W）：时间造成的失去 → faded/dormant（见 _demote_target）
 
-        已被更正/取代的记忆不参与维护（不晋升、不建索引）。
+        已被更正/取代的记忆不参与维护（不晋升、不建索引、不降级）。
         """
         records = await self._heartbeat_store.iterate_memories()
         if not records:
@@ -259,15 +378,38 @@ class SoulHeartbeat:
             return
 
         # ── 1. 晋升 ──────────────────────────────────────
+        # 层级（有多深）与可及性（够不够得着）正交：够不着的记忆照常晋升，
+        # 但不再继续模糊化——"既说不出、又继续模糊细节"是双罚。
+        by_mid: dict[int, MemoryRecord] = {rec.id: rec for rec in mem_records if rec.id is not None}
         promotions = promote_batch(mem_records)
         for promo in promotions:
             if promo.memory_id is None:
                 continue
+            detail = promo.detail_level
+            promoted_rec = by_mid.get(promo.memory_id)
+            if promoted_rec is not None and promoted_rec.retention_state != RETENTION_PRESENT:
+                detail = promoted_rec.detail_level
             await self._heartbeat_store.update_memory_level(
                 promo.memory_id,
                 level=promo.level,
-                detail_level=promo.detail_level,
+                detail_level=detail,
             )
+
+        # ── 1b. 自动保护（P3-W）：沉淀到深层 + 被反复想起 → 珍贵 ──
+        # 此前 protected 全库只有写入 False 的路径（死阀门），若不在这里通电，
+        # 遗忘状态机上线后每条记忆 180 天后都会沉睡——"珍贵"的安全阀形同不存在。
+        # 判定用"晋升后的层级"（本拍刚晋升的以 promo 为准），否则刚晋升者要等下一轮。
+        promoted_level: dict[int, str] = {
+            p.memory_id: p.level for p in promotions if p.memory_id is not None
+        }
+        protected_mids: set[int] = {rec.id for rec in mem_records if rec.protected and rec.id}
+        for rec in mem_records:
+            if rec.id is None or rec.id in protected_mids:
+                continue
+            level = promoted_level.get(rec.id, rec.level)
+            if level == LEVEL_DEEP and rec.access_count >= PROTECT_DEEP_ACCESS:
+                await self._heartbeat_store.set_protected(rec.id)
+                protected_mids.add(rec.id)
 
         # ── 2. 索引衰减：建缺失索引 + 按绝对年龄幂等重算 strength ──
         index_rows = await self._heartbeat_store.iterate_memory_index()
@@ -276,6 +418,10 @@ class SoulHeartbeat:
         for rec in mem_records:
             mid = rec.id
             if mid is None or mid in index_id_by_mid:
+                continue
+            # 够不着的记忆不建索引：索引是"好不好找"的载体，够不着的本就找不到；
+            # 同时这是缺口信号（只统计在册者）的必要条件——不给它们留低强度行。
+            if rec.retention_state != RETENTION_PRESENT:
                 continue
             # 新记忆：建索引（strength 由年龄推导，见下）
             iid = await self._heartbeat_store.add_memory_index(
@@ -289,6 +435,9 @@ class SoulHeartbeat:
 
         # 从固定基线（1.0）按"绝对年龄"重算：跑 N 次与跑 1 次结果一致
         # （若以上次 strength 为基线会按运行次数复合塌缩，与机器转速耦合）
+        # 不加落库下限：strength 要能真正跌破 STRENGTH_RETRIEVE_FLOOR，缺口信号
+        # （hooks.detect_gap，"有些事想不起来了"）才有出现的可能；"检索下限"
+        # 是判据，不是落库封顶——数据永不删除，只是索引减弱。
         updates: list[tuple[int, float]] = []
         for rec in mem_records:
             mid = rec.id
@@ -298,13 +447,23 @@ class SoulHeartbeat:
             new_strength = decay_strength(
                 1.0,
                 age_days,
-                protected=rec.protected,
-                floor=STRENGTH_RETRIEVE_FLOOR,
+                protected=mid in protected_mids,
             )
             updates.append((index_id_by_mid[mid], new_strength))
 
         if updates:
             await self._heartbeat_store.decay_memory_index(updates)
+
+        # ── 3. 降级判定（P3-W）：时间造成的失去 ──────────────
+        # 只降不升，且只做"时间造成的失去"：她主动抑制的（suppressed）是她的
+        # 决定，不是时间的决定，程序不碰；珍贵（protected）永不降级。
+        for rec in mem_records:
+            mid = rec.id
+            if mid is None or mid in protected_mids:
+                continue
+            target = _demote_target(rec, now)
+            if target is not None:
+                await self._heartbeat_store.set_retention_state(mid, target)
 
     async def _sync_body_status(self, now: float) -> None:
         """身体在场状态 → TimeSenseState + 难受检测 + 交互事件 → 感受层。"""

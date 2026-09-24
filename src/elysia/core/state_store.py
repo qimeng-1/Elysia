@@ -22,6 +22,17 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from elysia.memory.levels import (
+    CERTAINTY_BY_KIND,
+    FALLBACK_CERTAINTY,
+    FALLBACK_CLAIM,
+    FALLBACK_RETENTION,
+    FALLBACK_SOURCE,
+    SOURCE_BY_KIND,
+    default_certainty,
+    default_source,
+)
+
 logger = logging.getLogger("elysia.state_store")
 
 _WRITE_OP = Callable[[sqlite3.Connection], Any]
@@ -35,7 +46,7 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 """
 
-_HEARTBEAT_SCHEMA = """
+_HEARTBEAT_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS heartbeats (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     ts        REAL NOT NULL,
@@ -71,7 +82,11 @@ CREATE TABLE IF NOT EXISTS memories (
     protected      INTEGER NOT NULL DEFAULT 0,
     detail_level   REAL NOT NULL DEFAULT 1.0,
     narrative      TEXT NOT NULL DEFAULT '',
-    superseded_by  INTEGER
+    superseded_by  INTEGER,
+    source         TEXT NOT NULL DEFAULT '{FALLBACK_SOURCE}',
+    certainty      TEXT NOT NULL DEFAULT '{FALLBACK_CERTAINTY}',
+    claim_status   TEXT NOT NULL DEFAULT '{FALLBACK_CLAIM}',
+    retention_state TEXT NOT NULL DEFAULT '{FALLBACK_RETENTION}'
 );
 CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_memories_level ON memories (level);
@@ -104,6 +119,18 @@ def _run_migration(conn: sqlite3.Connection, stmt: str) -> None:
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc):
             raise
+
+
+def _backfill_sql(column: str, mapping: dict[str, str], fallback: str) -> str:
+    """生成"按 kind 回填一列"的迁移语句（幂等：只填 NULL，跑 N 次=跑 1 次）。
+
+    映射取自 levels.py，与 from_dict/add_memory 的默认同源，避免回填值漂移。
+    """
+    whens = " ".join(f"WHEN '{kind}' THEN '{value}'" for kind, value in mapping.items())
+    return (
+        f"UPDATE memories SET {column} = CASE kind {whens} ELSE '{fallback}' END"
+        f" WHERE {column} IS NULL"
+    )
 
 
 class _AsyncSQLite:
@@ -209,8 +236,22 @@ class HeartbeatStore(_AsyncSQLite):
         super().__init__(
             db_path,
             schema=_HEARTBEAT_SCHEMA,
-            # 旧库补列（新库已在 schema 内含）：记忆修正/覆盖标记
-            migrations=("ALTER TABLE memories ADD COLUMN superseded_by INTEGER",),
+            # 旧库补列（新库已在 schema 内含）：记忆修正/覆盖标记 + 来源/确定性 + 认领 + 保留
+            migrations=(
+                "ALTER TABLE memories ADD COLUMN superseded_by INTEGER",
+                "ALTER TABLE memories ADD COLUMN source TEXT",
+                "ALTER TABLE memories ADD COLUMN certainty TEXT",
+                "ALTER TABLE memories ADD COLUMN claim_status TEXT",
+                "ALTER TABLE memories ADD COLUMN retention_state TEXT",
+                # 旧数据回填（P3-T）：按 kind 推导；只填 NULL，幂等
+                _backfill_sql("source", SOURCE_BY_KIND, FALLBACK_SOURCE),
+                _backfill_sql("certainty", CERTAINTY_BY_KIND, FALLBACK_CERTAINTY),
+                # 旧数据回填（P3-V）：认领默认与 kind 无关，一律 claimed（老记忆全部可用）
+                f"UPDATE memories SET claim_status = '{FALLBACK_CLAIM}' WHERE claim_status IS NULL",
+                # 旧数据回填（P3-W）：保留默认与 kind 无关，一律 present（老记忆全部够得着）
+                f"UPDATE memories SET retention_state = '{FALLBACK_RETENTION}'"
+                " WHERE retention_state IS NULL",
+            ),
         )
 
     @staticmethod
@@ -230,6 +271,10 @@ class HeartbeatStore(_AsyncSQLite):
             "detail_level": row[10],
             "narrative": row[11],
             "superseded_by": row[12],
+            "source": row[13],
+            "certainty": row[14],
+            "claim_status": row[15],
+            "retention_state": row[16],
         }
 
     async def append(self, ts: float, beat_type: str, payload: dict[str, Any]) -> None:
@@ -309,18 +354,25 @@ class HeartbeatStore(_AsyncSQLite):
         """写入一条记忆（P3 §九 memories 表），返回新记忆 id。
 
         只追加；emotion_vector/其他结构为 JSON 序列化（可导出格式，P3-A 决策）。
+        source/certainty（P3-T）：写入点能标就标；未标注时按 kind 推导默认。
+        claim_status（P3-V）：写入一律默认 claimed——认领是**能力**，默认给她；
+        只有她自己的动作（disclaim 工具）才能改成 rejected。
+        retention_state（P3-W）：写入一律默认 present——可及性由时间（维护循环）
+        与她的动作（forget 工具）改变，不在写入点标注。
         """
         emotion = json.dumps(record.get("emotion_vector", {}), ensure_ascii=False)
+        kind = str(record.get("kind", "internal"))
 
         def _add(conn: sqlite3.Connection) -> int:
             cur = conn.execute(
                 "INSERT INTO memories (created_ts, level, kind, content, emotion_vector,"
-                " importance, access_count, last_access_ts, protected, detail_level, narrative)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " importance, access_count, last_access_ts, protected, detail_level, narrative,"
+                " source, certainty, claim_status, retention_state)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts,
                     record.get("level", "shallow"),
-                    record.get("kind", "internal"),
+                    kind,
                     record.get("content", ""),
                     emotion,
                     record.get("importance", 0.0),
@@ -329,6 +381,10 @@ class HeartbeatStore(_AsyncSQLite):
                     1 if record.get("protected") else 0,
                     record.get("detail_level", 1.0),
                     record.get("narrative", ""),
+                    record.get("source") or default_source(kind),
+                    record.get("certainty") or default_certainty(kind),
+                    record.get("claim_status") or FALLBACK_CLAIM,
+                    record.get("retention_state") or FALLBACK_RETENTION,
                 ),
             )
             conn.commit()
@@ -434,6 +490,53 @@ class HeartbeatStore(_AsyncSQLite):
             conn.commit()
 
         await self.submit(_mark)
+
+    async def set_claim_status(self, memory_id: int, status: str) -> None:
+        """更新记忆的认领状态（P3-V）。
+
+        只应由**她自己的动作**调用（disclaim 工具）——程序不得代她拒绝认领，
+        否则"她可以不认领"就变成程序的默认拦截（铁律一）。
+        """
+
+        def _set(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE memories SET claim_status = ? WHERE id = ?",
+                (status, memory_id),
+            )
+            conn.commit()
+
+        await self.submit(_set)
+
+    async def set_retention_state(self, memory_id: int, state: str) -> None:
+        """更新记忆的保留状态（P3-W）：够不够得着 / 想不想够。
+
+        两类调用者，各管一半：
+        - 时间造成的失去（`faded`/`dormant`）→ 由程序的心跳维护循环设置
+        - 主动抑制（`suppressed`）与唤醒回 `present` → 只能由**她的动作**或
+          "她提起这件事"产生；程序不得代她决定"不想再想起"（铁律一）。
+        """
+
+        def _set(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE memories SET retention_state = ? WHERE id = ?",
+                (state, memory_id),
+            )
+            conn.commit()
+
+        await self.submit(_set)
+
+    async def set_protected(self, memory_id: int) -> None:
+        """标记记忆为珍贵（P3-W 自动保护）：晋升深层且被反复想起者永不降级。
+
+        只单向置位（True）：珍贵由"沉淀深度 + 被想起次数"自动得出，
+        没有"取消珍贵"的动作——遗忘状态机不需要它，也就不提供。
+        """
+
+        def _set(conn: sqlite3.Connection) -> None:
+            conn.execute("UPDATE memories SET protected = 1 WHERE id = ?", (memory_id,))
+            conn.commit()
+
+        await self.submit(_set)
 
     async def iterate_memory_index(self) -> list[tuple[int, int, float, float]]:
         """遍历全部索引行：(index_id, memory_id, strength, last_retrieve_ts)。"""

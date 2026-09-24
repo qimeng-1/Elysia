@@ -18,7 +18,7 @@ from elysia.core.clock import SimulatedClock
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense
-from elysia.memory.levels import KIND_INTERACTION
+from elysia.memory.levels import KIND_EXPRESSION, KIND_INTERACTION
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireSystem
 from elysia.soul.distress import DISTRESS_INTERVAL_S
@@ -256,6 +256,132 @@ async def test_supersede_conflicts_marks_old_fact(tmp_path: Path) -> None:
         rec = await heartbeat_store.get_memory(old)
         assert rec is not None
         assert rec["superseded_by"] == new
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+async def _add_old_memory(
+    heartbeat_store: HeartbeatStore,
+    *,
+    kind: str = KIND_INTERACTION,
+    age_days: float = 200.0,
+    recalled: bool = False,
+) -> int:
+    """写入一条 age_days 天前的记忆（index strength 会跌破检索下限）。
+
+    recalled=True：模拟"被想起过一次"。P3-W 起从未被想起且超过
+    RETENTION_FADE_AGE_DAYS 的记忆会淡化（不再计入缺口），因此要观察缺口
+    必须用"曾想起过、但久未再想起"的记忆——可及性由 since_last_access 决定。
+    """
+    created = T0 - age_days * 86400.0
+    return await heartbeat_store.add_memory(
+        created,
+        {
+            "level": "shallow",
+            "kind": kind,
+            "content": "很久以前说过的话",
+            "emotion_vector": {"chat": 0.5},
+            "importance": 0.3,
+            "narrative": "很久以前说过的话",
+            "access_count": 1 if recalled else 0,
+            "last_access_ts": created if recalled else None,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_feel_memory_gaps_fires_pulse_when_index_faded(tmp_path: Path) -> None:
+    """P3-U 接线：索引强度跌破检索下限 → memory_gap 脉冲（TR 升、SA 不动、不触碰记忆）。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        # 100 天龄且被想起过一次：仍在册（未淡出/未沉睡），但索引已跌破下限
+        mid = await _add_old_memory(heartbeat_store, age_days=100.0, recalled=True)
+        await soul._maintain_memories(T0)  # 建索引并按 100 天龄衰减（strength ≈ 0.108）
+        strengths = {m: s for _, m, s, _ in await heartbeat_store.iterate_memory_index()}
+        assert strengths[mid] < 0.2  # 已跌破检索下限
+
+        brain = soul._brain_loop
+        assert brain is not None
+        tr_before = brain.desire_system.state.tr
+        sa_before = brain.desire_system.state.sa
+        await soul._feel_memory_gaps()
+        assert brain.desire_system.state.tr > tr_before  # 好奇：TR 微升
+        assert brain.desire_system.state.sa == pytest.approx(sa_before)  # 非焦虑：SA 不动
+
+        # 缺口只是"感觉"，不是"她想着这件事"：不进话语、不污染访问计数
+        rec = await heartbeat_store.get_memory(mid)
+        assert rec is not None
+        assert rec["access_count"] == 1
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_feel_memory_gaps_skips_retention_states(tmp_path: Path) -> None:
+    """P3-W：够不着的记忆不构成缺口——状态机已表达"够不着"，再报就是双报 + 噪声。
+
+    沉睡/淡化/抑制的记忆索引强度同样很低，若计入，同一批记忆会每 300 拍
+    永远推一次 TR（"想不起来"变成永远的背景噪声）。
+    """
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        mid = await _add_old_memory(heartbeat_store, age_days=200.0)
+        await soul._maintain_memories(T0)  # 200 天未想起 → 沉睡（索引已跌破下限）
+        rec = await heartbeat_store.get_memory(mid)
+        assert rec is not None
+        assert rec["retention_state"] == "dormant"
+
+        brain = soul._brain_loop
+        assert brain is not None
+        tr_before = brain.desire_system.state.tr
+        await soul._feel_memory_gaps()
+        assert brain.desire_system.state.tr == pytest.approx(tr_before)
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_feel_memory_gaps_silent_when_all_index_strong(tmp_path: Path) -> None:
+    """索引都还强（新鲜记忆）→ 无缺口，不发脉冲。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        await _add_old_memory(heartbeat_store, age_days=0.0)
+        await soul._maintain_memories(T0)  # 新鲜 → strength ≈ 1.0
+
+        brain = soul._brain_loop
+        assert brain is not None
+        tr_before = brain.desire_system.state.tr
+        await soul._feel_memory_gaps()
+        assert brain.desire_system.state.tr == pytest.approx(tr_before)
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_feel_memory_gaps_ignores_own_expression_echo(tmp_path: Path) -> None:
+    """她的发言回声即使索引衰减也不构成缺口（缺口是"关于世界的事想不起来"）。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        await _add_old_memory(heartbeat_store, kind=KIND_EXPRESSION, age_days=200.0)
+        await soul._maintain_memories(T0)  # 索引仍会建并衰减
+
+        brain = soul._brain_loop
+        assert brain is not None
+        tr_before = brain.desire_system.state.tr
+        await soul._feel_memory_gaps()
+        assert brain.desire_system.state.tr == pytest.approx(tr_before)
     finally:
         await state_store.close()
         await heartbeat_store.close()

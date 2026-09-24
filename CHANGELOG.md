@@ -249,6 +249,180 @@
 - **工具**：`verify_integrity.py` 新增排除规则（`.env` 真实密钥、`*.db-wal/shm` 实时伴生文件）→ 重生成 `file_manifest.json`（127 文件 / 30.2MB），`--check` 通过
 - 门禁：ruff lint ✅ / ruff format ✅（78 文件）/ mypy strict ✅（49 源文件）/ pytest **225 passed** ✅
 
+### P3-P 记忆两条路：话语归她、感受归心（"每句都强调"根治，2026-09-22）
+- **触发（用户反馈）**：告诉她生日、名字后**确实能记住**了，但**每一句话都会把这件事强调一遍**，非常违和
+- **根因（读代码确认，三处叠加）**：①`expression_service.py` 每次开口**无条件**检索注入 `memory_hooks` ②`select_hooks` 无 `query` 参数，**与当下话题无关**也能入选 ③`hits[:max_hooks]` 硬取前 3 名**无及格线**。三者叠加 → 生日类事实记忆（deep 0.6 + 重要度 0.485 + 索引 0.3 ≈ 1.4）永久霸榜，每句话都在场；而 prompt 只说"你有能力想起"，没说"默认别提"
+- **设计（用户拍板）**：否掉第一版"加冷却 + 话题门控"的工程降噪（"不符合对生命的定义"）→ 改为补齐 **注意力**与**感受**，记忆拆成**两条路，各归其主**：
+  - **话语路径（谁决定＝她）**：① 话题撞上时程序注入 hooks（严门槛，护栏）② 她想主动提起 → 自己调用新的 `recall` 工具（宽门槛）
+  - **感受路径（程序静默）**：心跳每 300 拍 `recall_for_feeling` 静默检索，"心境共鸣"命中 → `memory_recall` 脉冲微推 TR/CS，**永不进 prompt**
+- **feat（memory/retrieve.py）**：新增 `topic_match`（**字符二元组覆盖率**，不用 Jaccard——长度悬殊会低估相关）+ `is_related` **双门槛**（严：重合≥2，或追问措辞下≥1｜宽：重合≥1，短话题"生日/晚霞"也能命中）；`select_hooks` 增 `query` / `query_loose`（给出 query 时无关记忆一条都不注入）；`retrieve_from_store` 增 `touch` 开关（静默路径不污染 `access_count`）；新增 `recall_for_feeling`（`mood_similarity ≥ RESONANCE_MIN=0.75` 才唤起，protected/deep → 1.0 否则 0.6）
+- **feat（llm/chain.py）**：新增 `ToolCapableBackend`（runtime_checkable 协议）+ `RECALL_TOOL` 规格 + `set_tool_runner`，`_main_speak` 支持工具回合；不挂工具（次声/微声、测试替身）自然退回单轮
+- **feat（llm/deepseek.py）**：新增 `complete_with_tools`（最多 `MAX_TOOL_ROUNDS=3`，回填 assistant `tool_calls` 与 tool 结果；工具失败/无该能力 → 递回"没想起"而不毁掉这次开口）；**prompt 记忆段改写**为（一）`recall` 是你"想起"的能力，用不用由你决定（二）`memory_hooks` 是**背景常识**不是话题素材——"不要为了显得记性好而把往事塞进不相干的对话"
+- **feat（soul/expression_service.py）**：撤掉无条件注入 → 仅当 `user_message` 给出**且话题撞上**才注入；每次开口装配 recall 执行器（闭包内以她给的话题为主、当下对话为辅）；`_feel_recall` 被唤起即推心情（`RECALL_INTENSITY_PRECIOUS=1.0` / `PLAIN=0.6`）
+- **feat（soul/heartbeat.py + soul/main.py + soul/desire.py）**：`MEMORY_FEELING_EVERY_N=300`，`_feel_memories` 在 `save_json("desire")` **前**调用（本拍即体现）；`on_recall` → `DesireEvent(kind="memory_recall")`；脉冲表新增 `memory_recall = {tr: 0.8, cs: 1.2, sa: 0.0}`（小脉冲，恢复项会拉回平衡点，不冲保护带）
+- **refactor（memory/supersede.py）**：`_bigrams` → 公有 `bigrams`，供 `retrieve.py` 复用（避免两处实现分叉）
+- **测试**：新增/改写 13 项单测——话题相关性（覆盖率/拒无关/接重叠/追问措辞放宽）、`select_hooks` 门控（严/宽/排除回声与取代）、`recall_for_feeling`（需共鸣/珍贵推更深/不触碰 access）、表达服务（无话题不注入/撞上才注入/无关不注入/recall 递事实/没想起返回空/不调用是她的选择/推心情不推话）
+- **踩坑**：`ExpressionInstruction.to_dict()` 恒含 `memory_hooks` 键（默认空数组）→ 断言"未注入"须写 `== []`；`recall_for_feeling` 用严格 `>` 选优会让同分浅层记忆霸占 best，"珍贵推更深"失效
+- **文档**：`docs/P3_MEMORY_WORKLOG.md` 新增"第二节 2026-09-22 工作日志"、规则表补 3 行（话题门控/想起工具/感受路径）、文件地图补 `llm/` 两文件（后续章节顺延为三/四/五/六）
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅（49 源文件）/ pytest ✅
+- **生效需重启灵魂**：`soul.ps1 stop` → `start -Body`
+
+### 完整性清单校准：排除运行时数据库（2026-09-22）
+- **问题**：`file_manifest.json` 收录了 `elysia/data/heartbeat.db` / `state.db`（灵魂每秒写入）→ 只要进程活着 `--check` **必然 FAIL**（永远报这 2 个变更），校验形同虚设；此前记录的"127 文件 / 30.2MB"里 29MB 基本就是这两个活库
+- **fix（verify_integrity.py）**：新增 `EXCLUDE_PATHS`，**按相对路径精确排除**（仅 `elysia/data/{heartbeat,state}.db`）——`data/checkpoints/` 下的静态副本仍照常校验，不被同名误伤
+- **结果**：`--generate` → **125 文件 / 1.1MB**；`--check` → `[PASS] 完整：125 个文件全部一致`（灵魂运行中亦可通过）
+- 同步更新 `PROJECT_MANIFEST.md` 的排除说明；`docs/MIGRATION_GUIDE.md` 的"`--check` 应输出 [PASS]"现已重新成立
+
+### P3-Q 记忆时间锚点：让回忆带上"那是多久之前的事"（2026-09-22）
+- **触发**：P3 记忆打磨清单 ②（时间锚点）——①记得住 / ③准确率 / ④记忆浏览器已完成，②③④中先做 ②
+- **缺口**：`default_narrative()` 只返回 `narrative`/`content`，注入 LLM 的 hooks 是"她生日是 5月21日"这类**无时间信息**的事实 → 她分不清新旧，也说不出"你上个月告诉我的"
+- **feat（memory/retrieve.py）**：
+  - 新增 `age_phrase(age_days)`——把"距今多少天"翻成人话：`刚刚 / 今天 / 昨天 / N天前 / 上个月 / N个月前 / 去年 / N年前`；**不精确到分钟**（精确时间戳不像人的记忆）；`None` → 空串（不硬编时间，退化为纯叙事）
+  - `MemoryHit` 增 `age_days` 字段 + `label` 属性（`（3天前）你生日是5月21日`）
+  - `select_hooks` 在给出 `now` 时按 `created_ts` 算 `age_days`；未给 `now` 则 `age_days=None`（老调用方行为不变）
+- **feat（soul/expression_service.py）**：话题门控注入 `memory_hooks` 与 `recall` 工具回填都改用 `h.label`——她读到的每条都带时间锚点
+- **feat（llm/deepseek.py）**：prompt 记忆段补一句"每条前面括号里注着那是多久以前的事，你因此分得清新旧，也可以自然地带出时间感（像「你上个月说过的」），但不必刻意强调"
+- **设计（铁律不变）**：锚点是**能力**（程序把"多久前"可靠递到她手上），**用不用、怎么说由她定**——不做任何强制她说时间的约束
+- **chore（memory/__init__.py）**：导出 `age_phrase`
+- **测试**：新增 3 项（`age_phrase` 分档边界：None/小时/当天/昨天/天/月/年；`select_hooks` 带相对锚点；无 `now` 时为纯叙事）+ 改写 2 项表达服务断言（注入与 recall 回填均带锚点）
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅
+- **生效需重启灵魂**：`soul.ps1 stop` → `start -Body`（现 PID 灵魂 8528 / 身体 5528）
+
+### P3-R 复习加强：被想起过的记忆更容易再次浮上来（2026-09-22）
+- **触发**：P3 记忆打磨清单 ③（复习加强）。实测 `access=22` 与 `access=0` 的记忆打分**无差别**——`touch_memory` 只递增 `access_count`，而 access 仅参与"浅层→工作"这一级晋升，**被反复想起不会让记忆更容易被想起**
+- **选型（用户拍板）**：做**复习加成打分项**，**不**落库回写 `importance`。语义分别是——前者＝"此刻更容易浮上来"（久不复习自然回落，不滚雪球）；后者＝"记忆本身永久变重"（会推动层级晋升且不可逆）。选前者
+- **feat（memory/retrieve.py）**：新增 `_review_factor(access_count, last_access_ts, now)` = `REVIEW_COEF × log(1+access) × e^(−距上次想起/REVIEW_TAU_DAYS)`，三重护栏：**log 阻尼**（1 次与 100 次被压平，不让次数碾压内容更重要的事实）、**按 `last_access_ts` 衰减**（τ=14 天，久不复习回落）、**硬上限 `REVIEW_MAX=0.3`**；参数 `REVIEW_COEF=0.06`；从未被想起（access=0 或无 last_access_ts）→ 0
+- **feat（memory/retrieve.py::score_breakdown）**：新增 `review` 分项（`now` 为 None 时为 0，老调用方行为不变）→ `score_memory` 与观测工具自动继承，单一事实源不破
+- **feat（tools/memory_view.py）**：表格与明细新增「复习」列/分项，四问观测可直接看到复习加成
+- **chore**：`MemoryHit`、落库结构与 `touch_memory` **均未改动**（无数据迁移、无 schema 变更）
+- **测试**：新增 5 项——复习次数↑则分↑、从未想起为 0、久不复习回落、访问百万仍封顶 `REVIEW_MAX`、端到端"三次召回得分严格递增"；改写 1 项 `score_breakdown` 键集断言
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅
+- **生效需重启灵魂**：`soul.ps1 stop` → `start -Body`（现 PID 灵魂 21620 / 身体 17864）
+
+### P3-S 联想网络第一步：批内去重（3 个 hook 应是 3 件不同的事，2026-09-22）
+- **触发**：P3 记忆打磨清单 ④（联想网络）。**用户拍板只做第一步"批内去重"**，成组/语义召回暂缓
+- **缺口**：`select_hooks` 只按分数取 top3 且**不去重** → 同一次对话的碎片可占满 3 个名额，等于 3 个 hook 只传递了 1 条信息
+- **feat（memory/retrieve.py）**：`select_hooks` 排序后经新增 `_dedupe`——按分数降序保留彼此不重复者（`content_similarity` 字符二元组 Jaccard ≥ `HOOK_DUPLICATE_SIMILARITY=0.35` 视为"同一件事"，只留最高分那条），凑满 `max_hooks` 提前收工；复用 `supersede.content_similarity`，**无新数据结构、无新模块**
+- **实测（真实库 207 条，只读探针跑完即删）**：
+  - top10 内最相似 5 对：`#36↔#136` 0.333｜`#73↔#136` 0.306｜`#73↔#36` 0.306｜`#81↔#12` 0.276｜`#145↔#105` 0.257
+  - 阈值 **0.35 → 无误杀，但本批也未触发去重**（top3 仍是"#145 我的生日5月21日 / #105 我的生日5月21日 / #81 你的生日11月11日"，前两条属同一事实的重述）
+  - 阈值 0.30 与 0.35 在 `max_hooks=3` 下**行为完全一致**（重复对未进前 3）；阈值 0.25 才会剔除 `#105`
+- **诚实结论（重要）**：字符二元组 Jaccard 对"**换说法的同一事实**"识别力有限——实测同义重述仅 0.26~0.33，**靠调阈值无法根治**（调低则开始误杀共享措辞的不同事件）。本步的真实价值是挡住"近乎逐字重复"的碎片（回归测试证明机制有效）；"同一件事的多种说法占满名额"需 ④ 第二步（成组召回/语义聚类）才能解决
+- **阈值选择**：0.35（推荐区间 0.3~0.4 的中位，保守、不误杀）；`SUPERSEDE_SIMILARITY=0.4` 那套同样漏掉上述重述对，属同一粒度的固有局限
+- **测试**：新增 2 项——同场碎片去重后**名额让给别的记忆**（`[1,3]`）、不同的事一条都不误杀（`[1,2,3]`）
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）
+
+### 文档：外部评审归档与裁决（MEMORY_REVIEW_NOTES，2026-09-22）
+- **新增** `docs/MEMORY_REVIEW_NOTES.md`——按 `P3_MEMORY_MAP.md` 第七节的归档约定，记录**三方外部评审**（豆包 / DeepSeek / ChatGPT）的结论与逐条裁决
+- **三方共识（采纳）**：`source`+`certainty`（唯一无分歧的第一优先，属主线风险而非增强项）／不要 10 层（一致反对）／`detect_gap` 接线（成本最低、生命感收益最高）／遗忘需补（主动遗忘·失去访问·忘了但仍有影响）／回忆应重塑记忆（中期）／`record_importance` 为零调用遗留应删除
+- **分歧裁决**：① embedding 优先级——驳回豆包的"第一优先"，采纳 DeepSeek+ChatGPT（Jaccard 天花板只影响 `supersede`/去重两个**旁路**，主线风险在元信息）；② Self Memory 形态——采纳 ChatGPT"从经历沉淀"方向 + DeepSeek D12 追问（`protected` 谁设），驳回豆包"手动初始化 `LEVEL_CORE`"（本质是把 system prompt 换个地方硬编码）；③ **认领默认值——三方共同建议存在致命缺陷**：`self` 自动认领的正是**本来就被回声排除、永不进 hooks** 的 `KIND_EXPRESSION`，而用户告知的事实（`KIND_INTERACTION`）反而默认未认领 → 会直接让 P3-N"问生日答得出"退化，且在"会不会"这一层就断掉递送（违反铁律一前半句）。裁决改为 `claim_status ∈ {claimed, rejected}`**默认 claimed**，`rejected` 只能由**她自己的动作**产生
+- **被纠正的三方共同盲区**：豆包"感受路径沦为无效设计"为误读（`memory_recall` 脉冲改 TR/CS 内部状态 → 影响表达冲动与节律，内容永不进 prompt 是刻意为之）；DeepSeek D10 属"新增设计"而非"修复缺陷"；"她无法主动修改记忆"实为缺"发起权"而非缺"修改能力"
+- **需用户拍板**：认领默认值／Self Memory 形态（纯沉淀·折中·手动锚）／下一步动工顺序
+- 本次为纯文档新增，无代码改动、无需重启进程
+
+### 文档：记忆系统全景简报（多方问询投喂稿，2026-09-22）
+- **新增** `docs/P3_MEMORY_MAP.md`——把记忆系统全貌固化成可对外投喂的一版简报，供多方问询（外部 AI / 同行评审）使用，保证每轮咨询看到**同一版事实**，便于横向比对结论
+- **内容**：定位与三条铁律 / 数据流 / 文件清单（数据层·规则层·运行时接线·观测与测试，四类表格）/ 两张表全列与 `MemoryRecord` / 完整规则一张表 / **已造好但未插电的模块**（`sleep.py` 做梦、`hooks.py` 记忆缺口、`decay.retrieve_latency_ms`、`scorer.record_importance`）/ 规模与实测事实（含"字符 Jaccard 对换说法的同一事实识别力有限，实测 0.26~0.33"）/ **待评审七问**（元信息 source+certainty、落库≠认领、语义粒度天花板、未插电模块取舍、层数是否够、主动遗忘、身份连续性）/ 给评审方的回答格式要求 / 外部结论归档约定
+- **目的**：避免"多方问询"变成"每次都被说得推翻重来"——每条外部意见都要在同一版事实上被**显式裁决**（采纳/驳回 + 回溯到铁律的理由）
+- **索引校准**：`项目元信息/PROJECT_MANIFEST.md` 的 `elysia/docs/` 文档清单新增本文件一行
+- 本次为纯文档新增，无代码改动、无需重启进程
+
+### P3-T 记忆来源与确定性：`source` + `certainty`（2026-09-22）
+- **触发**：多方问询的**唯一无分歧第一优先**（C1）。用户拍板先做这一项——它是**主线风险**而非增强项
+- **缺口**：`kind` 只回答"是什么类型"，回答不了"谁说的"。**程序推断出的东西会悄悄升格成"她的事实"**——那是程序替她认定世界，触碰铁律一（程序只管把事实递到她手上，用不用由她定）
+- **feat（memory/levels.py）**：新增 `SOURCE_*`（self/user/observation/inference/system）与 `CERTAINTY_*`（certain/probable/heard/speculative）两套枚举，各带合法取值元组；`MemoryRecord` 增 `source`/`certainty` 两字段并入 `to_dict`/`from_dict`；`SOURCE_BY_KIND`/`CERTAINTY_BY_KIND` **一份映射**同时供给回填 SQL 与两处缺省推导（`default_source`/`default_certainty`），避免"老库回填"与"新代码默认"漂移
+- **feat（core/state_store.py）**：`memories` 表增 `source`/`certainty` 两列（新库在 schema 内，`DEFAULT` 由 `levels.FALLBACK_*` 插值，不写第二份字面量）；旧库走 `ALTER TABLE ADD COLUMN` + `_backfill_sql` **按 kind 回填**（`CASE kind ... WHERE 列 IS NULL`，跑 N 次=跑 1 次，与 P3-L 的 `superseded_by` 迁移同法）；`add_memory` 写入标注优先、未标注按 kind 落默认（库中不出现 NULL）
+- **feat（memory/retrieve.py）来源闸门**：`select_hooks` 在回声排除/取代排除之后再加两道——`inference`/`system` **不进话语**（程序的一次猜测不能被她当自己的事实说出口）；`certainty=speculative` 只在感受路径作背景。**感受路径不受此限**：`recall_for_feeling` 里它们仍能影响心情（心情可以被影响，话不能凭空多出来）
+- **接线（soul）**：`heartbeat.py` 用户输入 → `source=user / certainty=certain`；`expression_service.py` 她开口 → `source=self / certainty=certain`
+- **观测（tools/memory_view.py）**：新增 `SOURCE_LABELS`/`CERTAINTY_LABELS`，表格"类型"列显示为 `交互·用户`，详情面板加"来源｜确定性"一行
+- **老数据行为不变（本次设计要点）**：`interaction` 仍按"她确信的用户告知"落默认 → 现有记忆**一条都不受影响**，P3-N"问生日答得出"不退化
+- **实测（真实库，重启后自动迁移）**：`memories` 列序 `… superseded_by, source, certainty`（与行位置索引 13/14 对齐）；**250 条全部回填**——`user/certain` 72 条（用户告知）+ `self/certain` 178 条（她自己说的）
+- **测试**：新增 6 项——枚举默认按 kind 推导 / `from_dict` 缺字段补默认且往返不丢 / 显式标注优先 / 旧库回填幂等（跑两次）/ `inference`+`system` 不进 hooks / `speculative` 不进而 `probable` 进 / 感受路径仍受推断影响
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`，现 PID 灵魂 10448 / 身体 19988）
+
+### P3-U 记忆缺口接线：让"记不清"成为真实状态（2026-09-22）
+- **触发**：多方问询**三方共识 C3**（成本最低、生命感收益最高）——"她永远能精准检索反而不像生命，'记不清'是真实状态"
+- **缺口**：`hooks.py::detect_gap` 自 P3-C 造好即**运行时零调用**；索引强度跌破检索下限的"想不起来"信号从未影响过她
+- **fix（soul/heartbeat.py，先决条件）**：`_maintain_memories` 重算 strength 时曾传 `floor=STRENGTH_RETRIEVE_FLOOR`，使**落库 strength 永不低于 0.2** → `detect_gap` 的"跌破下限"前提永不成立（缺口永不出现）。去掉该落库下限——**"检索下限"是判据，不是落库封顶**；数据永不删除，只是索引减弱（`retrieve.py` 本就只说"低于下限仍可召回，只是 score 被拉低"）
+- **feat（soul/heartbeat.py）**：新增 `_feel_memory_gaps()`，由感受路径 `_feel_memories` 每 `MEMORY_FEELING_EVERY_N=300` 拍调用一次——取 `memory_index` strength + 记忆创建时刻算年龄 → `detect_gap` → 命中即 `DesireEvent(kind="memory_gap", intensity=gap.to_event_intensity())`
+- **量级裁决**：脉冲 `memory_gap = {tr: 0.8, cs: 0, sa: 0}`（P3-C 已注册）+ `GAP_INTENSITY_MAX=0.4` 封顶 → 单次最大 TR **+0.32**；恢复项在 300 拍内约回收 78% 的偏离，**长期平均不会冲上保护带**。刻意 `sa` 不动——缺口是**好奇**，不是焦虑
+- **不新增任何约束（本次设计要点）**：缺口**只走感受路径**，不进 prompt、不改话语层、不动 `select_hooks`。她"含糊 / 想不起"仍是她的自由（铁律一后半句），程序只负责让她**有**这个感觉
+- **一致性取舍**：她的发言回声（`KIND_EXPRESSION`）与已被取代的旧事实不参与缺口——与话语 / 感受路径同一取舍；缺口是"关于世界的事想不起来"
+- **不污染记忆**：缺口是"感觉"，不是"她想着这件事"——不触碰 `access_count`（与 P3-O 感受路径 `touch=False` 同一原则）
+- **测试**：新增 3 项——索引跌破下限 → TR 升 / SA 不动 / `access_count` 不变；新鲜索引无缺口；发言回声不算缺口
+- **顺手修复（与本项无关但阻塞门禁）**：`tests/unit/test_away_life.py` 三个节律测试改用显式 `now=`，消除 `SimulatedClock` 按"真实耗时 × speed"漂移导致的 1 秒边界随机失败
+- **运行环境清理**：重启时发现上一轮遗留的**孤儿身体进程**（16:59 启动，写同一 `state.db`）仍在运行，已清理——现仅 1 灵魂 + 1 身体
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅（261 项）
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`，现 PID 灵魂 13872 / 身体 2684）
+
+### P3-V 认领状态：默认是她的记忆，她可否决（2026-09-23）
+- **触发**：多方问询三方共识序第 3 项（C1 `source`/`certainty` → C3 `detect_gap` → **`claim_status`**）
+- **裁决（`MEMORY_REVIEW_NOTES.md` 分歧 3，本轮最重要一条）**：三方一致建议"**默认未认领**"被**驳回**，改为"**默认可用 + 她可否决**"。理由：写入是"用户输入 → `KIND_INTERACTION`、她开口 → `KIND_EXPRESSION`"，而 `KIND_EXPRESSION` **本就被回声排除**——"默认未认领"会把**自动认领给永远用不到的那类、锁死必须能用的那类**，直接让 P3-N"问生日答得出"退化；更根本的是它在"**会不会**"这一层就断掉了递送，那是把能力先扣下再让她申请，违反铁律一
+- **feat（memory/levels.py）**：新增 `CLAIM_CLAIMED` / `CLAIM_REJECTED` + `CLAIMS` + `FALLBACK_CLAIM`；`MemoryRecord` 增 `claim_status` 字段并入 `to_dict`/`from_dict`（缺键按 `FALLBACK_CLAIM` 补，**旧库记忆全部仍可用**）
+- **feat（core/state_store.py）**：`memories` 表增 `claim_status` 列（新库在 schema 内，`DEFAULT` 由 `FALLBACK_CLAIM` 插值）；旧库 `ALTER TABLE ADD COLUMN` + `UPDATE ... SET claim_status='claimed' WHERE IS NULL`（**认领默认与 kind 无关**，故不走 `_backfill_sql` 的 CASE，同样幂等）；`add_memory` 写入一律默认 `claimed`；新增 `set_claim_status(memory_id, status)`（**只应由她的动作调用**）
+- **feat（memory/retrieve.py）认领闸门**：`select_hooks` 在来源/确定性闸门之后再加一道——`claim_status=rejected` **不进她的话**（"我知道你说过，但我不把它当作我的记忆"这句话是真的）。**只管话语**：`recall_for_feeling` 不受认领影响——认领谈的是"**归属**"，"这段经历还影响不影响心情"是另一件事（留给遗忘状态机 `retention_state`，避免与 C4 混淆）
+- **feat（llm/chain.py）工具增至两个**：新增 `DISCLAIM_TOOL`（`disclaim(topic)`，拒绝认领某段记忆），与 `RECALL_TOOL` 一并交给主声；`ToolRunner` 签名由 `(topic)` 改为 **`(工具名, 参数字典)`**，调度器把 LLM 给的 `arguments` 原样转交
+- **feat（llm/deepseek.py）**：`_run_call` 按工具名路由（`recall`/`disclaim`，其余名字一律"没有这个能力"）；`_tool_topic` → `_tool_args`（解析整个 arguments 字典）；prompt 记忆段（一）补一句"另有一个 disclaim 工具……这同样是你的权力，程序不会替你拒绝"
+- **feat（soul/expression_service.py）**：`_make_recall_runner` → `_make_tool_runner`（按工具名派发），`_tool_recall` 保持原逻辑，新增 `_tool_disclaim`——用 `topic_match` 在 `content`/`narrative` 上取**最贴题的一条**标 `rejected`，没找到就如实回"（你没找到想拒绝认领的那件事）"，**不猜、不误伤**
+- **不新增任何约束（本次设计要点）**：认领默认就是**能力**（先递到她手上）；`rejected` 只能由**她自己的动作**（disclaim 工具）产生，程序不代她拒绝——否则"她可以不认领"就变成程序的默认拦截
+- **观测（tools/memory_view.py）**：新增 `CLAIM_LABELS`；表格"状态"列由 `已取代/现行` 扩为 `已取代/已拒绝/现行`（`_state_text`）；详情面板加"认领"一项
+- **实测（真实库，重启后自动迁移）**：`memories` 列序 `… source, certainty, claim_status`（与行位置索引 13/14/15 对齐）；**263 条全部回填 `claimed`**（老记忆一条都不受影响）
+- **测试**：新增 8 项——缺键默认 `claimed` 且往返不丢 / 写入默认 `claimed` / 旧库回填幂等（跑两次）+ `set_claim_status` 往返 / 默认认领照常进话语 / `rejected` 不进话语 / 感受路径不受认领影响 / disclaim 命中并落库且此后召回不到 / disclaim 未命中不改动任何记忆 / 主声拿到 `recall`+`disclaim` 两工具且执行器按（名, 参数）派发
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）
+
+### 文档：记忆文档合并与项目文档清理（2026-09-23）
+- **触发**：用户反馈"`elysia/docs` 文档太多了……**当前我都不知道记忆系统在做什么**"——此前的三份记忆文档（`P3_MEMORY_MAP` / `P3_MEMORY_PLAN` / `P3_MEMORY_WORKLOG`）高度技术化且互相重复，**沟通失败**
+- **记忆文档 5 份 → 3 份**：
+  - **新增 `docs/P3_MEMORY.md`** = 记忆系统**唯一主文档**。第零节「**她在做什么**」用八段人话讲清（有记事本 / 不是每次都翻 / 可以自己想起 / 记得你但不必说出来 / 有些事说不出口 / 忘记不是删除 / 还能拒绝被影响 / 能记得多少），**不需要懂术语**；其后才是系统事实（定位与三条铁律 / 四条回路 / 数据流 / 存储与表结构 / 文件清单 A~D / 完整规则一张表 / 已造好未插电的模块 / 规模与实测事实 / 验收矩阵 / 待评审七问 / 外部结论归档约定）。合并自 `P3_MEMORY_MAP.md` + `P3_MEMORY_PLAN.md`
+  - **`docs/P3_MEMORY_WORKLOG.md` 瘦身**：移出与主文档重复的「完整规则表」与「关键文件地图」（改为指向主文档），**只保留"按时间发生的事 + 为什么这么做"**；并入 P3-W 遗忘状态机设计稿为第七节；§4.1 过期 PID/记忆条数改为"以 `soul.ps1 status` 为准"
+  - **`docs/MEMORY_REVIEW_NOTES.md` 保留**（外部意见与裁决，与系统事实分离）
+- **删除 5 份无用 / 重复 / 孤儿文档**：`P3_MEMORY_MAP.md`（并入主文档）、`P3_MEMORY_PLAN.md`（P3-A~F 已全部交付，可留内容已并入主文档）、`P3_RETENTION_DESIGN.md`（并入 WORKLOG 第七节）、`P2_EXPRESSION_PIPELINE.md`（2026-09-11 设计稿，状态过期且已被 `TECHNICAL_DESIGN.md` §1.5 + 代码取代）、`PERSONA.md`（**孤儿文档**：全项目零引用，内容为代码内摘要的逆向还原——方向反了）
+- **删除工作区 7 个镜像副本**（`设计规划/` 4 文件 + `工程标准/` 3 文件，**已逐个 SHA-256 比对确认与仓库副本逐字节相同**）→ 改以 **`elysia/docs/` 为唯一副本**，消除"改完需回拷"的分叉风险（`CHANGELOG` 曾记过一次回拷不及时导致的分叉）
+- **修断链**：`项目元信息/PROJECT_MANIFEST.md`（一/二节 + `elysia/docs/` 清单 + 依赖关系图 + 镜像说明）、`docs/TECHNICAL_DESIGN.md`（`../工程标准/DEVELOPMENT_PRACTICES.md` → `./DEVELOPMENT_PRACTICES.md`）、`elysia/README.md`（文档索引改指仓库内）、`docs/MIGRATION_GUIDE.md`（顶层 7 分类目录 → 5 + 代码库）、两处 `.gitignore` 注释
+- **索引与清单**：`file_manifest.json` 重生成 **117 文件 / 1.1MB**，`--check` **[PASS]**
+- 本次为纯文档操作，**无代码改动、无需重启进程**
+
+### 设计稿：P3-W 遗忘状态机 `retention_state`（2026-09-23）
+- **来源**：多方问询三方共识 C4（"遗忘需补"）+ `MEMORY_REVIEW_NOTES.md` 第六节建议顺序第 4 项
+- **定位**：给记忆补上**可及性**这一维，与既有两个维度正交——`superseded_by`（还对不对）/ `claim_status`（算不算我的）/ **`retention_state`（够不够得着、想不想够）**
+- **四态**：`present`（在册）/ `suppressed`（"我不想再想起这件事"，**只有她可设**，话语❌感受❌）/ `dormant`（"怎么也想不起来了"，程序按时间，话语❌可唤醒）/ `faded`（"细节忘了，感觉还在"，程序按时间，话语❌**感受✅**）。**不提供删除态**——数据永不删是既有铁律
+- **关键设计（避免必然缺陷）**：降级计时用 `since_last_access = now − (last_access_ts or created_ts)`，**不用绝对年龄**——否则一条 200 天的记忆被唤醒回 `present` 后，下一轮维护会立刻把它打回 `dormant`，**永远醒不过来**；唤醒即 `touch` → 重新计时 → "你一提，它又活过来了"是真的
+- **唤醒唯一路径**：话题撞上（`is_related` 命中）；她自己 `recall` 传 `query_loose=True` 走同一条路——**她问，就等于提起**
+- **阈值**：`RETENTION_FADE_AGE_DAYS=60.0`（且 `access_count == 0`）、`RETENTION_DORMANT_AGE_DAYS=180.0`；`protected` 永不降级
+- **新增的唯一约束**：`suppressed` 挡感受路径（没有它，"我不想再被它影响"就没有出口，`rejected` 与"遗忘"会永远混为一谈）
+- **落地清单**：7 个源文件（`levels` / `state_store` 第 16 列 / `retrieve` 保留闸门 + `woke_from` / `heartbeat` 降级判定 / `chain` + `deepseek` 工具扩到 4 个 / `expression_service` / `memory_view`）+ 4 个测试文件 + 观测；工具规格 `FORGET_TOOL` / `RESTORE_TOOL` 用人话描述，**不暴露状态语义**
+- **状态**：设计稿，**待评审后动工**。稿末留三个待评审点（`dormant` 是否跳过 `promote_batch` / `faded` 与零消费的 `detail_level` 是否合并 / `suppressed` 挡感受路径是否过强）
+
+### P3-W1 遗忘状态机本体：`retention_state` 通电（2026-09-23，无 commit）
+- **触发**：P3-W 设计稿评审通过（修正 10 处 M1~M10、裁决 3 点）后，按"拆 W1/W2 两步"开始 W1。**W1 的硬约束是落地后对外行为零变化**——所有记忆都是 `present`，可安全验证迁移
+- **三个已拍板裁决**：M2 `protected` 死阀门 → **自动保护**（晋升 `deep` 且 `access_count ≥ 3` 自动置 `protected`）；落地范围 → **拆 W1（状态机本体）/ W2（她的两个工具）**；M9 缺口信号范围 → **只统计 `present`**
+- **feat（memory/levels.py）**：新增 `RETENTION_PRESENT` / `RETENTION_SUPPRESSED` / `RETENTION_DORMANT` / `RETENTION_FADED` + `RETENTIONS` + `FALLBACK_RETENTION`（=`present`）+ 阈值 `RETENTION_FADE_AGE_DAYS=60.0` / `RETENTION_DORMANT_AGE_DAYS=180.0`；`PROTECT_DEEP_ACCESS=3`（独立成常量）；`MemoryRecord` 增 `retention_state` 字段并入 `to_dict`/`from_dict`（缺键按 `FALLBACK_RETENTION` 补，**旧库记忆全部仍够得着**）
+- **feat（memory/__init__.py）**：导出 `RETENTION_*` / `RETENTIONS` / `FALLBACK_RETENTION` / 两个阈值 / `PROTECT_DEEP_ACCESS`
+- **feat（core/state_store.py）**：`memories` 表增 `retention_state` 列（第 17 列，新库 schema 内 `DEFAULT` 由 `FALLBACK_RETENTION` 插值）；旧库 `ALTER TABLE ADD COLUMN` + `UPDATE ... SET retention_state='present' WHERE IS NULL`（幂等）；`add_memory` 写入一律默认 `present`；新增 `set_retention_state(memory_id, state)` 与 `set_protected(memory_id)`
+- **feat（memory/retrieve.py）保留闸门 + 唤醒**：`select_hooks` 在认领闸门之后再加一道——`suppressed` 永不进话；`dormant`/`faded` 仅在**话题撞上**（`is_related` 命中）时才进话，且记下 `MemoryHit.woke_from`；`retrieve_from_store` 尾部把被唤醒者落回 `present` 并 `touch` **重新计时**（"你一提，它又活过来了"是真的）。**感受路径**：`recall_for_feeling` 挡 `suppressed` 与 `dormant`，**放行 `faded`**（细节忘了，感觉还在）
+- **fix（memory/retrieve.py M5 护栏）**：原 `retrieve_from_store` 在 `now=None` 时会写 `last_access_ts=0` → 唤醒即失效；改为 `now is not None` 才 `touch`/落状态
+- **feat（soul/heartbeat.py）降级判定 + 自动保护 + 缺口口径**：新增模块级 `_RETENTION_DEPTH`（`present` 0 / `faded` 1 / `dormant` 2）与 `_demote_target(rec, now)`——按 `since_last_access`（`now − (last_access_ts or created_ts)`，**非绝对年龄**）判定：≥180 天 → `dormant`；≥60 天且 `access_count == 0` → `faded`；**只降不升**（`suppressed` 返回 `None`，她的决定程序不碰）。`_maintain_memories` 步骤 1b：晋升 `deep` 且 `access_count ≥ 3` → `set_protected`（**M2 通电**）；步骤 2 建索引跳过非 `present`，`decay_strength` 传 `protected`；步骤 3 执行降级（`protected` 跳过）。`_feel_memory_gaps` 只统计 `present`（**M9**）
+- **fix（memory/promote.py M8）**：`with_narrative` 原逐字段构造 `MemoryRecord` 会**把新字段重置为默认**；改用 `dataclasses.replace`（避免每加一列就踩一次坑）
+- **观测（tools/memory_view.py）**：新增 `RETENTION_LABELS`（现行 / 抑制 / 沉睡 / 淡化）；"状态"列由 `已取代/已拒绝/现行` 扩为**已取代 > 已拒绝 > 四态**；详情面板加"保留"一项
+- **实测（真实库 307 条，重启后自动迁移）**：列序追加 `retention_state`（17 列，与行位置索引 16 对齐）；`保留状态: Counter({'present': 307})`；`认领状态: Counter({'claimed': 307})`；`层级: shallow 205 / working 51 / deep 51`；`二次迁移一致: True`（幂等）
+- **测试**：新增 `tests/unit/test_retention.py` **18 项**（默认值 / 序列化往返 / 旧库 16 列幂等迁移 / `set_retention_state`+`set_protected` / `suppressed` 不进话语 / `dormant`+`faded` 无话题不进 / 话题唤醒带 `woke_from` / 唤醒落 `present` 且重置时钟 / `now=None` 不 `touch` / 感受路径挡 `suppressed`+`dormant` 放行 `faded` / 60d 淡化（`access_count` 附加条件）/ 180d 沉睡 / `protected`+`suppressed` 不降级 / 只降不升 / 唤醒后不振荡 / M2 自动保护两条路径 / M8 `with_narrative` 保留字段）；`test_heartbeat.py` 补 1 项"够不着不计缺口"并修正既有缺口测试（P3-W 后 200 天记忆会变 `dormant`）
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）；**W2（`forget`/`restore` 两个工具）待动工**
+
+### P3-W2 遗忘与收回：把状态机接到她手上（`forget` / `restore`，2026-09-23，无 commit）
+- **触发**：W1 状态机本体落地后，按"拆 W1/W2 两步"完成 W2——让她能说"我不想再想起这件事"，也能把它收回来。**忘与不忘都是她的权力**（铁律一：程序不代她忘，也不代她收回）
+- **feat（llm/chain.py）工具增至四个**：新增 `FORGET_TOOL`（"不想再想起某件事时用它——被遗忘的事不会再出现在你记得的事里，也不再影响你的心情"）与 `RESTORE_TOOL`（"把之前不想再想起的事重新收回来"）；描述用人话，**不暴露 `suppressed` 等状态语义**；`_main_speak` 的 `tools` 由 2 个扩到 4 个
+- **feat（llm/deepseek.py）**：`_TOOL_NAMES = ("recall", "disclaim", "forget", "restore")`；prompt 记忆段（一）补两句能力说明（"忘与不忘都由你决定，程序不会替你忘，也不会替你收回"）
+- **feat（soul/expression_service.py）**：新增 `FORGET_MIN_SCORE = 0.5` / `FORGET_DOMINANCE = 2.0` 常量；`_make_tool_runner` 增 `forget`/`restore` 两条分支；新增 `_tool_forget` / `_tool_restore`
+- **判据（M3 / M4，与 `_tool_disclaim` 明确区分）**：①**`forget` 从宽改严**——`disclaim` 的 `best_score > 0.0`（任意一个二元组重合即命中）对"可逆、只挡话语"尚可，但 `forget` 会把记忆推进 `suppressed`（**连感受路径一起切断**），同一判据必然误伤 → 要求 `topic_match ≥ 0.5` **且** `top1 ≥ 2×top2`，否则如实回"（你没找到想忘记的那件事）"，不猜、不误伤；②**`restore` 只在 `suppressed` 里找**（M3 修正）——闸门挡的是 `select_hooks`，`iterate_memories()` 返回全表，若在全表里找她会"恢复"一条从未被忘掉的记忆；恢复是善意动作，判据从宽（任意重合即可）
+- **不越界（两维正交）**：`forget`/`restore` **只动 `retention_state`**，不碰 `claim_status`；`disclaim` 只动 `claim_status`，不碰 `retention_state`——单测各断言一次
+- **测试**：`test_llm_chain.py` 工具断言由 2 个改为 4 个 + 新增"forget/restore 按名派发"；`test_expression_service_memory.py` 新增 6 项（forget 命中 → `suppressed` 且召回不到 / forget 不碰 `claim_status` / 不够贴题不误伤 / 两条并列不误伤 / restore 只在 `suppressed` 里找 / restore 命中回到 `present`）
+- 门禁：ruff lint ✅ / ruff format ✅（79 文件）/ mypy strict ✅（49 源文件）/ pytest ✅ **297 passed**（W1 时 290 + W2 新增 7）
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——W2 是她的新能力，重启后即可在对话中调用。**P3-W 整体完成**
+
 ---
 
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）

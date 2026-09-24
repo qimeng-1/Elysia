@@ -5,8 +5,10 @@
 - 缺口 → TR 轻微上升（想探索/想找回）→ 好奇
 - 刻意不让 SA 上升 → 不是焦虑、不是痛苦
 
-接入方式：GapSignal → DesireEvent(kind="memory_gap", intensity=gap.strength)
-（desire.py 事件脉冲表新增 memory_gap：tr 微升，sa 不动）
+接入方式（P3-U 已接线）：soul/heartbeat.py::_feel_memory_gaps —— 感受路径每
+MEMORY_FEELING_EVERY_N 拍扫描一次索引强度，检测到缺口即
+DesireEvent(kind="memory_gap", intensity=gap.to_event_intensity())。
+缺口只推心情（TR 微升=好奇，SA 不动=非焦虑），**不进话语、不新增约束**。
 """
 
 from __future__ import annotations

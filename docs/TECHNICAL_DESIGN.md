@@ -1,11 +1,11 @@
-﻿# Elysia 技术架构设计
+# Elysia 技术架构设计
 
 > **Version**: 1.0
 > **Date**: 2026-08-24
 > **Status**: P0 已实现部分以代码为准；P1-P6 为规划（开工时细化）
 > **定位**: 路线图第十三章"技术选型总览"的逐模块细化——回答三个问题：**数据库长什么样 / 模块放在哪 / 每个模块用什么技术**。
 > **配套**: [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md)（设计定稿）、[IMPLEMENTATION_PATH.md](./IMPLEMENTATION_PATH.md)（路径与里程碑）
-> **工程师阅读路径**: 本文档（系统怎么跑）→ 路线图（设计动机 + 术语词典）→ ADR（决策原文）→ [elysia/README.md](../elysia/README.md)（上手命令）→ [DEVELOPMENT_PRACTICES.md](../工程标准/DEVELOPMENT_PRACTICES.md)（开发铁律）
+> **工程师阅读路径**: 本文档（系统怎么跑）→ 路线图（设计动机 + 术语词典）→ ADR（决策原文）→ [elysia/README.md](../elysia/README.md)（上手命令）→ [DEVELOPMENT_PRACTICES.md](./DEVELOPMENT_PRACTICES.md)（开发铁律）
 
 ---
 

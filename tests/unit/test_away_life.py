@@ -33,15 +33,18 @@ async def test_alone_produces_thoughts_on_rhythm(tmp_path: Path) -> None:
     clock = SimulatedClock(start_ts=T0, speed=100.0)
     life = AwayLife(store, clock=clock, rng=random.Random(7))
     # 独处模式：立即产出第一个念头
-    await life.tick(mode=Mode.ALONE, away_seconds=600.0, day_phase="day")
+    # 用显式 now= 推进虚拟时间：SimulatedClock 会按真实耗时 ×speed 漂移，
+    # 1 秒级的节律边界在负载下会被漂移跨过（测试随机失败）。
+    now = T0
+    await life.tick(mode=Mode.ALONE, away_seconds=600.0, day_phase="day", now=now)
     assert await store.thought_count() == 1
     # 节律内：不再产出
-    clock.jump(THINK_INTERVAL_S - 1.0)
-    await life.tick(mode=Mode.ALONE, away_seconds=900.0, day_phase="day")
+    now += THINK_INTERVAL_S - 1.0
+    await life.tick(mode=Mode.ALONE, away_seconds=900.0, day_phase="day", now=now)
     assert await store.thought_count() == 1
     # 节律到：产出第二个念头
-    clock.jump(2.0)
-    await life.tick(mode=Mode.ALONE, away_seconds=1200.0, day_phase="day")
+    now += 2.0
+    await life.tick(mode=Mode.ALONE, away_seconds=1200.0, day_phase="day", now=now)
     assert await store.thought_count() == 2
     await store.close()
 
@@ -83,29 +86,40 @@ async def test_dual_mode_thought_style_controls_rhythm(tmp_path: Path) -> None:
     clock = SimulatedClock(start_ts=T0, speed=100.0)
     life = AwayLife(store, clock=clock, rng=random.Random(7))
 
-    # thought_style > 0：胡思乱想，每 3min
-    await life.tick(mode=Mode.ALONE, away_seconds=600.0, day_phase="day", thought_style=0.5)
+    # thought_style > 0：胡思乱想，每 3min（显式 now= 避免时钟漂移，见上）
+    now = T0
+    await life.tick(
+        mode=Mode.ALONE, away_seconds=600.0, day_phase="day", thought_style=0.5, now=now
+    )
     assert await store.thought_count() == 1, "胡思乱想模式应立即产出"
 
     # 3min 内不产出
-    clock.jump(179.0)
-    await life.tick(mode=Mode.ALONE, away_seconds=900.0, day_phase="day", thought_style=0.5)
+    now += 179.0
+    await life.tick(
+        mode=Mode.ALONE, away_seconds=900.0, day_phase="day", thought_style=0.5, now=now
+    )
     assert await store.thought_count() == 1, "3min 节律内不产出"
 
     # 超过 3min 产出第二个
-    clock.jump(5.0)
-    await life.tick(mode=Mode.ALONE, away_seconds=1200.0, day_phase="day", thought_style=0.5)
+    now += 5.0
+    await life.tick(
+        mode=Mode.ALONE, away_seconds=1200.0, day_phase="day", thought_style=0.5, now=now
+    )
     assert await store.thought_count() == 2, "3min 到应产出"
 
     # 切到 thought_style ≤ 0：虚无发呆，每 10min
     # 跳过 600s 到达虚无发呆节律
-    clock.jump(600.0)
-    await life.tick(mode=Mode.ALONE, away_seconds=2100.0, day_phase="day", thought_style=-0.5)
+    now += 600.0
+    await life.tick(
+        mode=Mode.ALONE, away_seconds=2100.0, day_phase="day", thought_style=-0.5, now=now
+    )
     assert await store.thought_count() == 3, "虚无发呆模式 10min 到应产出"
 
     # 10min 内不产出
-    clock.jump(599.0)
-    await life.tick(mode=Mode.ALONE, away_seconds=2400.0, day_phase="day", thought_style=-0.5)
+    now += 599.0
+    await life.tick(
+        mode=Mode.ALONE, away_seconds=2400.0, day_phase="day", thought_style=-0.5, now=now
+    )
     assert await store.thought_count() == 3, "10min 节律内不产出"
 
     await store.close()
@@ -119,23 +133,36 @@ async def test_brain_action_force_thought_style(tmp_path: Path) -> None:
     clock = SimulatedClock(start_ts=T0, speed=100.0)
     life = AwayLife(store, clock=clock, rng=random.Random(7))
 
-    # brain_action="think_active" 强制胡思乱想频率
+    # brain_action="think_active" 强制胡思乱想频率（显式 now= 避免时钟漂移）
+    now = T0
     await life.tick(
-        mode=Mode.ALONE, away_seconds=600.0, day_phase="day", brain_action="think_active"
+        mode=Mode.ALONE,
+        away_seconds=600.0,
+        day_phase="day",
+        brain_action="think_active",
+        now=now,
     )
     assert await store.thought_count() == 1
 
     # 3min 内不产出
-    clock.jump(179.0)
+    now += 179.0
     await life.tick(
-        mode=Mode.ALONE, away_seconds=900.0, day_phase="day", brain_action="think_active"
+        mode=Mode.ALONE,
+        away_seconds=900.0,
+        day_phase="day",
+        brain_action="think_active",
+        now=now,
     )
     assert await store.thought_count() == 1
 
     # 超过 3min 产出
-    clock.jump(5.0)
+    now += 5.0
     await life.tick(
-        mode=Mode.ALONE, away_seconds=1200.0, day_phase="day", brain_action="think_active"
+        mode=Mode.ALONE,
+        away_seconds=1200.0,
+        day_phase="day",
+        brain_action="think_active",
+        now=now,
     )
     assert await store.thought_count() == 2
 

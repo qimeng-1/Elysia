@@ -96,6 +96,10 @@ async def _run(settings: Settings) -> int:
     async def _on_degrade(kind: str, delta: float) -> None:
         desire.apply_event(DesireEvent(kind="degrade", intensity=delta))
 
+    # P3-O：记忆被唤起 → 只推心情（牵挂与亲近微升），不进入她的话
+    async def _on_recall(intensity: float) -> None:
+        desire.apply_event(DesireEvent(kind="memory_recall", intensity=intensity))
+
     llm_chain = build_llm_chain(
         settings,
         on_degrade=lambda _reason: _on_degrade("llm", settings.llm_degrade_sa_delta),
@@ -109,6 +113,7 @@ async def _run(settings: Settings) -> int:
         heartbeat_store,
         tts_chain=tts_chain,
         retriever=retrieve_from_store,
+        on_recall=_on_recall,
     )
 
     heartbeat = SoulHeartbeat(

@@ -2,7 +2,7 @@
 
 记忆打磨期的观测抓手，回答四个问题：
 - 看存储：库里有哪些记忆、层级分布、是否已被更正取代
-- 看打分：每条记忆"当下"的得分构成（层级 / 情绪 / 索引 / 新鲜度）
+- 看打分：每条记忆"当下"的得分构成（层级 / 情绪 / 索引 / 新鲜度 / 复习）
 - 看召回：此刻她会想起哪 3 条（复现表达管线的 select_hooks 逻辑）
 - 看沉淀：层级、细节度、索引强度（晋升与衰减的结果）
 
@@ -40,13 +40,36 @@ from PySide6.QtWidgets import (
 )
 
 from elysia.core.config import get_settings
-from elysia.memory.levels import MemoryRecord
+from elysia.memory.levels import CLAIM_REJECTED, MemoryRecord
 from elysia.memory.retrieve import score_breakdown, select_hooks
 
 AUTO_REFRESH_MS = 3000
 
 LEVEL_LABELS = {"shallow": "浅层", "working": "工作", "deep": "深层"}
 KIND_LABELS = {"interaction": "交互", "expression": "表达"}
+# P3-T 来源/确定性（只观测，不影响召回；召回闸门在 retrieve.select_hooks）
+SOURCE_LABELS = {
+    "self": "她自己",
+    "user": "用户",
+    "observation": "观察",
+    "inference": "推断",
+    "system": "系统",
+}
+CERTAINTY_LABELS = {
+    "certain": "确信",
+    "probable": "大概",
+    "heard": "听说",
+    "speculative": "推测",
+}
+# P3-V 认领（只观测；拒绝认领的记忆不进话语，闸门在 retrieve.select_hooks）
+CLAIM_LABELS = {"claimed": "已认领", "rejected": "已拒绝"}
+# P3-W 保留/可及性（只观测；抑制不进话语与感受，沉睡/淡化可被话题唤醒）
+RETENTION_LABELS = {
+    "present": "现行",
+    "suppressed": "抑制",
+    "dormant": "沉睡",
+    "faded": "淡化",
+}
 LEVEL_COLORS = {
     "deep": QColor("#dbeafe"),
     "working": QColor("#e8f5e9"),
@@ -65,6 +88,7 @@ COLUMNS = [
     "细节",
     "索引",
     "新鲜",
+    "复习",
     "得分",
     "召回",
     "状态",
@@ -162,6 +186,18 @@ def _fmt_age(ts: float, now: float) -> str:
 
 def _fmt_ts(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+def _state_text(rec: MemoryRecord) -> str:
+    """一行状态：已取代 > 已拒绝 > 抑制 > 沉睡 > 淡化 > 现行。
+
+    前两项是"事实错了"与"她不认领"，后三项是 P3-W 的可及性（够不够得着）。
+    """
+    if rec.superseded_by is not None:
+        return "已取代"
+    if rec.claim_status == CLAIM_REJECTED:
+        return "已拒绝"
+    return RETENTION_LABELS.get(rec.retention_state, rec.retention_state)
 
 
 # ── 窗口 ───────────────────────────────────────────────
@@ -301,16 +337,18 @@ class MemoryBrowser(QMainWindow):
             cells = [
                 str(mid),
                 LEVEL_LABELS.get(rec.level, rec.level),
-                KIND_LABELS.get(rec.kind, rec.kind),
+                f"{KIND_LABELS.get(rec.kind, rec.kind)}·"
+                f"{SOURCE_LABELS.get(rec.source, rec.source)}",
                 _fmt_age(rec.created_ts, now),
                 f"{rec.importance:.2f}",
                 str(rec.access_count),
                 f"{rec.detail_level:.2f}",
                 f"{strength:.2f}",
                 f"{parts['recency']:.2f}",
+                f"{parts['review']:.2f}",
                 f"{total:.3f}",
                 f"#{rec_rank}" if rec_rank else "",
-                "已取代" if rec.superseded_by is not None else "现行",
+                _state_text(rec),
                 (rec.content or "")[:60].replace("\n", " "),
             ]
             for j, text in enumerate(cells):
@@ -355,8 +393,12 @@ class MemoryBrowser(QMainWindow):
         lines = [
             f"# {mid}  {LEVEL_LABELS.get(rec.level, rec.level)} / "
             f"{KIND_LABELS.get(rec.kind, rec.kind)}",
-            f"状态：{'已取代（不再召回）' if rec.superseded_by is not None else '现行'}"
+            f"状态：{_state_text(rec)}"
             + (f" ← 被 #{rec.superseded_by} 取代" if rec.superseded_by is not None else ""),
+            f"来源：{SOURCE_LABELS.get(rec.source, rec.source)}"
+            f"｜确定性：{CERTAINTY_LABELS.get(rec.certainty, rec.certainty)}"
+            f"｜认领：{CLAIM_LABELS.get(rec.claim_status, rec.claim_status)}"
+            f"｜保留：{RETENTION_LABELS.get(rec.retention_state, rec.retention_state)}",
             f"内容：{rec.content}",
             f"叙事：{rec.narrative}",
             "",
@@ -370,7 +412,7 @@ class MemoryBrowser(QMainWindow):
             f"—— 当下得分 {total:.3f}（当前感受 {mood or '∅'}）——",
             f"  层级 {parts['level']:.3f}｜情绪 {parts['emotion']:.3f}"
             f"｜索引 {parts['index']:.3f}｜重要 {parts['importance']:.3f}"
-            f"｜新鲜 {parts['recency']:.3f}",
+            f"｜新鲜 {parts['recency']:.3f}｜复习 {parts['review']:.3f}",
         ]
         self._detail.setPlainText("\n".join(lines))
 

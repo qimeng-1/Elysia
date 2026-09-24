@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.memory.levels import (
+    CERTAINTIES,
+    CERTAINTY_CERTAIN,
+    CERTAINTY_PROBABLE,
+    CLAIM_CLAIMED,
+    CLAIM_REJECTED,
     DETAIL_DECAY_PER_LEVEL,
     KIND_EXPRESSION,
     KIND_INTERACTION,
@@ -19,8 +25,14 @@ from elysia.memory.levels import (
     PROMOTE_SHALLOW_ACCESS,
     PROMOTE_SHALLOW_IMPORTANCE,
     PROMOTE_WORKING_IMPORTANCE,
+    SOURCE_OBSERVATION,
+    SOURCE_SELF,
+    SOURCE_USER,
+    SOURCES,
     MemoryRecord,
+    default_certainty,
     default_narrative,
+    default_source,
     level_rank,
 )
 from elysia.memory.scorer import content_salience, emotion_strength, importance, record_importance
@@ -212,3 +224,185 @@ async def test_memory_index_add_and_decay(tmp_path: Path) -> None:
     after = await store.execute_raw("SELECT strength FROM memory_index WHERE id = ?", (idx_id,))
     assert after[0][0] == pytest.approx(0.4)
     await store.close()
+
+
+# ── 来源 / 确定性（P3-T）：这段记忆是谁的、她有多确定 ──────
+def test_provenance_defaults_derived_from_kind() -> None:
+    """未标注时按 kind 推导：用户告知=user/确信，她说的=self，观察=observation。"""
+    assert default_source(KIND_INTERACTION) == SOURCE_USER
+    assert default_source(KIND_EXPRESSION) == SOURCE_SELF
+    assert default_source(KIND_STATE) == SOURCE_OBSERVATION
+    assert default_certainty(KIND_INTERACTION) == CERTAINTY_CERTAIN
+    assert default_certainty(KIND_INTERNAL) == CERTAINTY_PROBABLE
+    # 未知 kind 有兜底，不抛异常（防御旧库里的意外取值）
+    assert default_source("nope") in SOURCES
+    assert default_certainty("nope") in CERTAINTIES
+
+
+def test_from_dict_fills_missing_provenance() -> None:
+    """旧记录缺 source/certainty 键时按 kind 补默认——老库行为不变。"""
+    legacy = MemoryRecord.from_dict(
+        {"created_ts": 1.0, "kind": KIND_INTERACTION, "content": "生日", "emotion_vector": {}}
+    )
+    assert legacy.source == SOURCE_USER
+    assert legacy.certainty == CERTAINTY_CERTAIN
+    # 显式给出时以显式为准，不被默认值覆盖
+    explicit = MemoryRecord.from_dict(
+        {
+            "created_ts": 1.0,
+            "kind": KIND_INTERACTION,
+            "content": "猜测",
+            "emotion_vector": {},
+            "source": SOURCE_SELF,
+            "certainty": CERTAINTY_PROBABLE,
+        }
+    )
+    assert explicit.source == SOURCE_SELF
+    assert explicit.certainty == CERTAINTY_PROBABLE
+    # 序列化往返不丢字段
+    assert MemoryRecord.from_dict(explicit.to_dict()) == explicit
+
+
+@pytest.mark.asyncio
+async def test_add_memory_tags_provenance(tmp_path: Path) -> None:
+    """写入点标注优先；未标注时按 kind 落默认（库中不出现 NULL）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    tagged = await store.add_memory(
+        1.0,
+        {
+            "level": LEVEL_SHALLOW,
+            "kind": KIND_INTERACTION,
+            "content": "她的猜测",
+            "emotion_vector": {},
+            "source": SOURCE_SELF,
+            "certainty": CERTAINTY_PROBABLE,
+        },
+    )
+    untagged = await store.add_memory(
+        2.0,
+        {"level": LEVEL_SHALLOW, "kind": KIND_INTERACTION, "content": "晚霞", "emotion_vector": {}},
+    )
+    tagged_rec = await store.get_memory(tagged)
+    untagged_rec = await store.get_memory(untagged)
+    await store.close()
+    assert tagged_rec is not None and tagged_rec["source"] == SOURCE_SELF
+    assert tagged_rec["certainty"] == CERTAINTY_PROBABLE
+    assert untagged_rec is not None and untagged_rec["source"] == SOURCE_USER
+    assert untagged_rec["certainty"] == CERTAINTY_CERTAIN
+
+
+@pytest.mark.asyncio
+async def test_old_db_provenance_backfill_is_idempotent(tmp_path: Path) -> None:
+    """旧库缺 source/certainty 列：启动补列 + 按 kind 回填；跑两次结果一致。"""
+    import json
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "CREATE TABLE memories (id INTEGER PRIMARY KEY, created_ts REAL, level TEXT,"
+        " kind TEXT, content TEXT, emotion_vector TEXT, importance REAL,"
+        " access_count INTEGER, last_access_ts REAL, protected INTEGER,"
+        " detail_level REAL, narrative TEXT)"
+    )
+    con.execute(
+        "INSERT INTO memories (created_ts, level, kind, content, emotion_vector,"
+        " importance, access_count, protected, detail_level, narrative)"
+        " VALUES (1.0, 'shallow', 'interaction', '我的生日是5月21日', ?, 0.8, 0, 0, 1.0, '生日')",
+        (json.dumps({"chat": 0.5}),),
+    )
+    con.execute(
+        "INSERT INTO memories (created_ts, level, kind, content, emotion_vector,"
+        " importance, access_count, protected, detail_level, narrative)"
+        " VALUES (2.0, 'shallow', 'expression', '我在呢', ?, 0.1, 0, 0, 1.0, '我在呢')",
+        (json.dumps({}),),
+    )
+    con.commit()
+    con.close()
+
+    rows: dict[str, dict[str, object]] = {}
+    for _ in range(2):  # 跑两次：幂等（跑 N 次 = 跑 1 次）
+        store = HeartbeatStore(db)
+        await store.start()
+        rows = {str(r["content"]): r for r in await store.iterate_memories()}
+        await store.close()
+
+    assert rows["我的生日是5月21日"]["source"] == SOURCE_USER
+    assert rows["我的生日是5月21日"]["certainty"] == CERTAINTY_CERTAIN
+    assert rows["我在呢"]["source"] == SOURCE_SELF
+
+
+# ── 认领状态（P3-V）：默认是她的记忆；拒绝认领只由她的动作产生 ──
+def test_claim_default_is_claimed() -> None:
+    """缺 claim_status 的旧记录默认 claimed——老库的记忆全部仍可用。"""
+    legacy = MemoryRecord.from_dict(
+        {"created_ts": 1.0, "kind": KIND_INTERACTION, "content": "生日", "emotion_vector": {}}
+    )
+    assert legacy.claim_status == CLAIM_CLAIMED
+    explicit = MemoryRecord.from_dict(
+        {
+            "created_ts": 1.0,
+            "kind": KIND_INTERACTION,
+            "content": "不认的事",
+            "emotion_vector": {},
+            "claim_status": CLAIM_REJECTED,
+        }
+    )
+    assert explicit.claim_status == CLAIM_REJECTED
+    assert MemoryRecord.from_dict(explicit.to_dict()) == explicit
+
+
+@pytest.mark.asyncio
+async def test_add_memory_defaults_claimed(tmp_path: Path) -> None:
+    """写入默认 claimed：认领是能力，落库即给她（不是先扣下再申请）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    mid = await store.add_memory(
+        1.0,
+        {"level": LEVEL_SHALLOW, "kind": KIND_INTERACTION, "content": "晚霞", "emotion_vector": {}},
+    )
+    rec = await store.get_memory(mid)
+    await store.close()
+    assert rec is not None and rec["claim_status"] == CLAIM_CLAIMED
+
+
+@pytest.mark.asyncio
+async def test_old_db_claim_backfill_and_reject(tmp_path: Path) -> None:
+    """旧库缺 claim_status 列：启动补列 + 一律回填 claimed（幂等）；她可否决。"""
+    import json
+    import sqlite3
+
+    db = tmp_path / "old_claim.db"
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "CREATE TABLE memories (id INTEGER PRIMARY KEY, created_ts REAL, level TEXT,"
+        " kind TEXT, content TEXT, emotion_vector TEXT, importance REAL,"
+        " access_count INTEGER, last_access_ts REAL, protected INTEGER,"
+        " detail_level REAL, narrative TEXT)"
+    )
+    con.execute(
+        "INSERT INTO memories (created_ts, level, kind, content, emotion_vector,"
+        " importance, access_count, protected, detail_level, narrative)"
+        " VALUES (1.0, 'shallow', 'interaction', '我的生日是5月21日', ?, 0.8, 0, 0, 1.0, '生日')",
+        (json.dumps({"chat": 0.5}),),
+    )
+    con.commit()
+    con.close()
+
+    rows: list[dict[str, Any]] = []
+    for _ in range(2):  # 跑两次：幂等（跑 N 次 = 跑 1 次）
+        store = HeartbeatStore(db)
+        await store.start()
+        rows = await store.iterate_memories()
+        await store.close()
+    assert rows[0]["claim_status"] == CLAIM_CLAIMED
+
+    # 她的动作：拒绝认领（落库往返）
+    store = HeartbeatStore(db)
+    await store.start()
+    mid = int(rows[0]["id"])
+    await store.set_claim_status(mid, CLAIM_REJECTED)
+    fetched = await store.get_memory(mid)
+    await store.close()
+    assert fetched is not None and fetched["claim_status"] == CLAIM_REJECTED

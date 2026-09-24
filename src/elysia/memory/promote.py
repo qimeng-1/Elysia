@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from elysia.memory.levels import (
     DETAIL_DECAY_PER_LEVEL,
@@ -95,25 +95,14 @@ def with_narrative(record: MemoryRecord) -> MemoryRecord:
     """返回叙事已补全的记忆副本（情感核心永不空）。
 
     深层记忆晋升时调用：narrative 为空则回退 content。
-    其余字段不变。
+    其余字段原样保留——用 dataclasses.replace 而非逐字段重建（M8）：
+    逐字段构造时每新增一个字段就会被静默重置为默认值
+    （`superseded_by`/`source`/`certainty`/`claim_status` 都曾如此，
+    第 17 个字段 `retention_state` 会把"她不想再想起的事"复活成 present）。
     """
     if record.narrative:
         return record
-    rec = MemoryRecord(
-        id=record.id,
-        created_ts=record.created_ts,
-        kind=record.kind,
-        content=record.content,
-        emotion_vector=dict(record.emotion_vector),
-        importance=record.importance,
-        level=record.level,
-        access_count=record.access_count,
-        last_access_ts=record.last_access_ts,
-        protected=record.protected,
-        detail_level=record.detail_level,
-        narrative=default_narrative(record),
-    )
-    return rec
+    return replace(record, narrative=default_narrative(record))
 
 
 def can_reach_deep(record: MemoryRecord) -> bool:

@@ -1935,6 +1935,9 @@ GPT 的 1.5 六条里有五条**已实现**（记忆失败不阻塞 / main→fal
 
 - 新常量 `EXPRESS_TIMEOUT_S`（建议 10s = 10 拍）：超时 → 取消任务 → `status=timeout` →
   若有已校验文本则**气泡仍显示**（她说了，只是没出声）
+- **[D3 澄清 2026-09-24，用户裁决]** `EXPRESS_TIMEOUT_S` **只作关闭宽限**——正常运行
+  **不给单任务设上限**（LLM 主声自身 `timeout_s = 30.0` 会先于它触发；若在运行时硬套 10s，
+  正常开口会被先误判成「她这次没说成」）。仅用于 1.6 关闭序的「等在跑任务 ≤ `EXPRESS_TIMEOUT_S`」。
 - 顺带（**独立小改，可单独回退**）：把 `tts/breaker.default_vram_sampler` 的同步采样挪进
   `asyncio.to_thread`，消除 async 内最长 5s 阻塞（F4）
 
@@ -1965,7 +1968,7 @@ GPT 的 1.5 六条里有五条**已实现**（记忆失败不阻塞 / main→fal
 |---|---|---|
 | **D1** | 队列满时丢弃内部念头，是否等于「她决定不说」？ | **是**（2026-09-24）——不说也是一种回应，与铁律一不冲突。规则：内部念头（`force=False`）遇满即丢并 `log.debug`；用户输入（`force=True`）**永不丢**，可挤掉队列里最旧的内部念头 |
 | **D2** | 记忆写入留心跳，还是移进 worker？ | **留在心跳**（2026-09-24，用户裁定，与我原建议 (b) 相反）——见 20.6 的 1.3 修订 |
-| **D3** | 队列容量 / 超时秒数 | 容量 **2**（1 在跑 + 1 等待）；`EXPRESS_TIMEOUT_S = 10`（= 10 拍），入 `config.py` |
+| **D3** | 队列容量 / 超时秒数 | 容量 **2**（1 在跑 + 1 等待）；`EXPRESS_TIMEOUT_S = 10`（= 10 拍），入 `config.py`。**D3 澄清（2026-09-24，用户裁决）：此秒数只作关闭宽限，不作运行时限流**——见 20.6 的 1.5 补注 |
 
 ### 20.10 拆步（本稿落地时按此拆，每步各自门禁 + 提交）
 
@@ -2041,6 +2044,22 @@ GPT 的 1.5 六条里有五条**已实现**（记忆失败不阻塞 / main→fal
 | 提交 | `32fcfb8`（2 文件 / +235 −0），已推送 `main`（`origin/main` = `32fcfb8`） |
 | 装载 | **无需重启**——新模块无人 import，零行为变化 |
 | 下一步 | 步 1.2：新增 `soul/expression_worker.py`（容量 2 / D1 组队规则 / `EXPRESS_TIMEOUT_S` 超时取消）+ 单测（**仍未接线**） |
+
+### 21.4 步 1.2 表达 worker（2026-09-24）
+
+| 项 | 内容 |
+|---|---|
+| 交付 | 新增 `src/elysia/soul/expression_worker.py`（189 行：有界队列 + 单执行器 + 关闭宽限）+ 单测 `tests/unit/test_expression_worker.py`（288 行 / 11 项）+ `core/config.py` 增两常量 `EXPRESS_QUEUE_CAPACITY = 2` / `EXPRESS_TIMEOUT_S = 10.0` |
+| 行为变化 | **无**（20.10 步 1.2：只做调度不接服务，handler 由步 1.3 注入——`git status` 可证无任何模块 import 它） |
+| 队列语义（D1 落地） | `submit(job) -> bool`：`closed` 拒收；`depth >= capacity` 时 `force=False`（内部念头）丢并 `log.debug` ⇒ **「她这次决定不说」**；`force=True`（用户输入）**永不丢**——`next((q for q in pending if not q.force), None)` **挤掉最旧内部念头**，无可挤者照样入队（容量是**内部念头上限**、非硬上限，故 `depth` 可达 3） |
+| 单飞与过期 | runner 循环 `await _wakeup.wait()` → 逐个 `_execute`，`_running` 保证**同一时刻只跑一个**；`_accept` 用 `is_fresh(result.order_key, _latest_accepted)` **偏序**判定，旧结果丢弃（`log.debug`）——同拍多 job 也不误判 |
+| 关闭宽限（D3 澄清） | `aclose()`：`_closed=True` → `_pending.clear()`（**等待中任务直接丢**，合 1.6「关停只等在跑任务」）→ `_wakeup.set()` → `asyncio.wait_for(asyncio.shield(task), timeout=_close_grace_s)`；**超时**则 `task.cancel()` → `suppress(CancelledError)` → 若 `_running is not None` 则 `_accept(_timeout_result(...))`（`status=timeout`）→ `return self.drain()` |
+| 与 20.6 的差异（照实记） | ① `EXPRESS_TIMEOUT_S` **只作 `aclose` 宽限、不作运行时限流**（见 20.6 的 1.5 补注 + 20.9 的 D3 改注）——否则 LLM 主声自身 30s 超时会先被误判成「她这次没说成」；② 关停**不追等待中任务的结果**（单测 `test_aclose_collects_unpersisted_results` 按此写法：先跑完再关） |
+| 门禁 | ruff check ／ ruff format --check（**89 files**）／ mypy strict（**54 source files**）／ pytest **397 passed**（386 → +11） **全绿** |
+| 完整性 | `verify_integrity.py` 清单 **134 → 136 文件**，`--check` **PASS** |
+| 提交 | `dc87fba`（3 文件 / +486 −0：`config.py` +9、`expression_worker.py` 189、`test_expression_worker.py` 288），已推送 `main`（`origin/main` = `dc87fba`） |
+| 装载 | **无需重启**——新模块无人 import，零行为变化 |
+| 下一步 | 步 1.3：**心跳接线（唯一行为变化点）**——`heartbeat.py` 改 `worker.submit(job)` 非阻塞 + 每拍 `drain()` → `_persist`（写 `think` / `expression` / `add_memory`，L253-279「用户输入→经历」**一字不动**）、新增 heartbeat seq 计数器；`main.py` 关闭序插入 worker 段；worker 的 handler 由 `ExpressionService` 的耗时段充当 |
 
 
 

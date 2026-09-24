@@ -2027,6 +2027,22 @@ GPT 的 1.5 六条里有五条**已实现**（记忆失败不阻塞 / main→fal
 | 装载 | **无需重启**——纯文档，对运行中的灵魂（PID 12448，启动 19:50:57，核查时仍在跑）零影响 |
 | 下一步 | 步 1.1：新增 `soul/expression_types.py`（`ExpressionJob` / `ExpressionResult`）+ 单测（零行为变化，**不接线**） |
 
+### 21.3 步 1.1 数据模型（2026-09-24）
+
+| 项 | 内容 |
+|---|---|
+| 交付 | 新增 `src/elysia/soul/expression_types.py`（109 行：`ExpressionJob` / `ExpressionResult` / `make_job_id` / `is_fresh` / 四态常量）+ 单测 `tests/unit/test_expression_types.py`（126 行 / 11 项） |
+| 行为变化 | **无**（20.10 步 1.1：纯新增类型，**未接线**——无任何模块 import 它） |
+| 与 20.6 初稿的差异（照实记） | ①`ExpressionResult` **多 `instruction` / `intent` 两字段**——D2 裁决「落库留在心跳」⇒ `expression_log` 的取证行需要 payload 与 intent，结果必须把它们带回；②`ExpressionJob` **持 `BrainOutput` 本体**（20.6 的 1.1「需改」，不新造快照，约定 worker 只读不改），并自带 `summary` / `vrram_mb` / `env` / `user_message` / `force`，使 worker **自包含** |
+| 判新旧 | `order_key = (heartbeat_seq, created_ts)` + `is_fresh(candidate, latest)`（**偏序**：`latest is None` 时任意候选为真；同一拍可能多个 job ⇒ **不能只比 seq**）；`job_id = f"{seq}-{created_ts}"` 只作日志/测试可读标签，**不解析字符串** |
+| 四态 | `success` ／ `skipped`（无话可说 ⇒ 心跳无需落库）／ `timeout`（**若有已校验文本则气泡仍显示**——她说了，只是没出声）／ `failed`（error 记原因） |
+| 门禁 | ruff check ／ ruff format --check（**87 files**）／ mypy strict（**53 source files**）／ pytest **386 passed** **全绿** |
+| 完整性 | `verify_integrity.py` 清单 **132 → 134 文件**，`--check` **PASS** |
+| 提交 | `32fcfb8`（2 文件 / +235 −0），已推送 `main`（`origin/main` = `32fcfb8`） |
+| 装载 | **无需重启**——新模块无人 import，零行为变化 |
+| 下一步 | 步 1.2：新增 `soul/expression_worker.py`（容量 2 / D1 组队规则 / `EXPRESS_TIMEOUT_S` 超时取消）+ 单测（**仍未接线**） |
+
+
 
 ---
 

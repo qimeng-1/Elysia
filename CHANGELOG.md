@@ -481,6 +481,20 @@
 
 ---
 
+### 第八节 S5/S6/S7：身份连续性收尾（2026-09-24）
+- **触发**：用户明确"**我最关心的功能是身份的连续性**"，并选择把这一环**整体收尾**（不是再加机制，而是把第八节留下的三处"写在表里、没通电"补上）。先出**设计稿**（`P3_MEMORY_WORKLOG.md` 第十三节）交用户评审，三个拍板点：D-S1 **B 库为准** / D-S2 **补 2 条边界种子** / D-S3 **顺便接线 `llm_fallback_*`**。**全程未代为重启灵魂**
+- **S5（llm/identity.py + soul/expression_service.py + soul/main.py）**：新增 `IDENTITY_SEEDS`（3 条，全部照抄既有档案、不新造设定：出生设定原文 + 「我在意什么」+ 「我的边界」）；新增 `ensure_identity_seeds(store, now)` 在 `soul` 启动时**幂等种入**（幂等键 = **正文本身**：`kind=self AND source=system AND content=?`——她 `disclaim`/`forget`/改口只动 `claim_status`/`retention_state`/`superseded_by`，**行在、`content` 不改**，键永远稳定）；种入形态 `kind=self` + `source=system` + `certainty=certain` + `deep` + `protected=1` + `detail_level=1.0` + `narrative=原文`（**零 DDL**）
+- **身份段契约改「库为准」（D-S1，唯一对外语义变化）**：`identity_lines` 由"缺失/非法 → `[]`"改为 **→ `None`**（"没有这个字段"）；`compose_identity` 只在 **`None`** 时才回退种子，字段在场（含空列表）就**完全以库为准** ⇒ **一处豁免都不加**：她可对种子 `disclaim` / `forget` / `adopt`（同话题改口即出生设定自然淡出，8.6"终态 = 她认领的自我认知"由"写在表里"变成**可达状态**）
+- **席位守卫修正**：`_tool_adopt` 由 `len(existing) - len(retired) >= MAX_IDENTITY_LINES - 1`（写死"只给出生设定留 1 席"，种子在册后她将**一条也认领不了**）改为按**认领后总行数**判 `len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES` ⇒ 身份段封顶 **5 行 = 种子 3 + 她自己 2 席**（代价如实记：她的自主槽位从 4 降到 2；放宽的杠杆是种子表，不是守卫）
+- **S6 换后端接线（D-S3）**：`build_llm_chain` 消费 `llm_fallback_base/api_key/model`（原为**死配置**，生产一直传 `fallback=None`）：配了次声端点就用**同一个** `DeepSeekBackend`（同一份身份段取数入口 = 人格由数据保证，换的只是嗓门），**没配则与接线前完全一致**；`DeepSeekBackend` 新增 `require_key: bool = True`（抽出 `_unavailable()` 供 `complete` / `complete_with_tools` 共用），次声用 `require_key=False`（本地 Ollama/vLLM 一类端点常无 key）
+- **真验证（离线对照探针，跑完即删）**：同一指令 dump 实际发出的 system 段——**换模型**（`deepseek-chat` vs `deepseek-reasoner`）**逐字相同**；**换库**（同一库连续启动 3 次 vs 另一个库启动 1 次）**逐字相同**、两库都恰好 **3 条** `kind=self`；**幂等**：第 1 次种 3 条、之后每次 0 条
+- **S7 观测（tools/memory_view.py）**：新增第三档标签 `TAG_SEED="出生设定"`（`kind=self` 且 `source=system`）+ 纯函数 `_is_seed` / `_in_identity`（与 `expression_service._self_records` **同一套闸门**）；状态栏给「**身份段 x/5＝出生设定 n＋自我 m**」；明细面板给提示"她可 disclaim/forget/adopt"；6.1 增**身份连续性速查 SQL**（在册自我认知 + `expression_log` 最近一次开口的 `identity` 实况）——**不加表不加列**
+- **测试**：`test_identity.py` 契约按 S5 重写（`None` 才回退种子 / `[]` = 她此刻真的没有自我认知 / 种子声明）+ 新增 3 项种子接线（幂等、进身份段但不进 hooks、她可 `disclaim` 掉种子）；`test_expression_service_memory.py` 席位守卫改按总行数；`test_llm_chain.py` 新增 3 项 fallback 接线 / `require_key`；`test_memory_view.py` 新增"出生设定"标签与名额计数
+- 门禁：ruff lint ✅ / ruff format ✅（83 文件）/ mypy strict ✅（51 源文件）/ pytest ✅ **346 passed**
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后库里出现 **3 条可见的身份种子**；身份段的来源由"代码常量"变为"库里在册的数据"（重启 / 换模型 / 断网 / 换库四情形逐字不变）。**本次唯一对外变化**：身份段由 1 行（出生设定）增至 3 行（原出生设定一字未改 ＋ D-S2 拍板补的两条边界种子，均为档案原文）。**本次不代为重启**，由用户自行决定时机
+
+---
+
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）
 
 > 决定：不再推进新阶段（P4），转入**对 P0-P3 已交付内容的深入完善**。这是收口期——把已实现的能力打磨到真实可用、可感知、稳定。

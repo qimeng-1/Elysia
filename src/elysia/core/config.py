@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     llm_main_api_key: str = ""  # 真实 key 走 .env，绝不入库
     llm_main_model: str = "deepseek-chat"
     llm_main_timeout_s: float = 30.0
+    # S6（D-S3）：次声——任何 OpenAI 兼容端点（本地 Ollama/vLLM 或另一个云模型）。
+    # `llm_fallback_base` 留空则不挂载次声，行为与接线前完全一致。
     llm_fallback_base: str = ""
     llm_fallback_api_key: str = ""
     llm_fallback_model: str = "qwen:7b"

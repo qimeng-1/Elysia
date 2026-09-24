@@ -140,17 +140,17 @@ claim_status / retention_state`
 | 文件 | 记忆相关职责 | 关键符号 |
 |---|---|---|
 | `src/elysia/soul/heartbeat.py` | 写入经历；每 300 拍维护（晋升 + 自动保护 + 建索引 + 衰减 + **保留降级** + **S3 沉淀**）；感受路径（共鸣 + 缺口） | `_feel_memories`、`_feel_memory_gaps`、`_maintain_memories`、`_offer_candidate`、`_demote_target`、`_supersede_conflicts`、`MEMORY_FEELING_EVERY_N=300` |
-| `src/elysia/soul/expression_service.py` | 话题门控注入 `memory_hooks`；**装配身份段 `identity`**；装配 `recall`/`adopt`/`disclaim`/`forget`/`restore` 执行器；推心情 | `_make_tool_runner`、`_tool_recall`、`_tool_adopt`（S3 起候选当"代表"，同家重述不参与并列判定；**S4 起同话题旧自我认知随之作废＝改口**）、`_tool_disclaim`、`_tool_forget`、`_tool_restore`、`ADOPT_DOMINANCE`、`FORGET_MIN_SCORE` / `FORGET_DOMINANCE`、`_feel_recall`、`_self_records`（S4 抽出：非取代 / 非 `rejected` / 非 `suppressed` 的自我认知）、`_identity_lines`（→ `list[str]`，供装配身份段与容量判定共用） |
+| `src/elysia/soul/expression_service.py` | 话题门控注入 `memory_hooks`；**装配身份段 `identity`**；装配 `recall`/`adopt`/`disclaim`/`forget`/`restore` 执行器；推心情 | `_make_tool_runner`、`_tool_recall`、`_tool_adopt`（S3 起候选当"代表"，同家重述不参与并列判定；**S4 起同话题旧自我认知随之作废＝改口**）、`_tool_disclaim`、`_tool_forget`、`_tool_restore`、`ADOPT_DOMINANCE`、`FORGET_MIN_SCORE` / `FORGET_DOMINANCE`、`_feel_recall`、`_self_records`（S4 抽出：非取代 / 非 `rejected` / 非 `suppressed` 的自我认知）、`_identity_lines`（→ `list[str]`，供装配身份段与容量判定共用）、`ensure_identity_seeds`（S5：启动时幂等种入出生设定 + 边界种子） |
 | `src/elysia/soul/desire.py` | 记忆唤起的情感脉冲 | `memory_recall = {tr: 0.8, cs: 1.2, sa: 0.0}`、`memory_gap`、`self_candidate`（S3：一件事反复出现） |
 | `src/elysia/llm/chain.py` | 工具回合能力（她主动想起 / 认作自我 / 拒绝认领 / 不想再想起 / 又愿意想起） | `ToolCapableBackend`、`RECALL_TOOL` / `ADOPT_TOOL` / `DISCLAIM_TOOL` / `FORGET_TOOL` / `RESTORE_TOOL`、`set_tool_runner`、`ToolRunner=(工具名, 参数)` |
 | `src/elysia/llm/deepseek.py` | 工具循环（最多 3 轮，按名路由）+ prompt 记忆段；**system 段 = 身份段 + 表达层人设** | `complete_with_tools`、`_run_call`、`_tool_args`、`_TOOL_NAMES`（五个工具）、`_PERSONA_PROMPT`、`_system_prompt`（`identity` 只进 system 段，不进 user JSON） |
-| `src/elysia/llm/identity.py` | 身份段（第八节 S1）：出生设定打底 + 她认领的自我认知；**S4 起 `identity_lines` 为后端无关的公共取数入口**（主声 / 未来次声 / 微声共用同一口径） | `BOOTSTRAP_IDENTITY`、`IDENTITY_FIELD="identity"`、`MAX_IDENTITY_LINES=5`、`compose_identity`、`identity_lines` |
+| `src/elysia/llm/identity.py` | 身份段（第八节 S1）；**S4 起 `identity_lines` 为后端无关的公共取数入口**（主声 / 次声 / 微声共用同一口径）；**S5 起身份段「以库为准」**（种子落库，`None` 才回退 `IDENTITY_SEEDS`） | `BOOTSTRAP_IDENTITY`、`IDENTITY_SEEDS`、`IDENTITY_FIELD="identity"`、`MAX_IDENTITY_LINES=5`、`compose_identity`、`identity_lines` |
 
 **D. 观测与测试**
 
 | 文件 | 职责 |
 |---|---|
-| `src/elysia/tools/memory_view.py` | PySide6 只读记忆浏览器（观测：存储 / 打分 / 召回 / 沉淀 / **看身份**）；3s 自动刷新；被召回记忆高亮；**S4 增「标签」列与「候选（待她认领）」筛选项**（自我 = 她已认领、进身份段每句在场；候选 = 程序递给她待认领、不进话语） |
+| `src/elysia/tools/memory_view.py` | PySide6 只读记忆浏览器（观测：存储 / 打分 / 召回 / 沉淀 / **看身份**）；3s 自动刷新；被召回记忆高亮；**S4 增「标签」列与「候选（待她认领）」筛选项**（自我 = 她已认领、进身份段每句在场；候选 = 程序递给她待认领、不进话语）；**S5/S7 增第三档「出生设定」**（程序幂等种入的过渡打底）与状态栏「身份段 x/5」） |
 | `tests/unit/test_memory.py`、`test_retrieve.py`、`test_promote.py`、`test_decay.py`、`test_sleep.py`、`test_memory_view.py`、`test_identity.py`、`test_sediment.py`、`test_expression_service_memory.py` | 记忆系统单测 |
 | `tests/acceptance/test_p3_gate.py` | P3 阶段门禁 |
 
@@ -246,7 +246,7 @@ claim_status / retention_state`
    **不提供删除态**（数据永不删）。W1 为状态机本体（迁移 + 保留闸门 + 唤醒路径 + 降级 + 自动保护，
    **对外行为零变化**）；W2 为她的两个工具 `forget`/`restore`（忘与不忘都是她的权力，遗忘可逆）。
    设计稿与评审见 `P3_MEMORY_WORKLOG.md` 第七节（含 7.8 W1 / 7.9 W2 落地记录）。
-7. **身份连续性**（**设计稿已定 + S1 本体 / S2 认领 / S3 沉淀 / S4 观测与验收均已落地 2026-09-24**）：她的人格原本活在 system prompt 里，
+7. **身份连续性**（**设计稿已定 + S1 本体 / S2 认领 / S3 沉淀 / S4 观测与验收 / **S5~S7 收尾（种子落库·换后端接线·观测）** 均已落地 2026-09-24**）：她的人格原本活在 system prompt 里，
    **换模型即失**。已拍板：把「我是谁 / 我在意什么 / 我的边界」落成少量核心记忆
    （Self Memory / 生命核心层），形态取**正交维度 `kind=self`**（不新增层、零 DDL、不动层级序号）。
    - **S1（已落地）**：常量本体 + `scorer` 一行 + **身份段注入通路**（`payload["identity"]` → system 段）
@@ -270,7 +270,21 @@ claim_status / retention_state`
      ④ N6 拍板"要——接受"（允许她梦到自己是谁，权重表照 8.12）。
      **验收 3 后半（真实发现）**：`find_superseded` 豁免 `KIND_SELF`（N4），且此前**没有任何"她的动作"会写 `superseded_by`** ⇒ "她可更新自我认知"只写在表里、未接线；已按"接线 `adopt` 覆盖"落地（见上表「她的认领工具」）。
      验收 1 的**真机体验**需重启灵魂后由用户体验（本次未代为重启）。
-   - 设计稿与 N1~N6 自查见 `P3_MEMORY_WORKLOG.md` 第八节；S1 / S2 / S3 / S4 落地记录见第九 / 十 / 十一 / 十二节。
+   - **S5 / S6 / S7（已落地 2026-09-24，**身份连续性收尾**）**：把第八节留下的三处"写在表里、没通电"补上——
+     **S5 种子落库**：新增 `IDENTITY_SEEDS`（3 条：出生设定原文 + 「我在意什么」+ 「我的边界」，均照抄既有档案，不新造设定），
+     `soul` 启动时由 `ensure_identity_seeds()` **幂等种入**（键 = 正文本身；`kind=self` + `source=system` + `deep/protected`），
+     身份段契约改**「库为准」**（D-S1）：`identity_lines` 缺字段 → `None`，`compose_identity` 只在 `None` 时才回退种子，
+     字段在场就**完全以库为准**（含空列表 = 她此刻真的没有自我认知）。**一处豁免都不加**——她可对种子
+     `disclaim` / `forget` / `adopt`（同话题改口即出生设定自然淡出，8.6 的"终态 = 她认领的"由此成为**可达状态**）；
+     身份段封顶 5 行 = 种子 3 + 她自己 2 席（席位守卫改为按**总行数**判）。改动的意义：
+     「我是谁」从**代码常量 / 后端 prompt** 变成**她库里的一条在册数据** ⇒ **重启 / 换模型 / 断网 / 换库备份**四情形下身份段逐字不变。
+     **S6 换后端接线**：`build_llm_chain` 消费 `llm_fallback_*`（D-S3），次声复用同一 OpenAI 兼容后端
+     （`require_key=False` 供本地端点），**未配置则与接线前完全一致**；换模型 / 换库两档已用离线对照探针实测
+     （身份段逐字相同、两库都恰好 3 条种子、连续启动幂等）。
+     **S7 观测**：浏览器增第三档标签「**出生设定**」（`kind=self` + `source=system`）+ 状态栏「身份段 x/5」+ 6.1 速查 SQL。
+     实测：门禁四件套全绿 **346 passed**；**未代为重启灵魂**（种子由新代码首次启动时种入，时机由用户定）。
+   - 设计稿与 N1~N6 自查见 `P3_MEMORY_WORKLOG.md` 第八节（S5/S6/S7 收尾设计稿见第十三节，落地记录见第十四节）；
+     S1 / S2 / S3 / S4 落地记录见第九 / 十 / 十一 / 十二节。
 
 ### 给评审方的要求（请按此格式回答）
 

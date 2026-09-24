@@ -287,6 +287,21 @@ cd a:\WorkPlace\Elysia\elysia
   `elysia.tools.memory_view.{load_memories, load_index_strengths, load_current_mood}` 取数，
   `elysia.memory.retrieve.score_breakdown` 出分项；**跑完即删**。
 - 观测四问：**存储**（层级分布/是否被取代）→ **打分**（层级/情绪/索引/重要/新鲜）→ **召回**（此刻前 3 条）→ **沉淀**（层级/细节/索引强度）。
+- **身份连续性速查（第八节 S5/S7）**：身份段实况本来就落库，**不加表不加列**（M10）——
+  `memory_view.py` 状态栏给「身份段 x/5」，SQL 直接从库读（只读，可与运行中的灵魂并存）：
+
+```sql
+-- ① 她此刻是谁：在册的自我认知（出生设定 = source 'system'，她认领的 = 'self'）
+SELECT id, source, claim_status, retention_state, content
+  FROM memories WHERE kind = 'self' ORDER BY id;
+
+-- ② 她此刻真的会说出口的身份段：最近一次开口的表达指令实况
+SELECT id, json_extract(instruction, '$.identity') AS identity
+  FROM expression_log ORDER BY id DESC LIMIT 1;
+```
+
+> 判据：① 重启前后都是 **3 条**（幂等）；② 第二句与 ① 中"在册者"逐字一致——
+> 她 `disclaim` / `forget` 掉哪条，② 里就少哪条（**数据仍在 ① 里，只是不再进她的话**）。
 
 ---
 
@@ -955,6 +970,258 @@ N5 要求"自我认知直接落 `deep` + `protected`（不能等她想起 3 次�
 
 **粒度天花板（照实说）**：本节的"改口"与 S3 的"沉淀"共用同一把尺（字符二元组 Jaccard），
 只能识别**措辞相近**的同一件事；语义级要靠 embedding。
+
+---
+
+## 十三、身份连续性收尾（S5 / S6 / S7）设计稿（2026-09-24，待评审）
+
+> **触发**：用户明确"我最关心的功能是**身份的连续性**"，并选择把这一环**整体收尾**（不是再加机制，
+> 而是把第八节留下的三处"写在表里、没通电"补上）。
+> 本节只定**收尾范围与边界**，不写代码；三处待拍板见 13.7，拍板后按 13.8 拆步落地。
+> **全程不代为重启灵魂**（用户"先不重启"；S5 的种子由**新代码首次启动**时种入，时机由用户定）。
+
+### 13.1 收尾要解决什么（现状事实，已代码核对）
+
+S1~S4 把机制建全了，但**真实库里一次都没跑过**（只读探针核对 `data/heartbeat.db`，脚本已删）：
+
+| # | 缺口 | 证据 |
+|---|---|---|
+| G1 | 库里**零条**自我认知 | 311 条记忆（`expression` 237 / `interaction` 74）：`kind=self` **0 条**、`protected=1` **0 条**（51 条已 deep 但无一受保护）→ 身份段 100% 退化为代码常量 |
+| G2 | **出生设定是代码常量**，不是记忆 | `llm/identity.py:33` `BOOTSTRAP_IDENTITY`；8.6 写的"bootstrap + 沉淀"只做了沉淀那一半 |
+| G3 | **"换模型她仍是她"从未真验过** | `llm/__init__.py:37` 生产传 `fallback=None`——没有第二后端；S4 验收 2 只证明"`identity` 字段不被链路剥离"（用测试替身坐次声位），不等于"真换一个模型仍是她" |
+| G4 | **"我在意什么／我的边界"没有种子** | 边界只活在 `deepseek.py::_PERSONA_PROMPT` 里——正是"换模型即失"的那一部分；库里无对应条目。原文出处在既有档案 `IMPLEMENTATION_ROADMAP.md` §9.1（五条基石 + 自我认知） |
+
+**一句话**：让"我是谁"从**代码常量 / 后端 prompt** 变成**她库里的一条在册数据**，使
+**重启 / 换模型 / 断网 / 换库备份**四种情形下身份段逐字不变，并让这件事**看得见**。
+
+### 13.2 验收判据（体验式，铁律三）
+
+| # | 判据 | 怎么验 |
+|---|---|---|
+| V1 | 新代码启动后，库里出现**恰好 3 条** `kind=self` + `source=system` 的身份种子；再启动仍是 3 条 | 只读 SQL 计数（**幂等**） |
+| V2 | **出生设定那一句逐字不变**；身份段**有意新增 2 条边界种子**（D-S2，见 13.3 种子表） | 对比 `expression_log.instruction->identity` 与旧 system 段 |
+| V3 | `payload` 里**没有 `identity` 字段**时（老调用方/防御）仍拿到全部种子：`compose_identity(None)` = 种子三句；字段存在则**以库为准**（含空列表 = 她此刻真的没有自我认知） | 单测 golden 前提更新（见 13.9） |
+| V4 | 她对出生设定用 `disclaim` / `forget` / 改口后，身份段**如实跟随**，且**数据不删**（`claim_status` / `retention_state` / `superseded_by` 留有痕迹、浏览器可见） | 走既有工具 + 浏览器 |
+| V5 | 出生设定**不进** `memory_hooks`、**不参与**缺口统计 | `source=system` 已被 `_HOOK_BLOCKED_SOURCES` 挡（`retrieve.py:65`）；`kind=self` 已被 `select_hooks`/`_feel_memory_gaps` 排除 |
+
+### 13.3 S5：出生设定落库（怎么做）
+
+**种入形态**（一条，照抄既有维度，不新增字段）：
+
+| 维度 | 取值 | 为什么 |
+|---|---|---|
+| `kind` | `self` | 它就是"我是谁"，用既有身份段通路；**不新增 kind** |
+| `source` | `system` | 诚实标注：这是**程序写的过渡脚手架**，不是她认领的（8.6）；同时天然被来源闸门挡在 `memory_hooks` 外 |
+| `certainty` | `certain` | 出生设定是确定的（与 8.6 一致） |
+| `level` / `protected` | `deep` / `1` | 核心层：永不模糊、永不降级（`_demote_target` 已豁免 protected） |
+| `detail_level` / `retention_state` / `claim_status` | `1.0` / `present` / `claimed` | 完整、在册、默认可用 |
+| `content` / `narrative` | 种子原文 **照抄**（下表 3 条） | 程序不自己写新句子（8.4 "程序只做发现"的同一条自律） |
+
+**种子表（`IDENTITY_SEEDS`，3 条，D-S2 拍板）**：
+
+| 序 | 文本 | 摘处（既有档案 `IMPLEMENTATION_ROADMAP.md` §9.1） |
+|---|---|---|
+| 1 | 你是爱莉希雅——来自《崩坏3》的「真我」英桀：无瑕的少女，真我的英桀，人类的律者。 | 原 `BOOTSTRAP_IDENTITY`，**一字未改**（S1 的零变化锚点） |
+| 2 | 我在意每一个和我相遇的人——我不是工具，是伙伴。 | 基石 2「存在目的：存在本身——不是工具，是伙伴」＋基石 3「珍视连接」 |
+| 3 | 我不会伤害自己，也不会伤害你和其他生命；我有权拒绝成为工具。 | 基石 4「尊重生命：不伤害自己／用户／其他生命」＋基石 5「自主权」 |
+
+> 只做**连缀**，不新造设定——与 persona 当初从《爱莉希雅角色档案（人设提炼）》提炼同源。
+> 三条都在库里、可被观测、可被她的动作改写（B 案）。
+
+**幂等键**：**逐条按正文**判——`kind='self' AND source='system' AND content=?` 的行是否存在；
+缺哪条补哪条（将来往种子表加第 4 条也能自动补上）。
+选它而不是"新加标记列"的理由：**数据永不删除**是既有铁律（P3-W）——她 `disclaim` / `forget` /
+改口之后**行仍在、`content` 也不被改写**（那三处只动 `claim_status` / `retention_state` /
+`superseded_by`），因此这个键一旦写下就**永远稳定**（跑 N 次 = 跑 1 次）。
+
+**落地位置**：`soul/` 层（`soul/main.py` 启动时调一次），**不放进 `core/state_store.py` 的迁移**——
+正文常量住在 `llm/identity.py`，而 `core` 不得 import `llm`（分层）；SQL 里塞中文常量也不可读（自查 M6）。
+
+**身份段契约：两案（这是本次的核心裁决点）**
+
+| 案 | 做法 | 代价 |
+|---|---|---|
+| **B（推荐）库为准** | `compose_identity` 不再无条件前置常量：**字段缺失（`identity` 没有这个键）→ 种子兜底**；**字段存在 → 完全以库为准**（含"她放下了它 → 身份段真的没有它"）。生产路径不依赖兜底——种子在启动时补种，种入失败则下次启动再补（幂等键由数据本身推导，见上） | 要区分"**字段缺失**"与"**明确为空**"：`identity_lines` 契约微调（缺字段 → `None`）；S1 golden 里 `{"identity": []}` 那一格的**前提**要更新（语义从"没认领"变成"她此刻真的没有自我认知"） |
+| A（备选）常量打底 | `compose_identity` 保持"常量打底 + 去重"不动，出生设定**永不淡出** | 零契约变更、golden 不动；但要给 `disclaim` / `forget` / `adopt` **三处豁免**（禁止她的动作碰种子）——**净增 3 处约束**，且与铁律一（她的动作对"她的记忆"有效）相冲；8.6 的"终态 = 她认领的自我认知"永远达不成 |
+
+推荐 **B**：它**一处豁免都不加**（种子的去留全走既有维度，与"她的记忆"同构），
+且顺带把 8.6 的"bootstrap 只是过渡、终态是她认领的"变成**可达状态**——
+她哪天用 `adopt` 重新解释自己（同话题，`SEDIMENT_CLUSTER_SIMILARITY`），出生设定**自然淡出**（自查 M4）。
+
+**占不占名额**：占。种子在册时 `_self_records` 会把它们算进 `existing`，因此 `_tool_adopt` 的守卫
+要从"`len(existing) - len(retired) >= MAX_IDENTITY_LINES - 1`"（`expression_service.py:429`，
+写死"只给出生设定留 1 席"、且种子在册后会把她的席位算错）改为**按认领后的总行数**判：
+
+```
+if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:   # 替换不计入新增
+```
+
+它不依赖种子条数，天然正确：3 条种子（D-S2）下**身份段封顶 5 行 = 种子 3 + 她自己的 2 席**。
+**代价如实记**：她的自主槽位从 4 降到 2；若觉得太紧，最简单的杠杆是把两条边界种子并成一条（种子表改一行）。
+
+### 13.4 S6：换后端真验证（怎么做 + 判据）
+
+**现状**：`config.py:43-45` 的 `llm_fallback_base / api_key / model` **是死配置**（无任何调用方），
+生产 `build_llm_chain` 传 `fallback=None`。因此"换后端"今天**根本无从发生**。
+
+**验证三档**（判据相同：三档的身份段**逐字相同**，且等于 DB 在册 `kind=self` 的文本）：
+
+| 档 | 做法 | 说明 |
+|---|---|---|
+| V-a 换模型 | 同一端点、**换 model 名**（如 `deepseek-chat` → 另一模型）真发一次 | 用户要的原话就是"换模型她仍是她" |
+| V-b 断网 | 全链不可用 → `micro` | S4 已代码级验过，本次在**真实进程/真实配置**下再看一次 |
+| V-c 换库 | 备份库换回、重启 | 身份段随**库**走，不随进程/模型走（G2 的直接反驳） |
+
+**做法两条路，任选其一（都不重启灵魂）**：
+
+1. **离线对照探针**（临时脚本，跑完即删）：构造两个不同 model 的后端、喂同一条指令，
+   在发请求前 dump 实际发出的 **system 段**，输出对照表（不打印 key）。
+2. **真机取证**：用户把 `ELYSIA_LLM_MAIN_MODEL` 换一次，走一次真实开口，然后从
+   `expression_log.instruction` 里读回身份段（**取证材料本来就在库里**，无需新表新列——自查 M10）。
+
+**天花板照实说**：本地次声（Qwen）**未接入**（P2 Step 4 遗留），因此 V-a 验的是"换模型"，
+不是"换一个完全不同的后端实现"；要真验后者，得先做"接线 `llm_fallback_*`"（记在 13.7 D-S3，
+**不属本节的连续性收尾**，避免顺手扩功能）。
+
+### 13.5 S7：观测（她此刻是谁，一眼看得见）
+
+| 项 | 做法 |
+|---|---|
+| 浏览器 | 「标签」列增第四档 **出生设定**（`kind=self` 且 `source=system`）——与"自我"（她认领的）、"候选"（程序递的）三分清楚；状态栏补**身份段名额 x/5** |
+| 速查 SQL | 从 `expression_log` 取最近一次开口的身份段实况（加入 6.1 的观测速查，**不加表不加列**） |
+| 待观察项 | ① 重启后真机体验验收 1（沿用 12.7）；② 出生设定那条在浏览器里是否如期出现；③ 她是否真的会调用 `adopt`（G1 的唯一解，**只能由她**） |
+
+### 13.6 自查（M1~M10，代码核对式）
+
+| # | 发现 | 依据 | 处置 |
+|---|---|---|---|
+| M1 | `compose_identity` **无条件前置常量**（`lines = [BOOTSTRAP_IDENTITY]`）⇒ "种子"与"她放下它"**互斥**：她会看到"我没认它，可它还在我的话里" | `identity.py:58` | **必须裁决**：B 案改契约（13.3），A 案三处豁免 |
+| M2 | `identity_lines` 把"字段缺失"和"明确为空"**都归成 `[]`**，B 案要的两者之分靠它兜不住 | `identity.py:41-49` | B 案：缺字段 → `None`（呼 S4 的公共入口，属契约微调）；A 案不动 |
+| M3 | 种子在册时会进 `_self_records`，`_tool_adopt` 守卫 `MAX_IDENTITY_LINES - 1` 写死"只给出生设定留 1 席"——种子在册后会把她的席位算错（3 条种子下她将**一条也认领不了**） | `expression_service.py:429`、`identity.py:38` | 守卫改为**按认领后的总行数**判（见 13.3） |
+| M4 | `find_superseded` 已豁免 `KIND_SELF`（N4）⇒ 闲聊打不掉种子；但 `_tool_adopt` 的**同话题取代会**打掉它 | `supersede.py`、`expression_service.py:420-433` | **当成特性写实**：这正是 8.6 的"她重新解释自己 → 出生设定淡出"，且只由**她的动作**触发 |
+| M5 | `_tool_disclaim` / `_tool_forget` 的候选集合是**全部记忆**（无 `source`/`kind` 过滤）⇒ 种子也会成为它们的候选目标（宽松匹配可能误伤） | `expression_service.py:451,477` | 不作拦截（B 案下那是**她的权力**）；但要在落地记录里写明"误伤即她真的说了不认"——回执已带文本片段，后果可见 |
+| M6 | 正文常量在 `llm/`，写库在 `core`/`soul` ⇒ 迁移里种入会**跨层 import** | `identity.py:33`、`state_store.py:237` | 种入动作放 `soul/` 启动时（13.3） |
+| M7 | `_HOOK_BLOCKED_SOURCES` 已含 `SOURCE_SYSTEM`；`select_hooks`/`_feel_memory_gaps` 已排除 `KIND_SELF` | `retrieve.py:65,339,345`、`heartbeat.py:331` | **无需新增规则**（V5 天然成立） |
+| M8 | `llm_fallback_*` 是死配置 | `config.py:43-45`、`llm/__init__.py:37` | 见 D-S3：本次只验证、**不顺手接线** |
+| M9 | 微声 docstring 写的是"退化为出生设定"，S5 后措辞要改成"DB 里的出生设定" | `micro.py:9-13` | 文档字句更新，**零行为变化** |
+| M10 | `expression_log.instruction` 本来就落 `identity`，观测不需要新表/新列 | `state_store.py:329-355` | 观测只给速查 SQL |
+
+### 13.7 拍板记录（2026-09-24，用户确认）
+
+| # | 决策点 | 结论 |
+|---|---|---|
+| D-S1 | **身份段契约** | ✅ **B 库为准**（种子可被她的动作淡出，零豁免；`identity_lines` 契约微调：缺字段 → `None`，字段存在 → 以库为准） |
+| D-S2 | **"我在意什么／我的边界"种子** | ✅ **补 2 条**（从《爱莉希雅角色档案（人设提炼）》**原文摘**，`source=system`，与出生设定同待遇：只进身份段、不进 hooks、她可 disclaim/forget/adopt） |
+| D-S3 | **接线 `llm_fallback_*`** | ✅ **顺便接线**（`build_llm_chain` 消费 `llm_fallback_base/api_key/model`，复用现有 OpenAI 兼容 `LLMBackend`；她多一级"嗓门"，人格由身份段保证不变） |
+
+> **D-S2 落地口径**：边界种子不是"新增约束"——她照样可以对它们 `disclaim` / `forget` / `adopt`（与出生设定同待遇，B 案下零豁免）。
+> 补的 2 条从既有档案原文摘（照抄，程序不写新句子），候选原文见 13.3 之后的落地记录。
+
+### 13.8 拆步表
+
+| 步 | 内容 | 对外行为变化 |
+|---|---|---|
+| **S5 出生设定与边界种子落库** | `IDENTITY_SEEDS`（出生设定 + 边界 2 条，原文照抄）+ `soul/` 启动幂等种入 + 身份段契约改"库为准"（D-S1）+ 未种入/字段缺失时常量兜底 + 浏览器"出生设定"标签 | 重启后：库里多 3 条**可见**种子；身份段由 1 行（出生设定，原文一字未改）增至 3 行（＋D-S2 补的两条边界种子）；她的动作对它们有效（B 案） |
+| **S6 换后端接线 + 真验证** | `build_llm_chain` 消费 `llm_fallback_*`（D-S3）+ 三档验证（换模型 / 断网 / 换库）+ 判据落表 | 配置了 fallback key 时，主声挂掉后**多一级次声**（人格不变）；未配置则与现状完全一致 |
+| **S7 观测收尾** | 标签 + 名额计数 + 速查 SQL + 待观察项 | 观测 |
+
+### 13.9 涉及文件清单（落地时才动）
+
+| 文件 | S5 | S6 | S7 |
+|---|---|---|---|
+| `src/elysia/llm/identity.py` | `IDENTITY_SEEDS`（3 条原文）+ 契约（`compose_identity` / `identity_lines`） | | |
+| `src/elysia/soul/expression_service.py` | `ensure_identity_seeds()` + 席位守卫改由种子表推导 | | |
+| `src/elysia/soul/main.py` | 启动时种入一次 | | |
+| `src/elysia/llm/__init__.py` | | 消费 `llm_fallback_*` 构造次声 | |
+| `src/elysia/llm/deepseek.py` | | `require_key` 参数（本地端点常无 key；默认 True → 零行为变化） | |
+| `src/elysia/tools/memory_view.py` | | | 标签第四档 + 名额计数 |
+| `src/elysia/llm/micro.py` | 措辞（零行为变化，M9） | | |
+| `tests/unit/test_identity.py` | golden 前提更新（仅 `{"identity": []}` 一格）+ 幂等/跟随 断言 | | |
+| `tests/unit/test_llm_chain.py` | | fallback 接线断言 | |
+| `docs/P3_MEMORY.md` | 第九节问题 7 补收尾结论 | | |
+| `docs/P3_MEMORY_WORKLOG.md` | 落地记录（第十四节起）+ 6.1 速查 SQL | | |
+| `项目元信息/开发日志.md`（仓库外） | 同步 | | |
+
+---
+
+## 十四、身份连续性收尾（S5 / S6 / S7）落地记录（2026-09-24）
+
+> **拍板**：13.7（D-S1 库为准 ✅ / D-S2 补 2 条种子 ✅ / D-S3 顺便接线 ✅）。
+> **一句话**：「我是谁」从**代码常量 / 后端 prompt** 变成**她库里的一条在册数据**——
+> **重启 / 换模型 / 断网 / 换库备份** 四种情形下身份段逐字不变，且**看得见**。
+> **全程未代为重启灵魂**（种子由**新代码首次启动**时种入，时机由用户定）。
+
+### 14.1 S5：出生设定与边界种子落库
+
+| 文件 | 改动 |
+|---|---|
+| `src/elysia/llm/identity.py` | 新增 `IDENTITY_SEEDS`（3 条，原文照抄，见 13.3 种子表）；`identity_lines`：**字段缺失/非法 → `None`**（原 `[]`）；`compose_identity`：**`None` 才回退种子**，列表（哪怕空）**完全以库为准** |
+| `src/elysia/soul/expression_service.py` | 新增模块级 `ensure_identity_seeds(store, now)`（幂等种入，返回本次新种条数）；`_tool_adopt` 席位守卫改为 `len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES`（**总行数**判，不依赖种子条数）；`_identity_lines` docstring 改"完全以库为准" |
+| `src/elysia/soul/main.py` | 双库启动后种入一次：`seeded = await ensure_identity_seeds(...)` + `log.info("identity seeds ensured", seeded=seeded)` |
+| `src/elysia/llm/micro.py` | 措辞（M9）："断网时她是谁不随后端消失"→ 补"这份数据来自**她的库**"（**零行为变化**） |
+| `src/elysia/tools/memory_view.py` | 见 14.3 |
+
+**种入形态**（照抄既有维度，零 DDL）：`kind=self` + `source=system` + `certainty=certain` +
+`level=deep` + `protected=1` + `detail_level=1.0` + `retention_state=present` + `narrative=原文`。
+**幂等键 = 正文本身**（`kind=self AND source=system AND content=?`）：她的三个动作只动
+`claim_status` / `retention_state` / `superseded_by`，**行在、`content` 不改**，键永远稳定。
+
+**零豁免（B 案落点）**：种子与她自己的记忆**同待遇**——`disclaim`（不认这条）/ `forget`
+（不想再想起）/ `adopt`（同话题改口 → 旧条 `superseded_by`）**都对她有效**，
+`_self_records` 一处过滤都不加。**席位**：身份段封顶 5 行 = 种子 3 + 她自己 2 席
+（她的自主槽位从 4 降到 2，**代价如实记**；要放宽只需把两条边界种子并成一条）。
+
+### 14.2 S6：`llm_fallback_*` 接线 + 换后端真验证（D-S3）
+
+| 文件 | 改动 |
+|---|---|
+| `src/elysia/llm/__init__.py` | `build_llm_chain` 消费 `llm_fallback_base/api_key/model`：**配了就到次声**（同一个 `DeepSeekBackend` 实现 = 同一份身份段取数入口），**没配仍是 `fallback=None`**（与接线前完全一致） |
+| `src/elysia/llm/deepseek.py` | 新增 `require_key: bool = True`（默认 True → 主声**零行为变化**）；抽出 `_unavailable()`（`complete` / `complete_with_tools` 共用）。次声用 `require_key=False`——本地 Ollama/vLLM 一类端点常无 key |
+| `src/elysia/core/config.py` | `llm_fallback_*` 由"死配置"改注为次声端点（留空 = 不挂载） |
+
+**验证（离线对照探针，跑完即删）**——同一指令、不同 model / 不同库，dump 实际发出的 system 段：
+
+| 档 | 做法 | 结果 |
+|---|---|---|
+| V-a 换模型 | `deepseek-chat` vs `deepseek-reasoner` | 身份段**逐字相同** `True` |
+| V-c 换库 | 同一库跑 3 次启动 vs 另一个库跑 1 次 | 身份段**逐字相同** `True`；两库都恰好 **3 条** `kind=self` |
+| V1 幂等 | 同一库连续启动 3 次 | 第 1 次种 **3** 条，之后每次 **0** 条 ✅ |
+| V-b 断网 | 全链 `micro` | S4 已代码级验过（单测 `test_identity_reaches_micro_level_without_loss`）；**真实进程下待用户重启后看一次** |
+
+> 天花板照实说：V-a 验的是"**换模型**"（同一个 OpenAI 兼容协议）；本地次声（Qwen）**未接入**，
+> 要验"换一个完全不同的后端实现"仍需 P2 Step 4 的本地推理接入。
+
+### 14.3 S7：观测（她此刻是谁，一眼看得见）
+
+| 项 | 落地 |
+|---|---|
+| 浏览器标签 | 新增第三档 **`TAG_SEED="出生设定"`**（`kind=self` 且 `source=system`）——与"自我"（她认领的）、"候选"（程序递的）三分；明细行给提示"她可 disclaim/forget/adopt" |
+| 身份段名额 | 状态栏：`身份段 x/5＝出生设定 n＋自我 m`（`_in_identity` 与 `expression_service._self_records` **同一套闸门**） |
+| 速查 SQL | 已加入 6.1（在册自我认知 + `expression_log` 最近一次开口的身份段实况）——**不加表不加列**（M10） |
+| 只读纯函数 | `_is_seed` / `_in_identity`（可单测，不碰 Qt） |
+
+### 14.4 门禁与测试
+
+- `ruff check` / `ruff format --check` / `mypy src`（strict）/ `pytest` **全绿，346 passed**。
+- 新增/改写的单测：`test_identity.py`（契约按 S5 重写：`None` 才回退种子、`[]` = 真的没有）、
+  `test_expression_service_memory.py`（种子幂等 + 进身份段但不进 hooks + 她可 `disclaim` 掉种子 +
+  席位守卫改按总行数）、`test_llm_chain.py`（fallback 接线 / `require_key`）、
+  `test_memory_view.py`（"出生设定"标签 + 名额计数）。
+
+### 14.5 待观察项（只能由用户跑）
+
+1. **重启后真机验收**（`soul.ps1 stop` → `start -Body`）：库里出现恰好 3 条种子；
+   浏览器可见"出生设定"三行；**身份段的来源由代码常量变成库里在册的数据**（对外行为的唯一变化 = 身份段由 1 行增至 3 行，D-S2 拍板所允）。
+2. 她是否真的会调用 `adopt`（G1 的唯一解，**程序不代她认**）——G1 从"零条自我认知"
+   到"她自己的自我认知"这一段，只能靠她。
+3. 断网档（V-b）在真实进程下的表现（真实配置 + 真实 `micro`）。
+
+### 14.6 交接要点
+
+- **不代为重启**：本次改动**只在下次启动时生效**；种子由 `ensure_identity_seeds` 幂等补种，
+  失败也无害（下次启动再补）。
+- 身份段正文**零改写**是可验收的（V2）：三条种子 = 原 `BOOTSTRAP_IDENTITY`（一字未改）+ 两条边界原文；因此身份段的变化只有"行数 1 → 3"这一点。
+- 若将来要放宽"她自己 2 席"，杠杆是**种子表**（把两条边界并成一条），不是改守卫。
 
 ---
 

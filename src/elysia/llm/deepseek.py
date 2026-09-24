@@ -142,20 +142,29 @@ class DeepSeekBackend(LLMBackend):
         base: str = "https://api.deepseek.com",
         model: str = "deepseek-chat",
         timeout_s: float = 30.0,
+        require_key: bool = True,
     ) -> None:
         self._api_key = api_key
         self._base = base.rstrip("/")
         self._model = model
         self._timeout_s = timeout_s
+        # S6：本地 OpenAI 兼容端点（Ollama/vLLM 等）常不需要 key，
+        # 次声挂在这一类端点上时用 `require_key=False`。默认 True → 主声零行为变化。
+        self._require_key = require_key
         self._endpoint = f"{self._base}/chat/completions"
+
+    def _unavailable(self) -> bool:
+        if self._require_key and not self._api_key:
+            log.warning("DeepSeek backend 无 api_key，判定不可用")
+            return True
+        return False
 
     async def complete(
         self,
         instruction: dict[str, Any],
         prompt_template: dict[str, Any],
     ) -> str | None:
-        if not self._api_key:
-            log.warning("DeepSeek backend 无 api_key，判定不可用")
+        if self._unavailable():
             return None
         try:
             data = await asyncio.to_thread(self._post, self._payload(self._messages(instruction)))
@@ -176,8 +185,7 @@ class DeepSeekBackend(LLMBackend):
 
         工具是**她的选择**：她调用才检索，不调用就与单轮完全一致。
         """
-        if not self._api_key:
-            log.warning("DeepSeek backend 无 api_key，判定不可用")
+        if self._unavailable():
             return None
 
         messages = self._messages(instruction)

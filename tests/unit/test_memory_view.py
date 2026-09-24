@@ -8,18 +8,24 @@ from pathlib import Path
 import pytest
 
 from elysia.core.state_store import HeartbeatStore
+from elysia.llm.identity import IDENTITY_SEEDS
 from elysia.memory.levels import (
     CERTAINTY_PROBABLE,
     KIND_INTERACTION,
+    KIND_SELF,
     LEVEL_SHALLOW,
     SOURCE_INFERENCE,
     SOURCE_SELF,
 )
+from elysia.soul.expression_service import ensure_identity_seeds
 from elysia.tools.memory_view import (
     COLUMNS,
     TAG_CANDIDATE,
+    TAG_SEED,
     TAG_SELF,
+    _in_identity,
     _is_candidate,
+    _is_seed,
     _tag_text,
     load_current_mood,
     load_index_strengths,
@@ -179,3 +185,23 @@ async def test_tag_text_marks_self_and_candidate(tmp_path: Path) -> None:
     assert _is_candidate(by_id[candidate_id])
     assert _tag_text(by_id[plain_id]) == ""
     assert "标签" in COLUMNS
+
+
+@pytest.mark.asyncio
+async def test_tag_text_marks_seed_and_identity_quota(tmp_path: Path) -> None:
+    """S5：程序种入的出生设定自成一档（与"她自己认领的"分开），并计入身份段名额。"""
+    db = tmp_path / "heartbeat.db"
+    store = HeartbeatStore(db)
+    await store.start()
+    seeded = await ensure_identity_seeds(store, 1.0)
+    await store.add_memory(2.0, _memory("今天天气不错"))
+    await store.close()
+
+    records = load_memories(db)
+    seeds = [rec for rec in records if _is_seed(rec)]
+    assert len(seeds) == seeded == len(IDENTITY_SEEDS)
+    assert all(_tag_text(rec) == TAG_SEED for rec in seeds)
+    # 身份段名额：在册的自我认知（含种子）都占位——"她此刻是谁"看得见
+    assert sum(1 for rec in records if _in_identity(rec)) == len(IDENTITY_SEEDS)
+    assert _in_identity(seeds[0])  # 种子默认在册
+    assert not any(_is_seed(rec) for rec in records if rec.kind != KIND_SELF)

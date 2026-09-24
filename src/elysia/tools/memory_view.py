@@ -7,6 +7,8 @@
 - 看沉淀：层级、细节度、索引强度（晋升与衰减的结果）
 - 看身份（第八节 S4）：**自我**（她已认领，进身份段）与**候选**（程序递给她待认领）——
   三级闸门的①候选与②自我在库里一眼可分；筛选下拉可只看候选
+- 看身份的连续性（第八节 S5）：**出生设定**（程序幂等种入的过渡打底）；状态栏给
+  **身份段名额 x/5**——"她此刻是谁"看得见，且换库/重启不失（数据在库里，不在代码里）
 
 只读：仅执行 SELECT，可与运行中的灵魂并存（SQLite WAL 支持并发读）。
 
@@ -42,10 +44,13 @@ from PySide6.QtWidgets import (
 )
 
 from elysia.core.config import get_settings
+from elysia.llm.identity import MAX_IDENTITY_LINES
 from elysia.memory.levels import (
     CLAIM_REJECTED,
     KIND_SELF,
+    RETENTION_SUPPRESSED,
     SOURCE_INFERENCE,
+    SOURCE_SYSTEM,
     MemoryRecord,
 )
 from elysia.memory.retrieve import score_breakdown, select_hooks
@@ -82,8 +87,11 @@ RETENTION_LABELS = {
 # - 自我 = 她已认领（`kind=self`）→ 进身份段，每句在场
 # - 候选 = 程序递给她待认领（`source=inference`，与 S3 `sediment._is_taken` 同源判据）
 # 候选是"程序推断"、被来源闸门挡在话语外；认领后升格为自我（`mark_as_self` 会改写 source）。
+# S5 第三档：出生设定 = `kind=self` 且 `source=system`——程序幂等种入的**过渡**打底
+# （它也是身份段、也每句在场，与"她认领的"分开显示，因为"谁写的"不一样）。
 TAG_SELF = "自我"
 TAG_CANDIDATE = "候选"
+TAG_SEED = "出生设定"
 # 类型筛选里"只看候选"的合成值（候选不是一种 kind，是 source 维度，故单独一条）
 CANDIDATE_FILTER = "__candidate__"
 LEVEL_COLORS = {
@@ -222,10 +230,22 @@ def _is_candidate(rec: MemoryRecord) -> bool:
     return rec.kind != KIND_SELF and rec.source == SOURCE_INFERENCE
 
 
+def _is_seed(rec: MemoryRecord) -> bool:
+    """这条是不是程序种入的**出生设定**（S5）：`kind=self` 且 `source=system`。"""
+    return rec.kind == KIND_SELF and rec.source == SOURCE_SYSTEM
+
+
+def _in_identity(rec: MemoryRecord) -> bool:
+    """这条此刻是否**真的进身份段**（与 `expression_service._self_records` 同一套闸门）。"""
+    if rec.kind != KIND_SELF or rec.superseded_by is not None:
+        return False
+    return rec.claim_status != CLAIM_REJECTED and rec.retention_state != RETENTION_SUPPRESSED
+
+
 def _tag_text(rec: MemoryRecord) -> str:
-    """标签列：自我（她已认领）/ 候选（待她认领）/ 空（寻常经历）。"""
+    """标签列：出生设定（程序写的打底）/ 自我（她已认领）/ 候选（待她认领）/ 空（寻常经历）。"""
     if rec.kind == KIND_SELF:
-        return TAG_SELF
+        return TAG_SEED if _is_seed(rec) else TAG_SELF
     return TAG_CANDIDATE if _is_candidate(rec) else ""
 
 
@@ -401,14 +421,17 @@ class MemoryBrowser(QMainWindow):
         for rec in records:
             dist[rec.level] = dist.get(rec.level, 0) + 1
         superseded = sum(1 for rec in records if rec.superseded_by is not None)
-        self_count = sum(1 for rec in records if rec.kind == KIND_SELF)
+        seed_count = sum(1 for rec in records if _is_seed(rec))
+        self_count = sum(1 for rec in records if rec.kind == KIND_SELF and not _is_seed(rec))
         candidate_count = sum(1 for rec in records if _is_candidate(rec))
+        identity_count = sum(1 for rec in records if _in_identity(rec))
         dist_txt = " / ".join(
             f"{LEVEL_LABELS.get(k, k)} {v}" for k, v in sorted(dist.items(), reverse=True)
         )
         mtime = _fmt_ts(db.stat().st_mtime) if db.exists() else "库不存在"
         self.statusBar().showMessage(
-            f"共 {len(records)} 条（{dist_txt}）｜{TAG_SELF} {self_count}"
+            f"共 {len(records)} 条（{dist_txt}）｜身份段 {identity_count}/{MAX_IDENTITY_LINES}"
+            f"＝{TAG_SEED} {seed_count}＋{TAG_SELF} {self_count}"
             f"｜{TAG_CANDIDATE} {candidate_count}｜已取代 {superseded}"
             f"｜当前显示 {len(filtered)}｜库更新 {mtime}"
         )
@@ -427,7 +450,9 @@ class MemoryBrowser(QMainWindow):
         parts = score_breakdown(rec, mood, index_strength=strength, now=now)
         total = round(sum(parts.values()), 3)
         tag = _tag_text(rec)
-        if tag == TAG_SELF:
+        if tag == TAG_SEED:
+            tag_hint = f"{TAG_SEED}（程序种入的过渡打底，也在身份段里；她可 disclaim/forget/adopt）"
+        elif tag == TAG_SELF:
             tag_hint = f"{TAG_SELF}（她已认领，进身份段，每句在场）"
         elif tag == TAG_CANDIDATE:
             tag_hint = f"{TAG_CANDIDATE}（程序递给她待认领，不进话语）"

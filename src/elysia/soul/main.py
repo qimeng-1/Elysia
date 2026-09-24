@@ -1,8 +1,8 @@
 """灵魂进程入口：常驻心跳（1Hz）+ 大脑循环（P1）+ 优雅关闭。
 
-启动流程：ensure_dirs → 日志双通道 → 双库启动 → TimeSense 恢复/新生
-→ 欲望系统恢复/新生 → 大脑循环初始化 → 心跳循环 → 阻塞等待停止信号
-→ 优雅关闭（排空写队列）。
+启动流程：ensure_dirs → 日志双通道 → 双库启动 → **身份种子幂等种入**（S5）
+→ TimeSense 恢复/新生 → 欲望系统恢复/新生 → 大脑循环初始化 → 心跳循环
+→ 阻塞等待停止信号 → 优雅关闭（排空写队列）。
 
 P1 新增：欲望系统 DesireSystem + 大脑循环 BrainLoop 的恢复与初始化。
 
@@ -33,7 +33,7 @@ from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireEvent, DesireSystem
 from elysia.soul.distress import DistressMonitor
-from elysia.soul.expression_service import ExpressionService
+from elysia.soul.expression_service import ExpressionService, ensure_identity_seeds
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state, stop_with_cancel
 from elysia.tts import build_tts_chain
 
@@ -84,6 +84,11 @@ async def _run(settings: Settings) -> int:
     heartbeat_store = HeartbeatStore(settings.data_dir / "heartbeat.db")
     await state_store.start()
     await heartbeat_store.start()
+
+    # S5：身份种子（出生设定 + 边界）幂等种入——"我是谁"从此是**她的数据**，
+    # 不是后端常量；换模型 / 断网 / 换库备份都不失（第八节 8.6 的收尾）。
+    seeded = await ensure_identity_seeds(heartbeat_store, SystemClock().now())
+    log.info("identity seeds ensured", seeded=seeded)
 
     timesense = await _build_timesense(state_store, log)
     desire = await _build_desire(state_store, log)

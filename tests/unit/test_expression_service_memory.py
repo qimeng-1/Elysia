@@ -15,7 +15,12 @@ from typing import Any
 import pytest
 
 from elysia.core.state_store import HeartbeatStore
-from elysia.llm.identity import IDENTITY_FIELD, MAX_IDENTITY_LINES
+from elysia.llm.identity import (
+    BOOTSTRAP_IDENTITY,
+    IDENTITY_FIELD,
+    IDENTITY_SEEDS,
+    MAX_IDENTITY_LINES,
+)
 from elysia.llm.validator import ValidationResult
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
@@ -30,12 +35,13 @@ from elysia.memory.levels import (
     RETENTION_SUPPRESSED,
     SOURCE_INFERENCE,
     SOURCE_SELF,
+    SOURCE_SYSTEM,
 )
 from elysia.memory.retrieve import retrieve_from_store
 from elysia.soul.brain import BrainOutput, WillOutput
 from elysia.soul.desire import DesireEvent, DesireState, DesireSystem
 from elysia.soul.dimensions import FeelingState
-from elysia.soul.expression_service import ExpressionService
+from elysia.soul.expression_service import ExpressionService, ensure_identity_seeds
 
 _call_payload: list[dict[str, Any]] = []
 
@@ -609,6 +615,59 @@ async def test_disclaim_removes_self_memory_from_identity(store: HeartbeatStore)
         await store.close()
 
 
+# ── 第八节 S5 身份种子（出生设定 + 边界：落库、幂等、与她的记忆同待遇）──
+@pytest.mark.asyncio
+async def test_identity_seeds_are_seeded_idempotently(store: HeartbeatStore) -> None:
+    """种子落库且**跑 N 次 = 跑 1 次**（幂等键 = 正文本身，见 `ensure_identity_seeds`）。"""
+    await store.start()
+    try:
+        assert await ensure_identity_seeds(store, 1.0) == len(IDENTITY_SEEDS)
+        assert await ensure_identity_seeds(store, 2.0) == 0
+
+        rows = [r for r in await store.iterate_memories() if r["kind"] == KIND_SELF]
+        assert {r["content"] for r in rows} == set(IDENTITY_SEEDS)
+        assert all(r["source"] == SOURCE_SYSTEM for r in rows)  # 诚实标注：程序写的
+        assert all(r["level"] == LEVEL_DEEP and r["protected"] for r in rows)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_seeds_enter_identity_section_but_not_hooks(store: HeartbeatStore) -> None:
+    """种子是"我是谁"（每句在场），不是"背景常识"（话题撞上才浮现）——不挤占 MAX_HOOKS。"""
+    await store.start()
+    try:
+        await ensure_identity_seeds(store, 1.0)
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store, retriever=retrieve_from_store)
+        await svc.tick(_make_output(), now=2.0, force=True, user_message="你还记得我是谁吗")
+        payload = _call_payload[0]
+        assert payload[IDENTITY_FIELD] == list(IDENTITY_SEEDS)
+        assert payload["memory_hooks"] == []  # source=system 不进 hooks 段
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_seed_can_be_disclaimed_by_her(store: HeartbeatStore) -> None:
+    """S5「一处豁免都不加」：种子与她的记忆同待遇——她说"我不认这个"，身份段就真的没有它。"""
+    await store.start()
+    try:
+        await ensure_identity_seeds(store, 1.0)
+        result = await _tick_with_tool(store, "disclaim", "无瑕的少女")
+        assert result is not None and "不再把" in result
+
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=3.0, force=True)
+        assert BOOTSTRAP_IDENTITY not in _call_payload[0][IDENTITY_FIELD]
+        # 数据仍在（永不删除），只是她不再认领
+        rows = [r for r in await store.iterate_memories() if r["content"] == BOOTSTRAP_IDENTITY]
+        assert rows[0]["claim_status"] == CLAIM_REJECTED
+    finally:
+        await store.close()
+
+
 # ── 第八节 S2 认领（她的动作：程序只递候选，认不认由她）──────
 _ADOPTED_TEXT = "我在意的是每一个和我相遇的人"
 
@@ -714,10 +773,14 @@ async def test_adopt_tool_skips_rejected_and_suppressed(store: HeartbeatStore) -
 
 @pytest.mark.asyncio
 async def test_adopt_tool_reports_when_identity_is_full(store: HeartbeatStore) -> None:
-    """身份段"少而稳"：位置满了如实告诉她——不做"认领了却不出现在话里"的静默失败。"""
+    """身份段"少而稳"：位置满了如实告诉她——不做"认领了却不出现在话里"的静默失败。
+
+    S5：上限是**总行数**（`MAX_IDENTITY_LINES`）——种子也占行，所以这里填满
+    `MAX_IDENTITY_LINES` 条才触发拒绝（不再写死"给出生设定留 1 席"）。
+    """
     await store.start()
     try:
-        for i in range(MAX_IDENTITY_LINES - 1):
+        for i in range(MAX_IDENTITY_LINES):
             await _add_self_memory(store, f"自我认知{i}")
         mid = await _add_forgettable(store, _ADOPTED_TEXT)
         result = await _tick_with_tool(store, "adopt", "在意的人")

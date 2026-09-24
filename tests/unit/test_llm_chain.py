@@ -9,7 +9,10 @@ from typing import Any
 
 import pytest
 
+from elysia.core.config import Settings
+from elysia.llm import build_llm_chain
 from elysia.llm.chain import LLMBackend, LLMChain
+from elysia.llm.deepseek import DeepSeekBackend
 from elysia.llm.micro import micro_speak
 
 
@@ -147,6 +150,35 @@ def test_micro_speak_no_user_input() -> None:
     text = micro_speak(_instruction())
     assert "痛" not in text
     assert "格式化" not in text
+
+
+# ── 第八节 S6：`llm_fallback_*` 接线（她多一级"嗓门"，人格由身份段保证不变）──
+def test_build_llm_chain_without_fallback_config_keeps_old_behavior() -> None:
+    """未配置次声端点 → 与接线前完全一致（`fallback=None`）。"""
+    chain = build_llm_chain(Settings(llm_main_api_key="k", llm_fallback_base=""))
+    assert isinstance(chain._main, DeepSeekBackend)
+    assert chain._fallback is None
+
+
+def test_build_llm_chain_mounts_fallback_from_config() -> None:
+    """配了 `llm_fallback_base` → 次声挂上，且用同一个后端实现（同一份身份段取数）。"""
+    settings = Settings(
+        llm_main_api_key="k",
+        llm_fallback_base="http://127.0.0.1:11434/v1",
+        llm_fallback_model="qwen2.5:7b",
+    )
+    chain = build_llm_chain(settings)
+    assert isinstance(chain._fallback, DeepSeekBackend)
+    assert chain._fallback._model == "qwen2.5:7b"
+
+
+def test_local_fallback_endpoint_works_without_api_key() -> None:
+    """本地 OpenAI 兼容端点常无 key：`require_key=False` 才认它可用（默认 True 零变化）。"""
+    assert DeepSeekBackend("", base="http://127.0.0.1:11434/v1")._unavailable() is True
+    assert (
+        DeepSeekBackend("", base="http://127.0.0.1:11434/v1", require_key=False)._unavailable()
+        is False
+    )
 
 
 # ── P2 第3步：降级即感受（on_degrade 回调） ────────────

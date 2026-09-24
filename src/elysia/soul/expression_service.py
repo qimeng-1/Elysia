@@ -30,6 +30,10 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`�
 第八节 S3：候选由心跳的沉淀循环生成（程序只做"发现"，正文照抄原文）。
 `adopt` 里候选**优先于同家的重述**（它是那一家的代表）——否则自家重述互相占位，
 判据必然并列，她永远认领不到程序递来的候选。
+
+第八节 S5（D-S1 拍板：库为准）：身份种子（出生设定 + 边界，`IDENTITY_SEEDS`）在启动时
+**幂等种入她的库**（`ensure_identity_seeds`），身份段**以库为准**——她对种子
+`disclaim` / `forget` / `adopt` 都有效，一处豁免都不加（"bootstrap 只是过渡"由此成为可达状态）。
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.chain import LLMChain
-from elysia.llm.identity import IDENTITY_FIELD, MAX_IDENTITY_LINES
+from elysia.llm.identity import IDENTITY_FIELD, IDENTITY_SEEDS, MAX_IDENTITY_LINES
 from elysia.llm.validator import ExpressionValidator, ValidationResult
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
@@ -55,6 +59,7 @@ from elysia.memory.levels import (
     RETENTION_SUPPRESSED,
     SOURCE_INFERENCE,
     SOURCE_SELF,
+    SOURCE_SYSTEM,
     MemoryRecord,
 )
 from elysia.memory.retrieve import MemoryHit, topic_match
@@ -90,6 +95,49 @@ ADOPT_DOMINANCE = 2.0
 # 内部冲动表达节流：与发呆双模态同节奏（3min / 10min）
 EXPRESS_ACTIVE_INTERVAL_S = 180.0
 EXPRESS_QUIET_INTERVAL_S = 600.0
+
+
+async def ensure_identity_seeds(store: HeartbeatStore, now: float) -> int:
+    """幂等种入身份种子（第八节 S5）：出生设定 + 边界的**过渡**脚手架。
+
+    程序写这三条，但**诚实标注** `source=system`：它们不是她认领的自我认知，
+    只是"她还在出生状态"时的打底（8.6）。种入之后**与她的记忆同待遇**——
+    `disclaim` / `forget` / `adopt` 都对她有效（D-S1 库为准，一处豁免都不加）。
+
+    **幂等键 = 正文本身**（`kind=self AND source=system AND content=?`）：
+    "数据永不删除"是既有铁律（P3-W）——她的三个动作只动 `claim_status` /
+    `retention_state` / `superseded_by`，**行仍在、`content` 不被改写**，
+    因此这个键一旦写下就永远稳定（跑 N 次 = 跑 1 次）。
+
+    返回本次新种的条数（0 = 早就种过；将来往种子表加第 4 条也能自动补上）。
+    """
+    rows = await store.execute_raw(
+        "SELECT content FROM memories WHERE kind = ? AND source = ?",
+        (KIND_SELF, SOURCE_SYSTEM),
+    )
+    existing = {str(r[0]) for r in rows}
+    seeded = 0
+    for text in IDENTITY_SEEDS:
+        if text in existing:
+            continue
+        await store.add_memory(
+            now,
+            {
+                "level": LEVEL_DEEP,
+                "kind": KIND_SELF,
+                "content": text,
+                "emotion_vector": {},
+                # 「我是谁」是所有类型里最重的一类（scorer._KIND_BASE）
+                "importance": importance(kind=KIND_SELF, emotion_vector={}, content=text),
+                # 核心层：永不模糊、永不降级（_demote_target 已豁免 protected）
+                "protected": True,
+                "narrative": text,
+                "source": SOURCE_SYSTEM,
+                "certainty": CERTAINTY_CERTAIN,
+            },
+        )
+        seeded += 1
+    return seeded
 
 
 @dataclass
@@ -194,7 +242,8 @@ class ExpressionService:
 
         # ── 1c. 身份段（"我是谁"）：每句都在场，不走 hooks 段 ──
         # 与 memory_hooks 的区别：那是"话题撞上才浮现"的背景常识，这是"我是谁"。
-        # 尚无认领记录时为空 → 后端退化为出生设定（身份段文本与改造前逐字一致）。
+        # S5（库为准）：取的**只有库**——启动时种入的身份种子也在里面，
+        # 因此正常运行时它不为空；空列表 = 她此刻真的没有自我认知（她把种子一条条放下了）。
         payload[IDENTITY_FIELD] = await self._identity_lines()
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
@@ -288,8 +337,10 @@ class ExpressionService:
         return out
 
     async def _identity_lines(self) -> list[str]:
-        """她认领的自我认知（`kind=KIND_SELF`）——身份段的动态部分。
+        """她此刻的自我认知（`kind=KIND_SELF` 且在册的条目）——身份段的动态部分。
 
+        S5（D-S1 库为准）：**完全以库为准**——身份种子也是库里的一行行记忆，
+        她 `disclaim` / `forget` / `adopt` 之后身份段如实跟随（可能为空 = 她此刻真的没有自我认知）。
         条数上限由 `compose_identity` 兜住（少而稳，8.9 验收 4）。
         """
         return [text for _, text in await self._self_records()]
@@ -426,7 +477,9 @@ class ExpressionService:
         # 身份段是"少而稳"的（8.9 验收 4）：位置满了就如实告诉她，
         # 否则会出现"认领了却不出现在她的话里"的静默失败。
         # 替换不算新增——她是在改口，不是又攒一条。
-        if len(existing) - len(retired) >= MAX_IDENTITY_LINES - 1:
+        # S5：判据改成"认领后的**总行数**"（种子在册时也占行），不再写死"只给出生设定留 1 席"——
+        # 3 条种子下：她认领前 3 行，认得到第 5 行为止（她自己 2 席）。
+        if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:
             return "（你心里的位置满了——先放下一条旧的，再认领新的）"
         await self._store.mark_as_self(best_id)
         for stale_id in retired:

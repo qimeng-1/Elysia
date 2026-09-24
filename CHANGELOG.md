@@ -423,6 +423,21 @@
 - 门禁：ruff lint ✅ / ruff format ✅（79 文件）/ mypy strict ✅（49 源文件）/ pytest ✅ **297 passed**（W1 时 290 + W2 新增 7）
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——W2 是她的新能力，重启后即可在对话中调用。**P3-W 整体完成**
 
+### 第八节 S1：Self Memory 本体（身份段通电，2026-09-24，无 commit）
+- **触发**：Self Memory（"我是谁"）设计稿评审通过并拍板三点——**D1 形态 = 正交 `KIND_SELF`**（不新增层、零 DDL）／**D2 产生机制 = 出生设定 bootstrap + 沉淀**／**D3 注入位置 = 身份段**（每句在场）。本条落地 **S1 本体**，硬约束是**对外行为零变化**
+- **feat（memory/levels.py）**：新增 `KIND_SELF = "self"`（正交维度——`kind` 列是 `TEXT` 无 CHECK，**零 DDL 变更**）+ 入 `KINDS`；`SOURCE_BY_KIND[KIND_SELF]=SOURCE_SELF`、`CERTAINTY_BY_KIND[KIND_SELF]=CERTAINTY_CERTAIN`
+- **feat（memory/scorer.py）**：`_KIND_BASE[KIND_SELF]=0.30`——所有类型里最重的一类
+- **feat（llm/identity.py，新建）**：`BOOTSTRAP_IDENTITY`（现有档案首句"你是爱莉希雅…人类的律者。"移来，过渡用）+ `IDENTITY_FIELD="identity"` + `MAX_IDENTITY_LINES=5` + `compose_identity()`（bootstrap 打底 + 她认领的自我认知追加、去重、封顶）
+- **feat（llm/deepseek.py）N1 通路落地**：`_SYSTEM_PROMPT` 拆为「身份段 + 表达层人设」——首句移入 `identity.BOOTSTRAP_IDENTITY`，其余更名 `_PERSONA_PROMPT`（**逐字未改**）；`_messages` 把 `identity` 字段从 user JSON 摘出、拼进 **system 段**（`_system_prompt()`）
+- **feat（soul/expression_service.py）**：`tick` 新增 1c——`payload[IDENTITY_FIELD] = await self._identity_lines()`；`_identity_lines()` 只读记忆表取 `KIND_SELF` 且未取代、未 `rejected`、未 `suppressed` 者（**不 touch，不涨 `access_count`**）
+- **fix（N2/N3/N4 三处排除接线）**：`retrieve.py::select_hooks` 排除 `KIND_SELF`（否则每句复述，重犯 P3-P）｜`heartbeat.py::_feel_memory_gaps` 排除 `KIND_SELF`（不产生"记不清自己是谁"的缺口脉冲）｜`supersede.py::find_superseded` 豁免 `KIND_SELF`（更新"我是谁"必须走她自己的动作）
+- **feat（tools/memory_view.py）**：`KIND_LABELS` 增 `"self": "自我"`
+- **零变化如何保证（golden 测试）**：改造前（`bee693f`）的 `_SYSTEM_PROMPT` 全文冻结进 `tests/unit/test_identity.py::_OLD_SYSTEM_PROMPT`；断言 `payload` 为 `{}` / `{"identity": []}` / `{"identity": None}` / 乱写 四种情形 system 段**逐字等于**旧文本；反向断言塞入 `KIND_SELF` 后身份段确会生长，且 `identity` 不出现在 user JSON 里
+- **测试**：`test_identity.py` 新建 7 项；`test_expression_service_memory.py` +4、`test_retrieve.py` +1、`test_supersede.py` +1、`test_heartbeat.py` +1
+- 门禁：ruff lint ✅ / ruff format ✅（81 文件）/ mypy strict ✅（50 源文件）/ pytest ✅ **311 passed**（原 297 + 新增 14）
+- **N1 遗留（已记档）**：**只让主声消费 `identity`**——降级链下级与 `micro.py` 尚未消费身份段，故验收"换后端不失"当前仍不成立，留待 S4 接线（见 `docs/P3_MEMORY.md` 第九节问题 7）
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——对外行为零变化，但仍需重启装载新代码。**S2 认领 / S3 沉淀 / S4 观测待动工**
+
 ---
 
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）

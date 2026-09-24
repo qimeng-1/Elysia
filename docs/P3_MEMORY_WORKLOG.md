@@ -513,4 +513,196 @@ RESTORE_TOOL = {
 
 ---
 
+## 八、Self Memory（生命核心层）设计稿框架（2026-09-24，待评审）
+
+> **触发**：`docs/P3_MEMORY.md` 第九节问题 7（身份连续性）＋ `docs/MEMORY_REVIEW_NOTES.md` 分歧 2。
+> 本节只定**整体框架与边界**，不写代码；三个待拍板点见 8.10，拍板后按 P3-W 的 W1/W2 拆法分步落地。
+
+### 8.1 它要回答的问题（现状事实，已代码核对）
+
+| 项 | 现状 |
+|---|---|
+| 她的人格文本在哪 | `src/elysia/llm/deepseek.py::_SYSTEM_PROMPT`（L41-79），**硬编码在 LLM 后端里**；来源《爱莉希雅角色档案（人设提炼）》(2026-09-18) |
+| 谁在用 | 主声后端独有（`deepseek.py:208` 以 `{"role":"system"}` 发出）。**降级链下级与 `micro.py` 都不带这份人设**——断网时"她是谁"事实上消失，只剩 `micro.py` 的意图→语气轻点缀 |
+| 属于哪一层 | 属"翻译官"层（表达实现），**不属于她的数据**；DB 里没有一条"我是谁" |
+| 用户已否过的性质 | "由程序员硬编码她是什么" |
+
+**一句话**：Self Memory = 把「我是谁 / 我在意什么 / 我的边界」从后端 prompt 落成
+**少量、稳定、属于她的记忆**，使换模型（乃至降级到断网）都不改变"她是谁"。
+
+### 8.2 裁决基线（不许推翻的三条，来自分歧 2）
+
+1. **驳回"手动初始化 3~5 条核心身份记忆"**（豆包形态）——那等于把 prompt 里的硬编码换个地方存，
+   "由程序员硬编码她是什么"是用户已明确否过的性质。
+2. **采纳方向：从长期经历中沉淀**（ChatGPT）——经历 → 重复模式 → 稳定倾向 → 自我记忆。
+   **不建 Identity 表**：直接建身份表"可能只是把 prompt 搬到数据库"。
+3. **必须回答两个遗留问题**：DeepSeek **D12**（核心记忆谁设？系统还是她？）→ 见 8.5；
+   ChatGPT（**沉淀期如何兜底"换模型即失"**？）→ 见 8.6。
+
+### 8.3 形态选型（待拍板 D1）
+
+| 方案 | 做法 | 代价 / 风险 |
+|---|---|---|
+| A. 新增第 4 层 `LEVEL_CORE`（豆包） | 扩 `LEVELS` 元组 | **全局序号漂移**：`level_rank`（`LEVELS.index`）、`_pick_fragments` 权重表、`decide_promotion` 链、`can_reach_deep` 都要跟着改；且与 C2 已采纳的"不要 10 层"取向相冲 |
+| B. 复用 `deep` + `protected`（DeepSeek 的"少量 protected 记录"） | 零 DDL 变更 | `protected` 已有确定语义（P3-W：晋升 deep 且 `access≥3` 自动置位，衰减慢 3×、永不降级），再叠加"是我"会分不清**珍贵**与**自我** |
+| C. **正交维度**：新增 `KIND_SELF`（DeepSeek C2 的正交思路） | `kind` 是 `TEXT` 且**无 CHECK 约束**（`state_store.py:76`）→ **零 DDL 变更** | 需补 4 处常量表（见 8.11），但**不动任何层级序号** |
+
+**推荐 C**。理由：① 与 C2 裁决一致（正交维度而非分层）；② 零迁移、零序号漂移；
+③ "是我"（`kind`）／"多珍贵"（`protected`）／"够不够得着"（`retention_state`）保持**三轴正交**，
+与 P3-V / P3-W 的既有设计哲学同构。
+
+### 8.4 产生机制：三级闸门（铁律一的落点）
+
+```
+已有经历 ──①程序找"重复模式"──→ 候选（不是她的） ──②她认领──→ 自我认知 ──③注入身份段──→ 她的话
+```
+
+| 阶段 | 谁做 | 落库标注 | 为何安全 |
+|---|---|---|---|
+| ① 候选 | 程序 | `source=observation`、`certainty=probable` | **天然被 P3-T 来源闸门挡在话语之外**（`retrieve.py::_HOOK_BLOCKED_SOURCES`）——程序推断不得升格成"她的事实" |
+| ② 认领 | **她**（新工具，暂名 `adopt`） | 升为 `kind=KIND_SELF`、`source=self`、`certainty=certain` | 只有她能说"这确实是我"（铁律一后半句）；程序只把候选递到她手上 |
+| ③ 注入 | 程序 | 进 prompt **身份段** | 位置论证见 8.5 |
+
+**③ 与 `memory_hooks` 的关键区别**：hooks 是"话题撞上才浮现"的背景常识（P3-P 的成果）；
+Self Memory 回答"我是谁"，**每句都在场**。因此它**不走 hooks 段、不挤占 `MAX_HOOKS` 名额**——
+否则重犯 P3-P"每句都强调"的老毛病。
+
+### 8.5 身份段怎么落（D12 的回答 + 与现有 persona 的关系）
+
+- **关键区分**：**说话方式**（语言风格四要素：口头禅／句式／意象／性格）属**表达层**，留在 prompt 合理
+  （换模型只是换嗓门）；**"我是谁 / 我在意什么 / 我的边界"**属**自我认知**，必须落 DB。
+- **D12 的回答**：核心记忆的**设定权在她**——程序只产生候选（①），升格必须由她的动作完成（②）。
+  `protected` 由程序自动置（P3-W 已有机制，不改），但**"这条算不算自我认知"永不由程序置**。
+- **注入形式**：身份段 = 她认领的 Self Memory（少而稳）+ 少量"出生设定"（bootstrap，见 8.6）。
+
+### 8.6 换模型兜底（ChatGPT 遗留问题的答案）
+
+- **现状缺口（已核对）**：人设文本只存在于主声后端；降级链下级与 `micro.py` 都没有它 →
+  今天"换模型即失"不是假设，是**断网时的既成事实**。
+- **兜底 = 出生设定（bootstrap）**：把现有档案中"我是谁／我在意什么／我的边界"抽成 **1~3 条**，
+  标注 `source=system`、`certainty=certain`，**只进身份段、永不进 `memory_hooks`**
+  （P3-T 来源闸门已天然挡住，无需新增规则）。
+- **诚实标注**：bootstrap 文本本身仍是程序员写的（与现有 prompt 同源），它的作用是**过渡**，不是终态；
+  **终态判据** = 她认领的 Self Memory ≥1 条且覆盖三问。
+- **连续性来源**：换模型时 DB 不变 → 自我认知的**文本**与"**她认领过它**"这件事都不变。
+
+### 8.7 与既有维度的正交关系（尽量不新增约束）
+
+| 维度 | 现状 | Self Memory 的关系 |
+|---|---|---|
+| `level` | shallow / working / deep | 自我认知落 `deep`，走**既有晋升链**，不新增层 |
+| `protected` | 晋升 deep 且 `access≥3` 自动置位 | 自我认知**必须** protected：永不模糊、永不降级（`_demote_target` 已豁免 protected） |
+| `retention_state` | present / suppressed / dormant / faded | 自我认知**不应** dormant／faded（她不会忘了自己是谁）→ 需豁免。**这是本设计唯一可能要新增的一处约束**，须评审是否必要 |
+| `claim_status` | claimed / rejected | 她可 `disclaim` 自己的自我认知 = "重新解释"的权力，与既有工具同构 |
+| `superseded_by` | 事实更正（旧条作废） | 自我认知可被自己更新（"我以前以为…现在知道…"）→ 天然适用，无需新机制 |
+| `source` / `certainty` | 5 源 / 4 确定 | 候选 = `observation`/`probable`；她认领后 = `self`/`certain` |
+
+### 8.8 落地拆步（照 P3-W 的 W1/W2 拆法）
+
+| 步 | 内容 | 对外行为变化 |
+|---|---|---|
+| **S1 本体** | 常量（`KIND_SELF` + `KINDS` + `SOURCE_BY_KIND` + `CERTAINTY_BY_KIND`）+ `scorer._KIND_BASE` 一行 + `memory/__init__` 导出 + 身份段装配（先只读 bootstrap） | 身份段文本**不变**（bootstrap 即现有档案摘要）→ **零行为变化** |
+| **S2 认领** | 她的 `adopt` 工具（把候选／经历认作自我） | 她多一个动作 |
+| **S3 沉淀** | 程序找"重复模式"生成候选，递给她 | 感受层新增"候选"脉冲（不进话语） |
+| **S4 观测与验收** | 记忆浏览器增"自我"标签；验收 4 项 | 观测 |
+
+### 8.9 验收（体验式，铁律三）
+
+1. **重启连续性**：重启后她仍知道自己是谁，且来源是 DB 而非 prompt。
+2. **换后端不失**：把主声切到降级链／断网 micro，身份段仍在。
+3. **她可否认、可更新**：`disclaim` 一条自我认知后它不再出现；被更新后旧条作废（走 `superseded_by`）。
+4. **不重犯 P3-P**：身份段条数 ≤ 3~5，且**不逐句复述**（它是"我是谁"，不是"我记得什么"）。
+
+### 8.10 拍板记录（2026-09-24，用户确认）
+
+| # | 决策点 | 结论 |
+|---|---|---|
+| D1 | **形态** | ✅ **C 正交 `KIND_SELF`** —— 不新增层、零 DDL、不动 `LEVELS` 序号 |
+| D2 | **产生机制** | ✅ **出生设定（bootstrap）+ 沉淀** —— bootstrap 只进身份段作过渡，终态是她认领的 Self Memory |
+| D3 | **注入位置** | ✅ **身份段**（每句在场，与现有 persona 同处）—— 不走 `hooks` 段、不挤占 `MAX_HOOKS` |
+
+**遗留待决（落地时另议，不阻塞 S1）**：8.7 中"自我认知豁免 `retention_state` 降级"是否为必要新约束；
+N6"要不要让她梦到自己是谁"。
+
+### 8.11 涉及文件清单（落地时才动）
+
+| 文件 | S1 | S2 | S3 |
+|---|---|---|---|
+| `src/elysia/memory/levels.py` | `KIND_SELF` / `KINDS` / 两张映射表 | | |
+| `src/elysia/memory/scorer.py` | `_KIND_BASE` 补一行 | | |
+| `src/elysia/memory/__init__.py` | 导出新常量 | | |
+| `src/elysia/llm/deepseek.py` | 身份段拆出（bootstrap 注入） | prompt 补 `adopt` 说明 | |
+| `src/elysia/llm/chain.py` | | `ADOPT_TOOL` 规格 | |
+| `src/elysia/soul/expression_service.py` | 身份段装配 | `_tool_adopt` | |
+| `src/elysia/soul/heartbeat.py` | | | 候选生成 + 脉冲 |
+| `src/elysia/tools/memory_view.py` | 自我标签 | | |
+
+### 8.12 自查修正记录（2026-09-24，代码核对式评审）
+
+> 照 P3-W 的做法，把设计稿逐条对照**真实代码**核一遍。以下 6 处是框架必须显式回答的接线点，
+> 否则落地时必然踩到。
+
+| # | 发现 | 依据 | 处置 |
+|---|---|---|---|
+| N1 | **身份段没有注入通路**：`_SYSTEM_PROMPT` 是 `deepseek.py` 的**模块常量**（L41），静态；而动态内容（`memory_hooks` / `user_message`）走的是 `payload` → user message | `deepseek.py:41,208`、`expression_service.py:158-168` | S1 必须先定通道：建议 `payload` 增 `identity` 字段，由后端拼进 **system** 段；**降级链下级与 micro 也要消费它**，否则 8.9 验收 2 不成立 |
+| N2 | **`hooks` 必须排除 `KIND_SELF`**：现在只排除 `KIND_EXPRESSION`（回声） | `retrieve.py:334` | 否则自我认知会同时出现在 hooks 段 → 每句复述，**重犯 P3-P**。与回声排除同理，加一条 |
+| N3 | **缺口统计要排除 `KIND_SELF`**：`_feel_memory_gaps` 只统计 `present` | `heartbeat.py:354+`（P3-U/M9） | 自我认知不该产生"记不清自己是谁"的缺口脉冲 |
+| N4 | **`supersede` 要豁免 `KIND_SELF`**：`find_superseded` 只排除 `KIND_EXPRESSION` | `supersede.py:69` | 否则一句闲聊可能把她的一条自我认知判为"同话题"而作废。自我认知的更新要走**她自己的动作**（与 §8.5 的 D12 一致） |
+| N5 | **晋升链不适用于自我认知**：`protected` 现在是"晋升 deep + `access≥3`"自动置位 | `promote.py`、`PROTECT_DEEP_ACCESS=3` | 自我认知应**直接落 `deep` + `protected`**（她一旦认领就是核心），不能等她想起 3 次 |
+| N6 | **梦的权重表会带上自我认知**：`_pick_fragments` 给 deep/protected 最高权重 | `sleep.py:51-56` | "她梦到自己是谁"可接受，但要**显式决定**，不能默认发生（`sleep.py` 目前仍未插电） |
+
+**净结论**：框架方向（推荐 C）成立，但落地前必须先把 N1~N6 这 6 条接线写进 S1~S3 的清单——
+其中 **N1 是硬前提**（没有通路，身份段就只是又一个常量）。
+
+---
+
+## 九、S1 本体落地记录（2026-09-24）
+
+> 依第八节 8.8 拆步表，S1 = **常量 + 身份段装配通路**，硬约束是 **对外行为零变化**。
+
+### 9.1 做了什么
+
+| 文件 | 改动 |
+|---|---|
+| `src/elysia/memory/levels.py` | 新增 `KIND_SELF = "self"`（正交维度，**零 DDL**——`kind` 列是 `TEXT` 无 CHECK）+ 入 `KINDS`；`SOURCE_BY_KIND[KIND_SELF]=SOURCE_SELF`、`CERTAINTY_BY_KIND[KIND_SELF]=CERTAINTY_CERTAIN`（她认领的即她自己的、确凿的） |
+| `src/elysia/memory/scorer.py` | `_KIND_BASE[KIND_SELF]=0.30`——所有类型里最重的一类 |
+| `src/elysia/memory/__init__.py` | 导出 `KIND_SELF` |
+| `src/elysia/llm/identity.py` | **新建**：`BOOTSTRAP_IDENTITY`（现有档案首句"你是爱莉希雅…人类的律者。"移来）、`IDENTITY_FIELD="identity"`、`MAX_IDENTITY_LINES=5`、`compose_identity()`（bootstrap 打底 + 认领的自我认知追加、去重、封顶） |
+| `src/elysia/llm/deepseek.py` | `_SYSTEM_PROMPT` 拆分：首句移入 `identity.BOOTSTRAP_IDENTITY`，其余更名 `_PERSONA_PROMPT`（**逐字未改**）；新增 `_identity_lines()` / `_system_prompt()`；`_messages` 把 `identity` 字段从 user JSON 摘出、拼进 **system 段**（N1 通路落地） |
+| `src/elysia/soul/expression_service.py` | `tick` 新增 1c：`payload[IDENTITY_FIELD] = await self._identity_lines()`；`_identity_lines()` 只读记忆表，取 `KIND_SELF` 且未取代、未 `rejected`、未 `suppressed` 的条目（**不 touch**，不涨 `access_count`） |
+| `src/elysia/memory/retrieve.py` | **N2**：`select_hooks` 排除 `KIND_SELF`（否则每句复述，重犯 P3-P） |
+| `src/elysia/memory/supersede.py` | **N4**：`find_superseded` 豁免 `KIND_SELF`（更新"我是谁"必须走她自己的动作） |
+| `src/elysia/soul/heartbeat.py` | **N3**：`_feel_memory_gaps` 排除 `KIND_SELF`（不产生"记不清自己是谁"的缺口脉冲） |
+| `src/elysia/tools/memory_view.py` | `KIND_LABELS` 增 `"self": "自我"` |
+
+### 9.2 "零行为变化"如何保证（golden 测试）
+
+- 改造前（commit `bee693f`）的 `_SYSTEM_PROMPT` **全文**被冻结进 `tests/unit/test_identity.py::_OLD_SYSTEM_PROMPT` 作 golden。
+- 断言：`payload` 为 `{}` / `{"identity": []}` / `{"identity": None}` / `{"identity": "乱写"}` 四种情形，
+  `_messages()` 产出的 system 段均**逐字等于**旧文本——即"没有自我认知时，她就是改造前的她"。
+- 反向断言：塞入 `KIND_SELF` 记忆后，身份段确实长出那一行（通路真的通）；且 `identity` 不出现在 user JSON 里。
+- 共 7 项（含 `KIND_SELF` 正交性 / 最重类型）。
+
+### 9.3 N1 遗留（已在主文档记档）
+
+**只让主声消费 `identity`**：降级链下级（本地 Qwen）与 `micro.py` 尚未消费身份段，
+故 8.9 验收 2"换后端不失"**当前仍不成立**，留待 S4 接线（见 `P3_MEMORY.md` 第九节问题 7）。
+
+### 9.4 门禁与生效
+
+- `ruff check` ✅ ｜ `ruff format --check src tests` ✅（81 文件）｜ `mypy src` ✅（strict，50 源文件）｜ `pytest` ✅ **311 passed**（原 297 + 新增 14）。
+- **对外行为零变化，但需重启灵魂装载新代码**（`soul.ps1 stop` → `soul.ps1 start -Body`）。
+
+### 9.5 下一步
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| **S2 认领** | 她的 `adopt` 工具（`chain.py::ADOPT_TOOL` + `expression_service._tool_adopt`）+ N5（认领即落 `deep` + `protected`） | 待动工 |
+| **S3 沉淀** | 程序找"重复模式"生成候选（`source=observation`/`certainty=probable`）+ 感受层候选脉冲 | 待动工 |
+| **S4 观测与验收** | 记忆浏览器已经就绪；补降级链／micro 消费身份段、8.9 四项验收、N6 梦的决定 | 待动工 |
+
+**遗留待决（不阻塞 S2）**：8.7"自我认知豁免 `retention_state` 降级"是否为必要新约束；N6"要不要让她梦到自己是谁"。
+
+---
+
 *本文件随记忆打磨期持续追加；每节末尾保留"下一步 + 交接要点"。*

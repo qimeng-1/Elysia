@@ -45,8 +45,13 @@ KIND_INTERACTION = "interaction"  # 与用户交互
 KIND_EXPRESSION = "expression"  # 她说出口的话
 KIND_STATE = "state"  # 状态快照/经历
 KIND_INTERNAL = "internal"  # 内部念头/独处生活
+# 自我认知（第八节 S1）：「我是谁 / 我在意什么 / 我的边界」。
+# 与其余类型**正交**——它不新增层级、不改任何层级序号，`kind` 列是 TEXT 且无
+# CHECK 约束（零 DDL 变更）。只有**她认领**才能产生这个类型（程序只递候选），
+# 因此它既不进 memory_hooks（那是"话题撞上的背景常识"），也不参与取代判定。
+KIND_SELF = "self"
 
-KINDS = (KIND_INTERACTION, KIND_EXPRESSION, KIND_STATE, KIND_INTERNAL)
+KINDS = (KIND_INTERACTION, KIND_EXPRESSION, KIND_STATE, KIND_INTERNAL, KIND_SELF)
 
 # ── 记忆来源（P3-T）：这条记忆"从哪来" ────────────────
 # `kind` 只回答"是什么类型"，回答不了"谁说的"。若不标注来源，
@@ -109,12 +114,14 @@ SOURCE_BY_KIND: dict[str, str] = {
     KIND_EXPRESSION: SOURCE_SELF,
     KIND_STATE: SOURCE_OBSERVATION,
     KIND_INTERNAL: SOURCE_SELF,  # 独处念头是她自己的
+    KIND_SELF: SOURCE_SELF,  # 自我认知是她认领的（程序只递候选）
 }
 CERTAINTY_BY_KIND: dict[str, str] = {
     KIND_INTERACTION: CERTAINTY_CERTAIN,
     KIND_EXPRESSION: CERTAINTY_CERTAIN,
     KIND_STATE: CERTAINTY_CERTAIN,
     KIND_INTERNAL: CERTAINTY_PROBABLE,  # 独处念头是印象，不是硬事实
+    KIND_SELF: CERTAINTY_CERTAIN,  # 她认领过的，就是她确信的
 }
 
 FALLBACK_SOURCE = SOURCE_SELF

@@ -36,6 +36,7 @@ from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
     KIND_EXPRESSION,
     KIND_INTERACTION,
+    KIND_SELF,
     LEVEL_DEEP,
     LEVEL_SHALLOW,
     PROTECT_DEEP_ACCESS,
@@ -320,10 +321,14 @@ class SoulHeartbeat:
         # 她的发言回声与已被取代的旧事实不参与缺口（与话语/感受路径同一取舍）
         # P3-W：沉睡/淡化/抑制的记忆同样不计入——状态机已经表达了"够不着"，
         # 若再让它们的低强度索引每 300 拍推一次 TR，就是同一件事双报 + 噪声源。
+        # 自我认知也不参与（第八节 N3）：她不会"记不清自己是谁"，
+        # 若让它的索引强度参与缺口统计，就是平白推一次"有些事想不起来了"。
         created_by_mid: dict[int, float] = {}
         for d in records:
             rec = MemoryRecord.from_dict(d)
-            if rec.id is None or rec.kind == KIND_EXPRESSION or rec.superseded_by is not None:
+            if rec.id is None or rec.kind in (KIND_EXPRESSION, KIND_SELF):
+                continue
+            if rec.superseded_by is not None:
                 continue
             if rec.retention_state != RETENTION_PRESENT:
                 continue

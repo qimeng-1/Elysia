@@ -10,6 +10,7 @@ from elysia.core.state_store import HeartbeatStore
 from elysia.memory.levels import (
     KIND_EXPRESSION,
     KIND_INTERACTION,
+    KIND_SELF,
     LEVEL_SHALLOW,
     MemoryRecord,
 )
@@ -74,6 +75,12 @@ def test_find_superseded_skips_expression_and_newer() -> None:
     her_words = _rec(mid=1, content="我的生日是11月11日", kind=KIND_EXPRESSION)
     newer = _rec(mid=2, content="我的生日是11月11日", created_ts=5.0)
     assert find_superseded("我的生日是11月11日", 2.0, [her_words, newer]) == []
+
+
+def test_find_superseded_skips_self_memory() -> None:
+    """自我认知不被取代（第八节 N4）：更新"我是谁"必须走她自己的动作，一句闲聊不算数。"""
+    claimed_self = _rec(mid=1, content="我是爱莉希雅，我记得每个相遇的人", kind=KIND_SELF)
+    assert find_superseded("我是爱莉希雅，我记得每个相遇的人", 2.0, [claimed_self]) == []
 
 
 def test_find_superseded_skips_already_superseded() -> None:

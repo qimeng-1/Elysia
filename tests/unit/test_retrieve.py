@@ -15,6 +15,7 @@ from elysia.memory.levels import (
     CLAIM_REJECTED,
     KIND_EXPRESSION,
     KIND_INTERACTION,
+    KIND_SELF,
     LEVEL_DEEP,
     LEVEL_SHALLOW,
     LEVEL_WORKING,
@@ -54,11 +55,12 @@ def _rec(
     source: str = SOURCE_SELF,
     certainty: str = CERTAINTY_CERTAIN,
     claim_status: str = CLAIM_CLAIMED,
+    kind: str = KIND_INTERACTION,
 ) -> MemoryRecord:
     return MemoryRecord(
         id=mid,
         created_ts=created_ts,
-        kind=KIND_INTERACTION,
+        kind=kind,
         content=content,
         emotion_vector=emotion if emotion is not None else {"chat": 0.5},
         importance=importance,
@@ -199,6 +201,20 @@ def test_select_hooks_excludes_own_expression_echo() -> None:
     )
     hooks = select_hooks([own_echo, _rec(mid=1, narrative="真正的经历")], {"chat": 1.0})
     # 她的发言回声被排除，只保留真实经历
+    assert [h.memory_id for h in hooks] == [1]
+
+
+def test_select_hooks_excludes_self_memory() -> None:
+    """自我认知走**身份段**（每句在场），不该再出现在 hooks 段——否则每句复述自己（P3-P）。"""
+    claimed_self = _rec(
+        mid=2,
+        kind=KIND_SELF,
+        level=LEVEL_DEEP,
+        importance=0.9,
+        content="我是爱莉希雅",
+        narrative="我是爱莉希雅",
+    )
+    hooks = select_hooks([claimed_self, _rec(mid=1, narrative="真正的经历")], {"chat": 1.0})
     assert [h.memory_id for h in hooks] == [1]
 
 

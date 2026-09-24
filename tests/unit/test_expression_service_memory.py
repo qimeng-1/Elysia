@@ -15,12 +15,14 @@ from typing import Any
 import pytest
 
 from elysia.core.state_store import HeartbeatStore
+from elysia.llm.identity import IDENTITY_FIELD
 from elysia.llm.validator import ValidationResult
 from elysia.memory.levels import (
     CLAIM_CLAIMED,
     CLAIM_REJECTED,
     KIND_EXPRESSION,
     KIND_INTERACTION,
+    KIND_SELF,
     RETENTION_PRESENT,
     RETENTION_SUPPRESSED,
 )
@@ -493,5 +495,86 @@ async def test_restore_tool_brings_suppressed_memory_back(store: HeartbeatStore)
         rec = (await store.iterate_memories())[0]
         assert rec["retention_state"] == RETENTION_PRESENT
         assert rec["claim_status"] == CLAIM_CLAIMED
+    finally:
+        await store.close()
+
+
+# ── 第八节 S1 身份段装配（"我是谁"每句在场，不走 hooks 段）────
+async def _add_self_memory(store: HeartbeatStore, narrative: str) -> int:
+    """落一条她认领的自我认知（kind=self，直接落深层 + 珍贵——她认领即核心）。"""
+    return await store.add_memory(
+        1.0,
+        {
+            "level": "deep",
+            "kind": KIND_SELF,
+            "content": narrative,
+            "emotion_vector": {"chat": 0.5},
+            "importance": 0.9,
+            "protected": True,
+            "narrative": narrative,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_identity_carries_bootstrap_when_nothing_claimed(store: HeartbeatStore) -> None:
+    """尚无认领 → 身份段为空，后端退化为出生设定（对外行为零变化）。"""
+    await store.start()
+    try:
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=2.0, force=True)
+        assert _call_payload[0][IDENTITY_FIELD] == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_carries_claimed_self_memory(store: HeartbeatStore) -> None:
+    """她认领过的"我是谁"每句都在场——这就是身份段（与"话题撞上才浮现"的 hooks 不同）。"""
+    await store.start()
+    try:
+        await _add_self_memory(store, "我在意的是每一个和我相遇的人")
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=2.0, force=True)
+        payload = _call_payload[0]
+        assert payload[IDENTITY_FIELD] == ["我在意的是每一个和我相遇的人"]
+        # 不挤占 hooks 名额：身份段与 memory_hooks 是两件事（重犯 P3-P 的防线）
+        assert payload["memory_hooks"] == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_skips_rejected_and_suppressed_self_memory(store: HeartbeatStore) -> None:
+    """她不认、或不想再想起的自我认知，不再是"现在的我"。"""
+    await store.start()
+    try:
+        rejected_id = await _add_self_memory(store, "我不认的那一条")
+        suppressed_id = await _add_self_memory(store, "我不想再想起的那一条")
+        await store.set_claim_status(rejected_id, CLAIM_REJECTED)
+        await store.set_retention_state(suppressed_id, RETENTION_SUPPRESSED)
+
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=2.0, force=True)
+        assert _call_payload[0][IDENTITY_FIELD] == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_does_not_touch_access_count(store: HeartbeatStore) -> None:
+    """身份段每句在场，但那是"我一直是谁"，不是"这次想起了什么"——不计访问。"""
+    await store.start()
+    try:
+        mid = await _add_self_memory(store, "我在意的是每一个和我相遇的人")
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=2.0, force=True)
+        rec = await store.get_memory(mid)
+        assert rec is not None
+        assert rec["access_count"] == 0
+        assert rec["last_access_ts"] is None
     finally:
         await store.close()

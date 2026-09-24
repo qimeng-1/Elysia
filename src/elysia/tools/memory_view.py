@@ -46,7 +46,8 @@ from elysia.memory.retrieve import score_breakdown, select_hooks
 AUTO_REFRESH_MS = 3000
 
 LEVEL_LABELS = {"shallow": "浅层", "working": "工作", "deep": "深层"}
-KIND_LABELS = {"interaction": "交互", "expression": "表达"}
+# 类型标签（第八节 S1 增"自我"：她认领的自我认知走身份段，不进 hooks/缺口）
+KIND_LABELS = {"interaction": "交互", "expression": "表达", "self": "自我"}
 # P3-T 来源/确定性（只观测，不影响召回；召回闸门在 retrieve.select_hooks）
 SOURCE_LABELS = {
     "self": "她自己",

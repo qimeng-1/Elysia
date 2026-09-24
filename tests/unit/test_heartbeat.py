@@ -18,7 +18,12 @@ from elysia.core.clock import SimulatedClock
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense
-from elysia.memory.levels import KIND_EXPRESSION, KIND_INTERACTION
+from elysia.memory.levels import (
+    KIND_EXPRESSION,
+    KIND_INTERACTION,
+    KIND_SELF,
+    RETENTION_PRESENT,
+)
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireSystem
 from elysia.soul.distress import DISTRESS_INTERVAL_S
@@ -376,6 +381,35 @@ async def test_feel_memory_gaps_ignores_own_expression_echo(tmp_path: Path) -> N
     try:
         await _add_old_memory(heartbeat_store, kind=KIND_EXPRESSION, age_days=200.0)
         await soul._maintain_memories(T0)  # 索引仍会建并衰减
+
+        brain = soul._brain_loop
+        assert brain is not None
+        tr_before = brain.desire_system.state.tr
+        await soul._feel_memory_gaps()
+        assert brain.desire_system.state.tr == pytest.approx(tr_before)
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_feel_memory_gaps_ignores_self_memory(tmp_path: Path) -> None:
+    """第八节 N3：自我认知不构成缺口——她不会"记不清自己是谁"。
+
+    用"仍在册、但索引已跌破下限"的自我认知（age=100 且曾想起过 → 不淡化/沉睡），
+    确保沉默的原因**只是** KIND_SELF 被排除，而不是"够不着所以不计"。
+    """
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        mid = await _add_old_memory(heartbeat_store, kind=KIND_SELF, age_days=100.0, recalled=True)
+        await soul._maintain_memories(T0)
+        strengths = {m: s for _, m, s, _ in await heartbeat_store.iterate_memory_index()}
+        assert strengths[mid] < 0.2  # 已跌破检索下限（若计入就会报缺口）
+        rec = await heartbeat_store.get_memory(mid)
+        assert rec is not None
+        assert rec["retention_state"] == RETENTION_PRESENT  # 仍在册
 
         brain = soul._brain_loop
         assert brain is not None

@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from elysia.memory.levels import KIND_EXPRESSION, MemoryRecord
+from elysia.memory.levels import KIND_EXPRESSION, KIND_SELF, MemoryRecord
 
 # 同话题判定阈值：二元组 Jaccard ≥ 此值视为"在说同一件事"
 # 生日更正例：「我的生日是11月11日」vs「其实我的生日是12月12日」≈ 0.43
@@ -58,15 +58,19 @@ def find_superseded(
     """找出应被新记忆取代的旧记忆 id 列表。
 
     条件（全部满足）：
-    - 确有 id、尚未被取代、非她自己的发言（KIND_EXPRESSION）
+    - 确有 id、尚未被取代、非她自己的发言（KIND_EXPRESSION）、非自我认知（KIND_SELF）
     - 创建时间早于新记忆（只取代更旧的）
     - 内容与新记忆同话题（相似度 ≥ threshold）
+
+    豁免 KIND_SELF（第八节 N4）：一句闲聊可能与她的一条自我认知"同话题"，
+    但自我认知的更新必须走**她自己的动作**（认领/重新认领，8.5 的 D12）——
+    程序不得因为一句闲聊就把"我是谁"作废。
     """
     ids: list[int] = []
     for rec in candidates:
         if rec.id is None or rec.superseded_by is not None:
             continue
-        if rec.kind == KIND_EXPRESSION:
+        if rec.kind in (KIND_EXPRESSION, KIND_SELF):
             continue
         if rec.created_ts >= new_ts:
             continue

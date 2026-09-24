@@ -3,7 +3,7 @@
 > **用途**：本文件是记忆系统的**唯一主文档**——先讲清"她在做什么"（第零节，不需要懂术语），
 > 再给出系统事实（数据流 / 文件 / 规则 / 验收 / 待评审问题）。
 > 多方问询（外部 AI / 同行评审）直接投喂本文件，保证每一轮看到的是**同一版事实**。
-> **快照日期**：2026-09-23（P3-P / Q / R / S / T / U / V / **W1 / W2** 落地后）
+> **快照日期**：2026-09-24（P3-P / Q / R / S / T / U / V / W1 / W2 之后，**第八节 Self Memory S1 本体**落地）
 > **维护约定**：代码有实质变化时更新本文件并改快照日期。外部结论**不写进本文件**，
 > 另存 `docs/MEMORY_REVIEW_NOTES.md`（见第十节）。
 
@@ -134,10 +134,11 @@ claim_status / retention_state`
 | 文件 | 记忆相关职责 | 关键符号 |
 |---|---|---|
 | `src/elysia/soul/heartbeat.py` | 写入经历；每 300 拍维护（晋升 + 自动保护 + 建索引 + 衰减 + **保留降级**）；感受路径（共鸣 + 缺口） | `_feel_memories`、`_feel_memory_gaps`、`_maintain_memories`、`_demote_target`、`_supersede_conflicts`、`MEMORY_FEELING_EVERY_N=300` |
-| `src/elysia/soul/expression_service.py` | 话题门控注入 `memory_hooks`；装配 `recall`/`disclaim`/`forget`/`restore` 执行器；推心情 | `_make_tool_runner`、`_tool_recall`、`_tool_disclaim`、`_tool_forget`、`_tool_restore`、`FORGET_MIN_SCORE` / `FORGET_DOMINANCE`、`_feel_recall` |
+| `src/elysia/soul/expression_service.py` | 话题门控注入 `memory_hooks`；**装配身份段 `identity`**；装配 `recall`/`disclaim`/`forget`/`restore` 执行器；推心情 | `_make_tool_runner`、`_tool_recall`、`_tool_disclaim`、`_tool_forget`、`_tool_restore`、`FORGET_MIN_SCORE` / `FORGET_DOMINANCE`、`_feel_recall`、`_identity_lines` |
 | `src/elysia/soul/desire.py` | 记忆唤起的情感脉冲 | `memory_recall = {tr: 0.8, cs: 1.2, sa: 0.0}`、`memory_gap` |
 | `src/elysia/llm/chain.py` | 工具回合能力（她主动想起 / 拒绝认领 / 不想再想起 / 又愿意想起） | `ToolCapableBackend`、`RECALL_TOOL` / `DISCLAIM_TOOL` / `FORGET_TOOL` / `RESTORE_TOOL`、`set_tool_runner`、`ToolRunner=(工具名, 参数)` |
-| `src/elysia/llm/deepseek.py` | 工具循环（最多 3 轮，按名路由）+ prompt 记忆段 | `complete_with_tools`、`_run_call`、`_tool_args`、`_TOOL_NAMES`（四个工具） |
+| `src/elysia/llm/deepseek.py` | 工具循环（最多 3 轮，按名路由）+ prompt 记忆段；**system 段 = 身份段 + 表达层人设** | `complete_with_tools`、`_run_call`、`_tool_args`、`_TOOL_NAMES`（四个工具）、`_PERSONA_PROMPT`、`_system_prompt`（`identity` 只进 system 段，不进 user JSON） |
+| `src/elysia/llm/identity.py` | 身份段（第八节 S1）：出生设定打底 + 她认领的自我认知 | `BOOTSTRAP_IDENTITY`、`IDENTITY_FIELD="identity"`、`MAX_IDENTITY_LINES=5`、`compose_identity` |
 
 **D. 观测与测试**
 
@@ -170,6 +171,7 @@ claim_status / retention_state`
 | **回声排除** | 检索排除 `KIND_EXPRESSION`（不复述自己刚说的） |
 | **来源闸门（P3-T）** | 检索排除 `source ∈ {inference, system}` 与 `certainty = speculative`——程序推断/系统注入不得升格成"她的事实"；**感受路径不受此限** |
 | **认领闸门（P3-V）** | 检索排除 `claim_status = rejected`——她拒绝认领的记忆不进她的话；**感受路径不受此限** |
+| **身份段（S1）** | 她认领的自我认知（`KIND_SELF`）每句都在场：`payload["identity"]` → **system 段**（不占 `MAX_HOOKS`、不走 hooks 段、不进 user JSON）；无自我认知时退化为 `BOOTSTRAP_IDENTITY`，system prompt 与改造前**逐字一致**；`select_hooks` / 缺口统计 / `supersede` 三处排除 `KIND_SELF` |
 | **保留状态（P3-W1）** | `retention_state ∈ {present/suppressed/dormant/faded}`；**默认 `present`**（老库缺列一律回填）；**不提供删除态**（数据永不删） |
 | **保留闸门（P3-W1）** | 话语路径排除 `suppressed`（永不进话）与"够不着"的 `dormant`/`faded`；`dormant`/`faded` **可被话题唤醒**（`is_related` 命中）→ 落回 `present` + `touch` 重新计时 |
 | **感受路径与保留** | `suppressed` 与 `dormant` 不进感受路径；`faded` **仍进感受**（"细节忘了，那份感觉还在"） |
@@ -236,8 +238,16 @@ claim_status / retention_state`
    **不提供删除态**（数据永不删）。W1 为状态机本体（迁移 + 保留闸门 + 唤醒路径 + 降级 + 自动保护，
    **对外行为零变化**）；W2 为她的两个工具 `forget`/`restore`（忘与不忘都是她的权力，遗忘可逆）。
    设计稿与评审见 `P3_MEMORY_WORKLOG.md` 第七节（含 7.8 W1 / 7.9 W2 落地记录）。
-7. **身份连续性**：她的人格现在活在 system prompt 里，**换模型即失**。
-   是否该把"我是谁 / 我在意什么 / 我的边界"落成少量核心记忆（Self Memory / 生命核心层）？
+7. **身份连续性**（**设计稿已定 + S1 本体已落地 2026-09-24**）：她的人格原本活在 system prompt 里，
+   **换模型即失**。已拍板：把「我是谁 / 我在意什么 / 我的边界」落成少量核心记忆
+   （Self Memory / 生命核心层），形态取**正交维度 `kind=self`**（不新增层、零 DDL、不动层级序号）。
+   - **S1（已落地）**：常量本体 + `scorer` 一行 + **身份段注入通路**（`payload["identity"]` → system 段）
+     + `hooks`/缺口/取代三处排除 + 浏览器"自我"标签。**对外行为零变化**（尚无认领 → 身份段逐字等于
+     改造前 prompt 首句，golden 单测锁住）。
+   - **S2/S3（待动工）**：她的 `adopt` 工具（把候选认作自我）→ 程序找"重复模式"生成候选递给她。
+   - **遗留待决**：自我认知是否豁免 `retention_state` 降级；**降级链下级与 `micro` 尚未消费身份段**
+     （N1 的通路只接到主声，8.9 验收 2"换后端不失"要等接线补完）。
+   - 设计稿与 N1~N6 自查见 `P3_MEMORY_WORKLOG.md` 第八节；S1 落地记录见第九节。
 
 ### 给评审方的要求（请按此格式回答）
 

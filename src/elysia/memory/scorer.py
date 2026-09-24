@@ -23,6 +23,7 @@ from elysia.memory.levels import (
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_INTERNAL,
+    KIND_SELF,
     KIND_STATE,
     MemoryRecord,
 )
@@ -33,6 +34,7 @@ _KIND_BASE: dict[str, float] = {
     KIND_EXPRESSION: 0.15,  # 她说出口的话
     KIND_INTERNAL: 0.10,  # 独处念头
     KIND_STATE: 0.10,  # 普通状态
+    KIND_SELF: 0.30,  # 自我认知（"我是谁"——她认领的，最重的一类）
 }
 
 # 情感强度对重要性的加权上限（弱项：一场对话里几乎人人相同，不足以撑起重要性）

@@ -19,6 +19,10 @@ P3-V：工具增至两个——`recall`（想起）+ `disclaim`（拒绝认领�
 P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`（又愿意想起了）。
 忘与不忘同样是**她的权力**；`forget` 门槛加严（避免误伤），`restore` 只在
 "被忘掉的"记忆里找（恢复是善意动作，门槛从宽）。
+
+第八节 S1：开口前装配**身份段**（"我是谁"）——来自她认领的自我认知（`kind=self`），
+尚无认领时为空、后端退化为出生设定。身份段每句在场，与"话题撞上才浮现"的
+`memory_hooks` 是两件事，因此不占 `MAX_HOOKS` 名额。
 """
 
 from __future__ import annotations
@@ -31,16 +35,19 @@ from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.chain import LLMChain
+from elysia.llm.identity import IDENTITY_FIELD
 from elysia.llm.validator import ExpressionValidator, ValidationResult
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
     CLAIM_REJECTED,
     KIND_EXPRESSION,
+    KIND_SELF,
     LEVEL_DEEP,
     LEVEL_SHALLOW,
     RETENTION_PRESENT,
     RETENTION_SUPPRESSED,
     SOURCE_SELF,
+    MemoryRecord,
 )
 from elysia.memory.retrieve import MemoryHit, topic_match
 from elysia.memory.scorer import importance
@@ -168,7 +175,12 @@ class ExpressionService:
                 payload["memory_hooks"] = [h.label for h in hooks]
                 await self._feel_recall(hooks)
 
-        # ── 1c. 装配工具：能力由程序保证，用不用由她决定 ────
+        # ── 1c. 身份段（"我是谁"）：每句都在场，不走 hooks 段 ──
+        # 与 memory_hooks 的区别：那是"话题撞上才浮现"的背景常识，这是"我是谁"。
+        # 尚无认领记录时为空 → 后端退化为出生设定（身份段文本与改造前逐字一致）。
+        payload[IDENTITY_FIELD] = await self._identity_lines()
+
+        # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)
         if self.retriever is not None and callable(set_runner):
             set_runner(self._make_tool_runner(output, now, user_message))
@@ -236,6 +248,27 @@ class ExpressionService:
             outcome.tts.source if outcome.tts else None,
         )
         return outcome
+
+    async def _identity_lines(self) -> list[str]:
+        """她认领的自我认知（`kind=KIND_SELF`）——身份段的动态部分。
+
+        只读、**不 touch**：身份段每句都在场，把它当"被想起"会平白累积 access_count，
+        而它不是"这次开口想起了什么"，是"我一直是谁"。
+
+        已取代（她更新过自己）、她拒绝认领（disclaim）、她主动抑制（forget）的
+        都不算"现在的我"。条数上限由 `compose_identity` 兜住（少而稳，8.9 验收 4）。
+        """
+        lines: list[str] = []
+        for d in await self._store.iterate_memories():
+            rec = MemoryRecord.from_dict(d)
+            if rec.kind != KIND_SELF or rec.superseded_by is not None:
+                continue
+            if rec.claim_status == CLAIM_REJECTED or rec.retention_state == RETENTION_SUPPRESSED:
+                continue
+            text = (rec.narrative or rec.content).strip()
+            if text:
+                lines.append(text)
+        return lines
 
     def _make_tool_runner(
         self,

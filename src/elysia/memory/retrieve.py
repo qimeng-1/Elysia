@@ -41,6 +41,7 @@ from elysia.memory.levels import (
     CERTAINTY_SPECULATIVE,
     CLAIM_REJECTED,
     KIND_EXPRESSION,
+    KIND_SELF,
     LEVEL_DEEP,
     LEVEL_WORKING,
     RETENTION_DORMANT,
@@ -332,6 +333,10 @@ def select_hooks(
     for rec in records:
         # 排除她自己的发言回声：hooks 用于"记起你/世界"，不应复述刚说过的自己
         if rec.kind == KIND_EXPRESSION:
+            continue
+        # 排除自我认知（第八节 S1）：hooks 是"话题撞上的背景常识"，而"我是谁"
+        # 走**身份段**、每句都在场——若同时进 hooks 段，就是每句复述自己（重犯 P3-P）
+        if rec.kind == KIND_SELF:
             continue
         # 排除已被更正/取代的旧事实：准确率保障——改过的就是准的
         if rec.superseded_by is not None:

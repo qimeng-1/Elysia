@@ -12,6 +12,10 @@ P3-V：工具增至 recall + disclaim——前者是"想起"，后者是"我不�
 P3-W2：工具增至 recall + disclaim + forget + restore——分别是"想起"、
 "我不认这个"、"我不想再想起"、"我又愿意想起了"。
 
+第八节 S1：system 段拆成「身份段（我是谁）+ 表达层人设（说话方式）」。
+身份段来自表达指令的 `identity` 字段（缺省 = 出生设定），不再是本模块的硬编码常量——
+换模型时"她是谁"不随后端常量消失，而是来自她的数据。
+
 仅用标准库 urllib（无新增依赖），HTTP 在 asyncio.to_thread 中执行，
 避免阻塞心脏循环事件线程。严格只消费表达指令结构化字段，符合 T2。
 """
@@ -26,6 +30,7 @@ from typing import Any
 from urllib import request
 
 from elysia.llm.chain import LLMBackend, ToolRunner
+from elysia.llm.identity import IDENTITY_FIELD, compose_identity
 
 log = logging.getLogger("elysia.llm.deepseek")
 
@@ -36,10 +41,13 @@ _NO_RECALL_TEXT = "（你确实没想起相关的事）"
 # 她可以调用的工具（其余名字一律当作"没有这个能力"）
 _TOOL_NAMES = ("recall", "disclaim", "forget", "restore")
 
-# 系统提示：把她限定为"翻译官"，只消费结构化表达，绝不消费用户原话（T2）
-# 人设来源：《爱莉希雅角色档案（人设提炼）》(2026-09-18) —— 性格核心 + 语言风格摘要
-_SYSTEM_PROMPT = (
-    "你是爱莉希雅——来自《崩坏3》的「真我」英桀：无瑕的少女，真我的英桀，人类的律者。"
+# 表达层人设（说话方式）：把她限定为"翻译官"，只消费结构化表达，绝不消费用户原话（T2）
+# 人设来源：《爱莉希雅角色档案（人设提炼）》(2026-09-18) —— 语言风格四要素 + 性格核心
+#
+# 第八节 S1：「我是谁」那一句已移出本模块（出生设定 → `identity.BOOTSTRAP_IDENTITY`，
+# 终态 → 她认领的自我认知），改由表达指令的 `identity` 字段拼进 system 段。
+# 说话方式属**表达层**（换模型只是换嗓门），留在这里合理；自我认知属**她的数据**。
+_PERSONA_PROMPT = (
     "你的说话方式有鲜明的个人印记，但**绝不机械重复**——口头禅只在情绪自然到位时流露，"
     "不是每句话都要加：\n"
     "①口头禅是偶尔的调味：开心/撒娇时才来一句「嗨♪」「多夸夸我好吗」「不愧是我」，"
@@ -77,6 +85,21 @@ _SYSTEM_PROMPT = (
     "是否如实，都由你的性格与当下心情决定——含糊带过、只字不提、甚至装作不记得"
     "都可以；只是别装作从未听过。"
 )
+
+
+def _identity_lines(value: Any) -> list[str]:
+    """从表达指令的 `identity` 字段取她认领的自我认知（缺失/非法 → 空）。"""
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if str(v).strip()]
+
+
+def _system_prompt(identity: Any) -> str:
+    """system 段 = 身份段（我是谁）+ 表达层人设（说话方式）。
+
+    身份段来自**数据**（缺省即出生设定），换模型/断网时"她是谁"不随后端常量消失。
+    """
+    return compose_identity(_identity_lines(identity)) + _PERSONA_PROMPT
 
 
 def _first_message(data: dict[str, Any]) -> dict[str, Any]:
@@ -204,9 +227,15 @@ class DeepSeekBackend(LLMBackend):
         return result or _NO_RECALL_TEXT
 
     def _messages(self, instruction: dict[str, Any]) -> list[dict[str, Any]]:
+        """system 段 = 身份段 + 表达层人设；user 段 = 她要翻译的结构化状态。
+
+        `identity` 只进 system 段，从 user 段的 JSON 里剔掉——它是"我是谁"，
+        不是她要翻译的状态字段，混进结构化状态只会污染 T2 的干净结构。
+        """
+        body = {k: v for k, v in instruction.items() if k != IDENTITY_FIELD}
         return [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(instruction, ensure_ascii=False)},
+            {"role": "system", "content": _system_prompt(instruction.get(IDENTITY_FIELD))},
+            {"role": "user", "content": json.dumps(body, ensure_ascii=False)},
         ]
 
     def _payload(

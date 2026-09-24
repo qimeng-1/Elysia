@@ -1539,7 +1539,7 @@ if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:   # 替换不计入新
 
 - 文档四处同步：本节 + `docs/P3_MEMORY.md` + `CHANGELOG.md` + `项目元信息/开发日志.md`（仓库外）。
 - `verify_integrity.py --generate` → `--check`：全一致。
-- **提交**：`<HASH>`（见 17.7 补记）。**未代为重启灵魂**。
+- **提交**：`c44a3a7`（9 文件 / +334 −36），已推送（`d8ab320..c44a3a7`）；pre-commit 四件套全部 Passed。**未代为重启灵魂**。
 
 ### 17.7 下一步 + 交接要点
 

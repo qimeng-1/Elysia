@@ -23,6 +23,7 @@ from elysia.tools.memory_view import (
     TAG_CANDIDATE,
     TAG_SEED,
     TAG_SELF,
+    _cluster_sizes,
     _in_identity,
     _is_candidate,
     _is_seed,
@@ -185,6 +186,24 @@ async def test_tag_text_marks_self_and_candidate(tmp_path: Path) -> None:
     assert _is_candidate(by_id[candidate_id])
     assert _tag_text(by_id[plain_id]) == ""
     assert "标签" in COLUMNS
+
+
+@pytest.mark.asyncio
+async def test_cluster_sizes_groups_reworded_same_event(tmp_path: Path) -> None:
+    """A2「簇」列：同一件事的换说法归到一簇，孤例自成一簇。"""
+    db = tmp_path / "heartbeat.db"
+    store = HeartbeatStore(db)
+    await store.start()
+    long_form = await store.add_memory(1.0, _memory("那我在告诉你哦，我的生日是5月21日，要记好哦"))
+    short_form = await store.add_memory(2.0, _memory("那我的生日呢"))
+    alone = await store.add_memory(3.0, _memory("你喜欢看晚霞"))
+    await store.close()
+
+    sizes = _cluster_sizes(load_memories(db))
+    assert sizes[long_form] == 2
+    assert sizes[short_form] == 2  # 换说法也归同一簇（Jaccard 判不出，覆盖判得出）
+    assert sizes[alone] == 1
+    assert "簇" in COLUMNS
 
 
 @pytest.mark.asyncio

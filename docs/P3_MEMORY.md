@@ -3,7 +3,7 @@
 > **用途**：本文件是记忆系统的**唯一主文档**——先讲清"她在做什么"（第零节，不需要懂术语），
 > 再给出系统事实（数据流 / 文件 / 规则 / 验收 / 待评审问题）。
 > 多方问询（外部 AI / 同行评审）直接投喂本文件，保证每一轮看到的是**同一版事实**。
-> **快照日期**：2026-09-24（P3-P / Q / R / S / T / U / V / W1 / W2 之后，**第八节 Self Memory S1~S7 收尾**与**§15 A1 判据统一**落地）
+> **快照日期**：2026-09-24（P3-P / Q / R / S / T / U / V / W1 / W2 之后，**第八节 Self Memory S1~S7 收尾**、**§15 A1 判据统一**与**§15 步 A2 成组召回 + D-A6** 落地）
 > **维护约定**：代码有实质变化时更新本文件并改快照日期。外部结论**不写进本文件**，
 > 另存 `docs/MEMORY_REVIEW_NOTES.md`（见第十节）。
 
@@ -131,7 +131,7 @@ claim_status / retention_state`
 | `decay.py` | 索引强度按年龄指数衰减 | `decay_strength`、`STRENGTH_RETRIEVE_FLOOR`、`retrieve_latency_ms` | 部分 |
 | `supersede.py` | 记忆修正 / 覆盖（旧事实作废） | `bigrams`、`content_similarity`（字符二元组 Jaccard）、`find_superseded`（阈值 0.4） | ✅ |
 | `similarity.py` | 同话题 / "同一件事"判定的**单一入口**（第十五节 A1） | `coverage`（非对称覆盖）、`query_coverage`（按 query 归一）、`same_event`（Jaccard ∪ 覆盖 + 碎片护栏）、`COVERAGE_THRESHOLD=0.7` / `MIN_SHARED_BIGRAMS=3` / `MIN_SHORTER_BIGRAMS=5` | ✅ |
-| `retrieve.py` | 检索 + 情绪染色 + 两种路径 | `mood_similarity`(余弦)、`topic_match`(→ `query_coverage`) / `is_related`(严/宽双门槛)、`age_phrase`、`score_breakdown` / `score_memory`、`_recency_factor`、`_review_factor`、`select_hooks`（含保留闸门）、`_dedupe`(→ `same_event`)、`retrieve_from_store`（唤醒落 `present`）、`recall_for_feeling`、`MemoryHit.woke_from` | ✅ |
+| `retrieve.py` | 检索 + 情绪染色 + 两种路径 | `mood_similarity`(余弦)、`topic_match`(→ `query_coverage`) / `is_related`(严/宽双门槛)、`age_phrase`、`score_breakdown` / `score_memory`（含 `cluster` 分项）、`_recency_factor`、`_review_factor`、`_cluster_factor`（A2：`CLUSTER_COEF=0.05` / `CLUSTER_MAX=0.2`）、`select_hooks`（含保留闸门；**A2 起两步打分、截取在重排之后**）、`_dedupe`(→ `same_event`，**全量归并并记 `sibling_ids`**)、`retrieve_from_store`（唤醒落 `present`）、`recall_for_feeling`、`MemoryHit.woke_from` / `MemoryHit.sibling_ids` | ✅ |
 | `sleep.py` | 睡眠整合＝做梦（P3-E 设计） | `Dream`、`synthesize_dream` | ❌ 未插电 |
 | `hooks.py` | 记忆缺口信号（"想不起来"的物理体现） | `GapSignal`、`detect_gap` | ✅ |
 | `sediment.py` | 自我认知的沉淀（第八节 S3）：找"重复模式"生成候选；**A1 起聚类走 `similarity.same_event`** | `find_candidate`、`PatternSignal`、`_is_experience` / `_is_taken`、`SEDIMENT_*` | ✅ |
@@ -151,7 +151,7 @@ claim_status / retention_state`
 
 | 文件 | 职责 |
 |---|---|
-| `src/elysia/tools/memory_view.py` | PySide6 只读记忆浏览器（观测：存储 / 打分 / 召回 / 沉淀 / **看身份**）；3s 自动刷新；被召回记忆高亮；**S4 增「标签」列与「候选（待她认领）」筛选项**（自我 = 她已认领、进身份段每句在场；候选 = 程序递给她待认领、不进话语）；**S5/S7 增第三档「出生设定」**（程序幂等种入的过渡打底）与状态栏「身份段 x/5」） |
+| `src/elysia/tools/memory_view.py` | PySide6 只读记忆浏览器（观测：存储 / 打分 / 召回 / 沉淀 / **看身份**）；3s 自动刷新；被召回记忆高亮；**S4 增「标签」列与「候选（待她认领）」筛选项**（自我 = 她已认领、进身份段每句在场；候选 = 程序递给她待认领、不进话语）；**S5/S7 增第三档「出生设定」**（程序幂等种入的过渡打底）与状态栏「身份段 x/5」；**A2 增「簇」列与明细"簇"行**（纯函数 `_cluster_sizes`：本地观测口径，代表=先出现者，不参与话语路径） |
 | `tests/unit/test_memory.py`、`test_retrieve.py`、`test_promote.py`、`test_decay.py`、`test_sleep.py`、`test_memory_view.py`、`test_identity.py`、`test_sediment.py`、`test_similarity.py`、`test_expression_service_memory.py` | 记忆系统单测 |
 | `tests/acceptance/test_p3_gate.py` | P3 阶段门禁 |
 
@@ -169,13 +169,14 @@ claim_status / retention_state`
 | **沉淀（S3）** | 同一件事被提起 ≥3 次**且**跨越 ≥1 天、且未递过也未被认领 → 生成**候选**：正文/叙事**照抄原文**（`narrative` 优先，程序不自己写句子）、标 `source=inference` + `certainty=probable`、`protected=False`；只递一个（提起最多优先）；素材白名单 `interaction/state/internal`（排除她的回声），够不着/被取代/被拒绝的不算素材；落库即"已递过"的证据 → **不重复递**；感受路径推 `self_candidate` 脉冲（TR/CS 微升、SA 不动，封顶 0.35），**被来源闸门挡在话语外** |
 | **索引衰减** | `strength × e^(−有效年龄/45天)`；`protected` 慢 3×；数据永不删，只是索引弱 |
 | **取代** | 写入后 `_supersede_conflicts`：同话题 Jaccard ≥0.4 → 旧记录标 `superseded_by`，检索排除 |
-| **打分** | `层级×0.6 + 情绪×0.4(余弦) + 索引×0.3 + 重要度×0.5 + 新鲜度 + 复习加成`；`MAX_HOOKS=3` |
+| **打分** | `层级×0.6 + 情绪×0.4(余弦) + 索引×0.3 + 重要度×0.5 + 新鲜度 + 复习加成 + 簇加成`；`MAX_HOOKS=3` |
 | **新鲜度** | 近 7 天线性加成（峰值 0.55），之后为 0 |
 | **时间锚点（P3-Q）** | 注入形如 `（3天前）你生日是5月21日`；分档 刚刚 / 今天 / 昨天 / N天前 / 上个月 / N个月前 / 去年 / N年前；无 `now` 则不提时间 |
 | **复习加成（P3-R）** | `0.06 × log(1+access) × e^(−距上次想起/14天)`，封顶 `0.3`；**不落库**（不污染 importance） |
 | **复习** | 命中 → `touch_memory`（access_count+1、更新 last_access_ts）→ 驱动"浅层→工作"晋升 |
-| **批内去重（P3-S / §15 A1）** | 排序后按 `similarity.same_event` 判"同一件事"，只留最高分一条（兼容阈值 Jaccard ≥0.35） |
-| **同话题判据（§15 A1）** | "同一件事"= `similarity.same_event`（**对称 Jaccard ≥ 传入阈值** ∪ **非对称覆盖 ≥0.7** 且 绝对重合二元组 ≥3 且 短方二元组 ≥5）——覆盖通路专捞"共享关键片段的换说法"，两道护栏专挡"碎片被完全包含"；三处消费（`_dedupe` / `sediment` / 未来 `adopt`）**共用实现、各自阈值**；`supersede` **不参与**（仍对称 Jaccard 0.4：作废一条真实事实不可容忍） |
+| **批内去重（P3-S / §15 A1+A2）** | 排序后按 `similarity.same_event` 判"同一件事"，只留最高分一条＝**代表**（兼容阈值 Jaccard ≥0.35）；**A2 起全量归并**（不再"凑满名额即收工"，簇规模才如实）并把它条的 id 记进 `MemoryHit.sibling_ids` |
+| **簇加成（§15 A2）** | 代表按 `0.05 × log(1+同簇兄弟数)` 加分（封顶 `0.2`）后**重排**，截取 `MAX_HOOKS` 在重排之后——"这件事被反复提起 ⇒ 更容易浮上来"；与复习加成同源（log 阻尼 + 硬上限）；**不落库、无 schema 变更**，`CLUSTER_COEF` 置 0 即回退 |
+| **同话题判据（§15 A1）** | "同一件事"= `similarity.same_event`（**对称 Jaccard ≥ 传入阈值** ∪ **非对称覆盖 ≥0.7** 且 绝对重合二元组 ≥3 且 短方二元组 ≥5）——覆盖通路专捞"共享关键片段的换说法"，两道护栏专挡"碎片被完全包含"；消费方**共用实现、各自阈值**：`_dedupe` / `sediment` / `adopt` 的"候选当代表"（M9，§15 步 A2 迁移）；**保守不动**的有 `supersede` 与 `adopt` 的"改口作废"（M10）——仍对称 Jaccard（0.4 / 0.35）：误判会作废一条真实事实或她认领过的条目，不可容忍 |
 | **话题门槛** | 程序推：二元组重合 ≥2（追问措辞下 ≥1）｜她自己 recall：重合 ≥1 |
 | **回声排除** | 检索排除 `KIND_EXPRESSION`（不复述自己刚说的） |
 | **来源闸门（P3-T）** | 检索排除 `source ∈ {inference, system}` 与 `certainty = speculative`——程序推断/系统注入不得升格成"她的事实"；**感受路径不受此限** |
@@ -187,7 +188,7 @@ claim_status / retention_state`
 | **保留降级（P3-W1）** | 维护每 300 拍按 `since_last_access`（`now − (last_access_ts or created_ts)`，**非绝对年龄**）判定：≥180 天 → `dormant`；≥60 天且 `access_count == 0` → `faded`；**只降不升**；`suppressed` 与 `protected` 不碰 |
 | **自动保护（P3-W1/M2）** | 晋升 `deep` 且 `access_count ≥ 3` → 自动置 `protected`（衰减慢 3×、永不降级）；原 `protected` 是死阀门，本次通电 |
 | **她的遗忘工具（P3-W2）** | `forget(topic)` → `suppressed`（判据加严：`topic_match ≥ 0.5` **且** `top1 ≥ 2×top2`，否则如实回"没找到"）；`restore(topic)` → `present`（**只在 `suppressed` 里找**）；**只动 `retention_state`，不碰 `claim_status`** |
-| **她的认领工具（S2）** | `adopt(topic)` → 最贴题的那条记忆升格为**自我认知**（`mark_as_self`：`kind=self` + `source=self` + `certainty=certain` + `level=deep` + `protected=1` + `detail_level=1.0` + `retention_state=present`，一次 UPDATE 无中间态）；判据只要求"足够突出"（`top1 ≥ 2×top2`，`ADOPT_DOMINANCE`），**不设绝对覆盖度下限**；候选排除已被取代 / 已是自我认知 / `rejected` / `suppressed`；身份段位置满（≥`MAX_IDENTITY_LINES-1`）时如实回"位置满了"，不做静默失败；**候选优先（S3）**：命中程序沉淀的候选时，与它同家的重述（Jaccard ≥0.35）不参与并列判定——否则自家重述同分占位，判据必然落空；**认不认永不由程序置**（程序只递候选）；**改口（S4 验收 3）**：认领到"同一件事"时，旧的那条自我认知随之作废（`superseded_by` 指向新条）——"她可更新自我认知"由此接线；容量判定按"替换不计入新增"（位置满时改口仍可行），不做静默失败 |
+| **她的认领工具（S2）** | `adopt(topic)` → 最贴题的那条记忆升格为**自我认知**（`mark_as_self`：`kind=self` + `source=self` + `certainty=certain` + `level=deep` + `protected=1` + `detail_level=1.0` + `retention_state=present`，一次 UPDATE 无中间态）；判据只要求"足够突出"（`top1 ≥ 2×top2`，`ADOPT_DOMINANCE`），**不设绝对覆盖度下限**；候选排除已被取代 / 已是自我认知 / `rejected` / `suppressed`；身份段位置满（≥`MAX_IDENTITY_LINES-1`）时如实回"位置满了"，不做静默失败；**候选优先（S3 / §15 A2 起走 `same_event`）**：命中程序沉淀的候选时，与它同家的重述不参与并列判定——否则自家重述同分占位，判据必然落空；**认不认永不由程序置**（程序只递候选）；**改口（S4 验收 3）**：认领到"同一件事"时，旧的那条自我认知随之作废（`superseded_by` 指向新条）——"她可更新自我认知"由此接线（此处的"同一件事"**有意仍用对称 Jaccard**＝M10，误判会作废她认领过的条目）；容量判定按"替换不计入新增"（位置满时改口仍可行），不做静默失败 |
 | **缺口口径（P3-W1/M9）** | `_feel_memory_gaps` 只统计 `present`——够不着的记忆不产生"记不清"的缺口脉冲 |
 | **两种路径** | 话语路径（她决定，进 prompt）｜感受路径（程序静默，永不进 prompt） |
 | **记忆缺口（P3-U）** | 感受路径每 300 拍扫 `memory_index`：strength 跌破检索下限 → `memory_gap` 脉冲（TR 微升=好奇，SA 不动）；**不进话语、不新增约束** |
@@ -235,15 +236,17 @@ claim_status / retention_state`
    **默认 `claimed`（可用）**，`rejected` 只能由她的动作（`disclaim`）产生。
    待评审：拒绝认领之后，那条记忆在她眼里算什么？（"主动遗忘 / 失去访问权 /
    忘了但仍有影响"归 `retention_state`，见 `P3_MEMORY_WORKLOG.md` 第七节）
-3. **语义粒度的天花板**（**第一层已落地 §15 A1，2026-09-24**；见 `P3_MEMORY_WORKLOG.md` 第十五/十六节）：
+3. **语义粒度的天花板**（**第一层已落地 §15 A1 + 步 A2，2026-09-24**；见 `P3_MEMORY_WORKLOG.md` 第十五/十六/十七节）：
    引入 embedding？**尚未**。已按"零依赖先抬天花板"落地 A1——新增 `memory/similarity.py`
    作为"同一件事"判定的**单一入口**（对称 Jaccard ∪ **非对称覆盖 0.7** + 两道碎片护栏），
    `_dedupe` / `sediment` 改用它（`supersede` 有意保持 Jaccard 0.4：误判代价不对称）。
    本库前后对照：配对命中 23 → **33 对**，新增 10 对**全为真"同一件事"**；但 hooks top3 **未变**
    （A1 捞回的多是低分重述，够不着 3 个名额）⇒ 真实收益是"沉淀候选更容易出现"。
+   步 A2 补上**成组召回**：去重时记下簇规模（`MemoryHit.sibling_ids`）并入打分（`cluster` 分项），
+   让"被反复提起的那件事"更容易浮上来；本库实测 5 问中 **3 问 top3 内部次序变化**（行数不变）。
    **embedding 记为"按需启动"**：触发条件 = A 案落地后真实对话里出现 A 案捞不回、
    又被她/用户注意到的"换说法"实例（本库当前**无纯语义样本可作验收靶子**）。
-   **仍待拍板**：`adopt` 路径另有两处同宗判据未迁移（M9 建议迁、M10 建议不迁）。
+   `adopt` 两处同宗判据已按 D-A6 裁决：**M9 迁移（`same_event`）、M10 不迁（仍对称 Jaccard）**。
 4. **未插电模块的取舍**：`sleep.py`（做梦）是**接线**还是**删除**？
    若接线，接到哪一拍、推什么脉冲？
 5. **层数是否够**：当前 3 层（shallow/working/deep）+ 2 张表。

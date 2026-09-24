@@ -53,7 +53,8 @@ from elysia.memory.levels import (
     SOURCE_SYSTEM,
     MemoryRecord,
 )
-from elysia.memory.retrieve import score_breakdown, select_hooks
+from elysia.memory.retrieve import HOOK_DUPLICATE_SIMILARITY, score_breakdown, select_hooks
+from elysia.memory.similarity import same_event
 
 AUTO_REFRESH_MS = 3000
 
@@ -116,6 +117,7 @@ COLUMNS = [
     "复习",
     "得分",
     "召回",
+    "簇",
     "状态",
     "内容",
 ]
@@ -249,6 +251,32 @@ def _tag_text(rec: MemoryRecord) -> str:
     return TAG_CANDIDATE if _is_candidate(rec) else ""
 
 
+def _cluster_sizes(records: list[MemoryRecord]) -> dict[int, int]:
+    """「簇」列（第十五节 A2）：这件事被重述了几条（含自己）。
+
+    **观测口径，不参与话语路径**：单趟聚类、代表＝先出现者、判据 `same_event`
+    （兼容阈值 `HOOK_DUPLICATE_SIMILARITY`）。检索时的簇另有一套——那里代表是
+    **分数最高**的那条，且只在通过话题门槛的候选集内成型（见 `retrieve.select_hooks`）；
+    两者只在"同一次比对的成员集合"上可能略有出入，用于观测足够，不追求一致。
+    """
+    clusters: list[tuple[str, list[int]]] = []  # (代表正文, 成员 id)
+    for rec in records:
+        if rec.id is None:
+            continue
+        text = (rec.narrative or rec.content).strip()
+        for rep_text, members in clusters:
+            if same_event(text, rep_text, jaccard_threshold=HOOK_DUPLICATE_SIMILARITY):
+                members.append(rec.id)
+                break
+        else:
+            clusters.append((text, [rec.id]))
+    sizes: dict[int, int] = {}
+    for _rep_text, members in clusters:
+        for mid in members:
+            sizes[mid] = len(members)
+    return sizes
+
+
 # ── 窗口 ───────────────────────────────────────────────
 class MemoryBrowser(QMainWindow):
     """记忆观测窗口：筛选 + 明细 + 当下召回预览，可选自动刷新。"""
@@ -257,6 +285,7 @@ class MemoryBrowser(QMainWindow):
         super().__init__()
         self._db_path = db_path
         self._records_by_row: list[MemoryRecord] = []
+        self._cluster_sizes_by_id: dict[int, int] = {}
         self.setWindowTitle(f"Elysia 记忆浏览器 — {db_path}")
         self.resize(1280, 760)
 
@@ -379,6 +408,8 @@ class MemoryBrowser(QMainWindow):
 
         filtered.sort(key=_total, reverse=True)
 
+        clusters = _cluster_sizes(records)
+        self._cluster_sizes_by_id = clusters
         self._records_by_row = filtered
         self._table.setRowCount(len(filtered))
         for i, rec in enumerate(filtered):
@@ -402,6 +433,7 @@ class MemoryBrowser(QMainWindow):
                 f"{parts['review']:.2f}",
                 f"{total:.3f}",
                 f"#{rec_rank}" if rec_rank else "",
+                f"{clusters[mid]}" if clusters.get(mid, 1) > 1 else "",
                 _state_text(rec),
                 (rec.content or "")[:60].replace("\n", " "),
             ]
@@ -459,10 +491,17 @@ class MemoryBrowser(QMainWindow):
         else:
             tag_hint = "—"
 
+        cluster_n = self._cluster_sizes_by_id.get(mid, 1)
+        cluster_hint = (
+            f"{cluster_n} 条同簇（含自己；检索时计入簇加分）"
+            if cluster_n > 1
+            else "—（没有同簇重述）"
+        )
         lines = [
             f"# {mid}  {LEVEL_LABELS.get(rec.level, rec.level)} / "
             f"{KIND_LABELS.get(rec.kind, rec.kind)}",
             f"标签：{tag_hint}",
+            f"簇：{cluster_hint}",
             f"状态：{_state_text(rec)}"
             + (f" ← 被 #{rec.superseded_by} 取代" if rec.superseded_by is not None else ""),
             f"来源：{SOURCE_LABELS.get(rec.source, rec.source)}"

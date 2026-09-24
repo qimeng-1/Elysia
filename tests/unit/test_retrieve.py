@@ -26,6 +26,7 @@ from elysia.memory.levels import (
     MemoryRecord,
 )
 from elysia.memory.retrieve import (
+    CLUSTER_MAX,
     MAX_HOOKS,
     REVIEW_MAX,
     MemoryHit,
@@ -114,7 +115,7 @@ def test_score_memory_index_availability() -> None:
 def test_score_breakdown_includes_importance() -> None:
     """得分的"本身价值"项必须存在：重要度要真的参与打分，否则形同摆设。"""
     parts = score_breakdown(_rec(importance=0.8), {"chat": 0.5})
-    assert set(parts) == {"level", "emotion", "index", "importance", "recency", "review"}
+    assert set(parts) == {"level", "emotion", "index", "importance", "recency", "review", "cluster"}
     assert parts["importance"] == pytest.approx(0.4)
 
 
@@ -299,6 +300,65 @@ def test_select_hooks_dedupes_reworded_same_event() -> None:
     hooks = select_hooks([long_form, short_form, other], {"chat": 0.5})
     # 碎片式重述被并入代表（保留分数更高的那条），名额让给"另一件事"
     assert [h.memory_id for h in hooks] == [1, 3]
+
+
+# ── 簇与簇加分（第十五节 A2：同一件事被反复提起，代表更易浮上来）──────
+def test_select_hooks_records_cluster_siblings() -> None:
+    """同簇的兄弟记在代表上（`sibling_ids`），注入的仍只有代表一行。"""
+    recs = [
+        _rec(mid=1, content="你的生日是5月21日", narrative="你的生日是5月21日"),
+        _rec(mid=2, content="你的生日是5月21日，要记好", narrative="你的生日是5月21日，要记好"),
+        _rec(mid=3, content="你的生日是5月21日", narrative="你的生日是5月21日"),
+        _rec(mid=4, content="你喜欢看晚霞", narrative="你喜欢看晚霞"),
+    ]
+    hooks = select_hooks(recs, {"chat": 0.5})
+    assert [h.memory_id for h in hooks] == [1, 4]
+    assert hooks[0].sibling_ids == (2, 3)  # 兄弟不占名额
+    assert hooks[1].sibling_ids == ()  # 孤例没有簇
+
+
+def test_dedupe_scans_all_candidates_so_cluster_size_is_honest() -> None:
+    """去掉"凑满名额即收工"：排在名额之外的兄弟也要计入簇规模，否则簇会看起来比实际小。"""
+    recs = [
+        _rec(mid=1, level=LEVEL_DEEP, content="你的生日是5月21日", narrative="你的生日是5月21日"),
+        _rec(mid=2, level=LEVEL_DEEP, content="你喜欢看晚霞", narrative="你喜欢看晚霞"),
+        _rec(mid=3, level=LEVEL_DEEP, content="你昨天去吃了顿大餐", narrative="你昨天去吃了顿大餐"),
+        _rec(
+            mid=4, content="你的生日是5月21日", narrative="你的生日是5月21日"
+        ),  # 低分重述，排在名额之外
+    ]
+    hooks = select_hooks(recs, {"chat": 0.5})
+    assert [h.memory_id for h in hooks] == [1, 2, 3]
+    assert hooks[0].sibling_ids == (4,)
+
+
+def test_cluster_factor_boosts_and_is_capped() -> None:
+    """簇分项：孤例为 0（不因此被压分），重述多时有加成且封顶。"""
+    alone = _rec()
+    assert score_breakdown(alone, {"chat": 0.5})["cluster"] == 0.0
+    assert score_memory(alone, {"chat": 0.5}, cluster_size=2) > score_memory(alone, {"chat": 0.5})
+    assert score_breakdown(alone, {"chat": 0.5}, cluster_size=1000)["cluster"] == CLUSTER_MAX
+
+
+def test_cluster_boost_can_lift_a_representative() -> None:
+    """A2 的核心承诺：重述多的代表凭簇加分超过一条原本分略高的孤例（"更易浮上来"落到排名）。"""
+    distinct = _rec(
+        mid=1, level=LEVEL_DEEP, importance=0.62, content="你喜欢看晚霞", narrative="你喜欢看晚霞"
+    )
+    rep = _rec(
+        mid=2,
+        level=LEVEL_DEEP,
+        importance=0.60,
+        content="你的生日是5月21日",
+        narrative="你的生日是5月21日",
+    )
+    sib1 = _rec(mid=3, importance=0.20, content="你的生日是5月21日", narrative="你的生日是5月21日")
+    sib2 = _rec(mid=4, importance=0.20, content="你的生日是5月21日", narrative="你的生日是5月21日")
+    # 初次打分：孤例（0.62）> 代表（0.60）；簇加分 0.05×log(3)≈0.055 足以反超
+    hooks = select_hooks([distinct, rep, sib1, sib2], {"chat": 0.5})
+    assert [h.memory_id for h in hooks] == [2, 1]
+    assert hooks[0].sibling_ids == (3, 4)
+    assert hooks[0].score > hooks[1].score
 
 
 # ── 时间锚点（她能分辨新旧、说得出"你上个月告诉我的"）──────

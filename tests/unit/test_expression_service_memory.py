@@ -835,6 +835,27 @@ async def test_adopt_tool_prefers_candidate_over_its_family(store: HeartbeatStor
 
 
 @pytest.mark.asyncio
+async def test_adopt_candidate_family_uses_same_event(store: HeartbeatStore) -> None:
+    """D-A6（M9）：候选的"同家重述"判据随 A1 升级为 `same_event`。
+
+    改前用对称 Jaccard：这条重述（Jaccard 0.19）判不出同家，会留在池子里与候选
+    **并列占位**（两者话题得分都是 1.0），`top1 ≥ 2×top2` 必然不成立 ⇒ 她认领不到
+    程序递来的候选。改成 `same_event`（覆盖 0.80）后它不再参与并列判定。
+    """
+    await store.start()
+    try:
+        await _add_forgettable(store, "那我的生日呢")  # 换说法的重述：Jaccard 低、覆盖高
+        cand_id = await _add_candidate(store, "那我在告诉你哦，我的生日是5月21日，要记好哦")
+
+        result = await _tick_with_tool(store, "adopt", "我的生日")
+        assert result is not None and "认作自己的一部分" in result
+        rec = await store.get_memory(cand_id)
+        assert rec is not None and rec["kind"] == KIND_SELF
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_adopt_reinterprets_same_topic_self_memory(store: HeartbeatStore) -> None:
     """第八节 S4 验收 3 后半：认领"同一件事的新说法"＝她在重新解释自己。
 

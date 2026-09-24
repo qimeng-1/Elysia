@@ -207,6 +207,9 @@ class MemoryHit:
     protected: bool
     age_days: float | None = None  # 距今多少天；None = 调用方未提供时间参考
     woke_from: str | None = None  # 非 None = 这条是被话题唤醒的沉睡/淡化记忆（需落回 present）
+    # 同簇成员（第十五节 A2）：这次检索里被判为"同一件事"、已并入本条的其他记忆 id。
+    # 它是**代表**——注入表达的仍只有本条一行，兄弟只用于"这件事被反复提起"的加分与观测。
+    sibling_ids: tuple[int, ...] = ()
 
     @property
     def label(self) -> str:
@@ -224,10 +227,14 @@ def score_breakdown(
     *,
     index_strength: float = 1.0,
     now: float | None = None,
+    cluster_size: int = 0,
 ) -> dict[str, float]:
-    """单条记忆的得分构成（观测/调试用）：层级/情绪/索引/重要度/新鲜度/复习。
+    """单条记忆的得分构成（观测/调试用）：层级/情绪/索引/重要度/新鲜度/复习/簇。
 
     score_memory = 本函数各项之和（保持单一事实源，避免 UI 复刻打分逻辑）。
+    cluster_size：这条作为代表时并入的同簇成员数（`MemoryHit.sibling_ids`）。
+    它**只有在一次检索里才谈得上**——离线观测（无话题、无候选集）传默认 0，
+    簇分项即为 0，这与"簇是候选集内的概念"这一事实一致。
     """
     level_w = _level_weight(record.level)
     emotion = mood_similarity(record.emotion_vector, current_mood)
@@ -243,6 +250,7 @@ def score_breakdown(
         "importance": round(record.importance * IMPORTANCE_COEF, 3),
         "recency": recency,
         "review": review,
+        "cluster": _cluster_factor(cluster_size),
     }
 
 
@@ -252,17 +260,21 @@ def score_memory(
     *,
     index_strength: float = 1.0,
     now: float | None = None,
+    cluster_size: int = 0,
 ) -> float:
     """单条记忆的检索得分。
 
-    分数 = 层级权重 + 情绪染色 + 索引可用性 + 本身价值 + 新鲜度 + 复习加成。
+    分数 = 层级权重 + 情绪染色 + 索引可用性 + 本身价值 + 新鲜度 + 复习加成 + 簇加成。
     两个问题分开回答：
     - "值不值得被想起" → 层级 + 重要度（内容信号评估的结果）
-    - "此刻容不容易浮上来" → 情绪染色 + 索引 + 新鲜度 + 复习（被想起过的更易再浮起）
+    - "此刻容不容易浮上来" → 情绪染色 + 索引 + 新鲜度 + 复习 + 簇（被想起过的、
+      被反复提起过的，更易再浮起）
     短期记忆（几天内）应可靠召回——这是"记得上周的大餐"的保证；
     得分随年龄衰减，但多日记忆仍按重要性/情绪排序。
     """
-    parts = score_breakdown(record, current_mood, index_strength=index_strength, now=now)
+    parts = score_breakdown(
+        record, current_mood, index_strength=index_strength, now=now, cluster_size=cluster_size
+    )
     return round(sum(parts.values()), 3)
 
 
@@ -302,6 +314,25 @@ def _review_factor(access_count: int, last_access_ts: float | None, now: float) 
     return round(min(boost, REVIEW_MAX), 3)
 
 
+# ── 簇加成（第十五节 A2）：同一件事被反复提起，代表更容易浮上来 ─────────
+# 与复习加成同源——都是"这件事在她心里被碰过多次"的证据，故同样 log 阻尼 + 硬上限，
+# 避免"重述条数多"碾压"内容重要"。只作打分项，**不落库不增表**。
+# 照实说局限：簇只在**通过话题门槛的候选**里成型，联想范围 = 候选集内。
+CLUSTER_COEF = 0.05  # 每个同簇成员的基准权重（log 阻尼后）
+CLUSTER_MAX = 0.2  # 硬上限：护栏——重述再多也不会让一个簇独占榜首
+
+
+def _cluster_factor(siblings: int) -> float:
+    """簇因子：`CLUSTER_COEF × log(1+同簇成员数)`，封顶 `CLUSTER_MAX`。
+
+    siblings = 这条作为代表时并入的兄弟条数（`MemoryHit.sibling_ids`）。
+    孤例（0）→ 0：没有重述不因此被压分，只是得不到这份加成。
+    """
+    if siblings <= 0:
+        return 0.0
+    return round(min(CLUSTER_COEF * math.log(1 + siblings), CLUSTER_MAX), 3)
+
+
 def select_hooks(
     records: list[MemoryRecord],
     current_mood: dict[str, float],
@@ -321,7 +352,8 @@ def select_hooks(
         话题撞上的记忆**——记忆被唤起才浮现，无关的话不把往事带到嘴边；
         为 None 时不做话题门槛（情绪化联想场景，由调用方决定是否使用）。
     query_loose：话题门槛宽严（见 is_related）——程序推记忆用严，她自己查用宽。
-    返回前做**批内去重**（见 _dedupe）：措辞高度重叠的碎片只留最高分的一条。
+    返回前做**批内去重**（见 _dedupe）：措辞高度重叠的碎片只留最高分的一条；
+    同簇的兄弟数（第十五节 A2）随后计入簇加分并重排，截取 max_hooks 在重排之后。
 
     P3-T 来源闸门：程序推断（inference）/ 系统注入（system）的条目一律不进话语，
     她只"推测"（speculative）的也只在感受路径作背景——话语里出现的必须是
@@ -382,7 +414,25 @@ def select_hooks(
             )
         )
     hits.sort(key=lambda h: h.score, reverse=True)
-    return _dedupe(hits, max_hooks)
+    kept = _dedupe(hits)
+    # 簇规模已知 → 二次打分（第十五节 A2）：把"同一件事被反复提起"计入分数并重排。
+    # 代表本就是簇内最高分者，重排只影响**代表之间**的次序（"更易浮上来"落到排名上）。
+    # 因此截取 max_hooks 必须在重排之后——否则"重述多但初次分低"的代表挤不进名额。
+    by_id = {rec.id: rec for rec in records if rec.id is not None}
+    for hit in kept:
+        owner = by_id.get(hit.memory_id)
+        if owner is None or not hit.sibling_ids:
+            continue
+        strength = index_strengths.get(hit.memory_id, 1.0) if index_strengths else 1.0
+        hit.score = score_memory(
+            owner,
+            current_mood,
+            index_strength=strength,
+            now=now,
+            cluster_size=len(hit.sibling_ids),
+        )
+    kept.sort(key=lambda h: h.score, reverse=True)
+    return kept[:max_hooks]
 
 
 # 批内去重（P3-S / 第十五节 A1）：同一次对话的碎片措辞高度重叠，不该占满 hooks 名额。
@@ -393,22 +443,25 @@ def select_hooks(
 HOOK_DUPLICATE_SIMILARITY = 0.35
 
 
-def _dedupe(hits: list[MemoryHit], max_hooks: int) -> list[MemoryHit]:
-    """按分数降序保留彼此不重复的记忆——3 个 hook 应该是 3 件不同的事。
+def _dedupe(hits: list[MemoryHit]) -> list[MemoryHit]:
+    """把"同一件事"的多条重述归到一个**代表**上，并记下同簇成员（第十五节 A2）。
 
-    已被更高分者判为"同一件事"（`same_event`，兼容阈值即 `HOOK_DUPLICATE_SIMILARITY`）
-    的条目被跳过；因后续条目分数只会更低，凑满 max_hooks 即可提前收工。
+    代表 = 分数最高的那条（`hits` 已按分数降序）。判据 `same_event`
+    （兼容阈值 `HOOK_DUPLICATE_SIMILARITY`）；兄弟 id 落进代表的 `sibling_ids`。
+
+    **全量扫描**（A2 起不再"凑满 max_hooks 就收工"）：簇规模要如实反映"这件事被
+    重述了几次"，提前收工会让簇看起来比实际小、加分与观测都失真。截取名额移到
+    本函数之后（见 `select_hooks`），代价是候选集内的两两比较不再提前中断——
+    候选集已过话题门槛，规模本就很小。
     """
     kept: list[MemoryHit] = []
     for hit in hits:
-        if any(
-            same_event(hit.narrative, k.narrative, jaccard_threshold=HOOK_DUPLICATE_SIMILARITY)
-            for k in kept
-        ):
-            continue
-        kept.append(hit)
-        if len(kept) >= max_hooks:
-            break
+        for k in kept:
+            if same_event(hit.narrative, k.narrative, jaccard_threshold=HOOK_DUPLICATE_SIMILARITY):
+                k.sibling_ids = (*k.sibling_ids, hit.memory_id)
+                break
+        else:
+            kept.append(hit)
     return kept
 
 

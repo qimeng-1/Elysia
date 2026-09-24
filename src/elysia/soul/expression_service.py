@@ -65,6 +65,7 @@ from elysia.memory.levels import (
 from elysia.memory.retrieve import MemoryHit, topic_match
 from elysia.memory.scorer import importance
 from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
+from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
 from elysia.soul.expression import build_expression
@@ -419,6 +420,11 @@ class ExpressionService:
         否则自家重述互相占位（候选与原文分数完全相同），`top1 ≥ 2×top2` 必然不成立，
         认领永远落空——S3 递出的候选会变成"造好没插电"的死阀门。
 
+        **D-A6（第十六节 16.5 的两处同宗判据）**：上面"与候选同家的重述不参与并列判定"
+        已随 A1 升级为 `same_event`（M9——误判只是"少一条竞争者"，可容忍）；而下面
+        "改口作废既有自我认知"**仍保守用对称 Jaccard**（M10——误判会作废一条她认领过的
+        条目，不可容忍）。两处**有意不一致**，依据是"误判代价不对称"。
+
         不给她**已经不认**或**已不想再想起**的记忆（那是她自己的决定，程序不代她翻案），
         也不给已被取代的旧事实与已是自我认知的条目。
 
@@ -455,7 +461,9 @@ class ExpressionService:
                 item
                 for item in scored
                 if item is candidate
-                or content_similarity(candidate[2], item[2]) < SEDIMENT_CLUSTER_SIMILARITY
+                or not same_event(
+                    candidate[2], item[2], jaccard_threshold=SEDIMENT_CLUSTER_SIMILARITY
+                )
             ]
         else:
             pool = scored

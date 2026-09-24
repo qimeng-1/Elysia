@@ -25,7 +25,6 @@ from elysia.memory.levels import (
     KIND_INTERNAL,
     KIND_SELF,
     KIND_STATE,
-    MemoryRecord,
 )
 
 # 各类型基础权重（用户参与度越高权重越大）
@@ -129,13 +128,3 @@ def importance(
     if user_related:
         score += USER_RELATED_BONUS
     return round(max(0.0, min(1.0, score)), 3)
-
-
-def record_importance(record: MemoryRecord, *, user_related: bool = False) -> float:
-    """从 MemoryRecord 计算重要性（供写入前评估/晋升时复核）。"""
-    return importance(
-        kind=record.kind,
-        emotion_vector=record.emotion_vector,
-        content=record.content,
-        user_related=user_related,
-    )

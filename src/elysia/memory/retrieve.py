@@ -53,7 +53,8 @@ from elysia.memory.levels import (
     MemoryRecord,
     default_narrative,
 )
-from elysia.memory.supersede import bigrams, content_similarity
+from elysia.memory.similarity import query_coverage, same_event
+from elysia.memory.supersede import bigrams
 
 # 表达一次最多注入多少条记忆（防止 LLM 提示过长/分心）
 MAX_HOOKS = 3
@@ -136,11 +137,12 @@ _PROBE_MARKERS = (
 
 
 def topic_match(query: str, content: str) -> float:
-    """query 的话题被 content 覆盖的比例（0-1），用于相关记忆的排序。"""
-    q = bigrams(query)
-    if not q:
-        return 0.0
-    return round(len(q & bigrams(content)) / len(q), 3)
+    """query 的话题被 content 覆盖的比例（0-1），用于相关记忆的排序。
+
+    算式落在 `similarity.query_coverage`（第十五节 A1 的单一入口）——
+    这里只保留"话题相关性"这一语义位置。
+    """
+    return query_coverage(query, content)
 
 
 def _is_probe(query: str) -> bool:
@@ -383,22 +385,24 @@ def select_hooks(
     return _dedupe(hits, max_hooks)
 
 
-# 批内去重（P3-S）：同一次对话的碎片措辞高度重叠，不该占满 hooks 名额。
+# 批内去重（P3-S / 第十五节 A1）：同一次对话的碎片措辞高度重叠，不该占满 hooks 名额。
 # 阈值比"同话题取代"（0.4）略松——这里只要求"不像两件不同的事"，
 # 宁可少给一条重复的，也不要浪费一个名额。
+# A1 起判据升级为 `similarity.same_event`（Jaccard ∪ 覆盖 + 护栏）：
+# 此前只挡"近乎逐字重复"（本库一次未触发），现在也挡得住"共享关键片段的换说法"。
 HOOK_DUPLICATE_SIMILARITY = 0.35
 
 
 def _dedupe(hits: list[MemoryHit], max_hooks: int) -> list[MemoryHit]:
     """按分数降序保留彼此不重复的记忆——3 个 hook 应该是 3 件不同的事。
 
-    已被更高分者判为"同一件事"（字符二元组 Jaccard ≥ HOOK_DUPLICATE_SIMILARITY）
+    已被更高分者判为"同一件事"（`same_event`，兼容阈值即 `HOOK_DUPLICATE_SIMILARITY`）
     的条目被跳过；因后续条目分数只会更低，凑满 max_hooks 即可提前收工。
     """
     kept: list[MemoryHit] = []
     for hit in hits:
         if any(
-            content_similarity(hit.narrative, k.narrative) >= HOOK_DUPLICATE_SIMILARITY
+            same_event(hit.narrative, k.narrative, jaccard_threshold=HOOK_DUPLICATE_SIMILARITY)
             for k in kept
         ):
             continue

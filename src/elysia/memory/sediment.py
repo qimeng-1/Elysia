@@ -18,9 +18,10 @@
 并非她所述）"，候选恰是它。故改标 `SOURCE_INFERENCE` + `CERTAINTY_PROBABLE`：
 语义准确，且真的被来源闸门挡在话语之外，只在感受路径上推一次脉冲。
 
-**粒度天花板（照实说）**：判定"同一件事"用的是字符二元组 Jaccard，对"换说法
-的同一事实"识别力本就有限（第七节实测同义重述仅 0.26~0.33）。因此本模块目前
-只能沉淀"**措辞相近**的反复提起"，真正的语义模式要等 embedding
+**粒度天花板（照实说）**：判定"同一件事"走 `similarity.same_event`（第十五节 A1：
+字符二元组 Jaccard ∪ 非对称覆盖 + 碎片护栏）。它比单用 Jaccard 强一档——
+"共享关键片段的换说法"捞得回（本库实测：「那我的生日呢」↔「…我的生日是5月21日，要记好哦」）；
+但**完全无字符重叠的同一事实**（真正的语义等价）仍识别不了，那要等 embedding
 （`P3_MEMORY.md` 第九节问题 3）。
 """
 
@@ -38,11 +39,15 @@ from elysia.memory.levels import (
     SOURCE_INFERENCE,
     MemoryRecord,
 )
-from elysia.memory.supersede import content_similarity
+from elysia.memory.similarity import same_event
 
 # "同一件事"的判定粒度：与 P3-S 的批内去重（`retrieve.HOOK_DUPLICATE_SIMILARITY`）、
-# `supersede.SUPERSEDE_SIMILARITY` 同属字符二元组 Jaccard 一系。0.35 的门槛意味着
-# "措辞相近"，不是"语义相同"——下限与局限都在第九节问题 3 记着。
+# `supersede.SUPERSEDE_SIMILARITY` 同属一系（字符二元组），但**第十五节 A1 起判据升级**：
+# 走 `similarity.same_event`（对称 Jaccard ∪ 非对称覆盖 + 两道护栏），
+# 因此本常量现在的语义是"same_event 的**兼容阈值**"（保住逐字/近似重复那一档）。
+# 天花板照实说：只能沉淀"**共享关键片段**的反复提起"（如「那我的生日呢」↔
+# 「…我的生日是5月21日，要记好哦」）；真正的语义模式要等 embedding
+# （`P3_MEMORY.md` 第九节问题 3）。
 SEDIMENT_CLUSTER_SIMILARITY = 0.35
 
 # 被提起至少 3 次，才算"反复"（两次可能只是巧合或重复写入）
@@ -139,7 +144,9 @@ def find_candidate(records: list[MemoryRecord]) -> PatternSignal | None:
     clusters: list[list[MemoryRecord]] = []
     for rec in sorted(experiences, key=lambda item: item.created_ts):
         for cluster in clusters:
-            if content_similarity(_text(cluster[0]), _text(rec)) >= SEDIMENT_CLUSTER_SIMILARITY:
+            if same_event(
+                _text(cluster[0]), _text(rec), jaccard_threshold=SEDIMENT_CLUSTER_SIMILARITY
+            ):
                 cluster.append(rec)
                 break
         else:
@@ -154,7 +161,9 @@ def find_candidate(records: list[MemoryRecord]) -> PatternSignal | None:
             continue
         representative = cluster[0]
         if any(
-            content_similarity(_text(representative), _text(t)) >= SEDIMENT_CLUSTER_SIMILARITY
+            same_event(
+                _text(representative), _text(t), jaccard_threshold=SEDIMENT_CLUSTER_SIMILARITY
+            )
             for t in taken
         ):
             continue  # 这件事已经递过候选，或她已认领

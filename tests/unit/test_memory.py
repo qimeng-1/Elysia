@@ -35,7 +35,7 @@ from elysia.memory.levels import (
     default_source,
     level_rank,
 )
-from elysia.memory.scorer import content_salience, emotion_strength, importance, record_importance
+from elysia.memory.scorer import content_salience, emotion_strength, importance
 
 
 # ── 重要性打分 ──────────────────────────────────────────
@@ -61,11 +61,6 @@ def test_importance_emotion_and_user_bonus() -> None:
     user = importance(kind=KIND_INTERACTION, emotion_vector={"miss": 0.5}, user_related=True)
     assert emotional > neutral
     assert user > emotional  # 用户相关额外加成
-
-
-def test_record_importance_from_record() -> None:
-    rec = MemoryRecord(created_ts=1.0, kind=KIND_INTERACTION, content="", emotion_vector={})
-    assert record_importance(rec) == importance(kind=KIND_INTERACTION, emotion_vector={})
 
 
 # ── 内容信号（P3-N：闲聊与事实必须分开）─────────────────

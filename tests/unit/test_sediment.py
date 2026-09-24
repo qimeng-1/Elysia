@@ -124,6 +124,21 @@ def test_returns_the_strongest_pattern_only() -> None:
     assert pattern.text == _TEXT
 
 
+def test_pattern_clusters_reworded_same_thing() -> None:
+    """换说法的同一件事也算反复提起（第十五节 A1）：Jaccard 判不出的，覆盖通路要归成一簇。"""
+    records = [
+        _rec(1, "那我的生日呢"),
+        _rec(2, "那我在告诉你哦，我的生日是5月21日，要记好哦", days=1.5),
+        _rec(3, "那我的生日你也记好哦，是5月21日", days=3.0),
+    ]
+    pattern = find_candidate(records)
+    assert pattern is not None
+    assert pattern.occurrences == 3
+    # 代表照旧 = 最早那条（程序只发现模式，不替她改写正文）
+    assert pattern.record.id == 1
+    assert pattern.text == "那我的生日呢"
+
+
 def test_intensity_is_capped() -> None:
     """脉冲是"轻微的心里一动"：封顶，连续多轮不把 TR/CS 顶满。"""
     base = PatternSignal(record=_rec(1), occurrences=3, span_days=1.0)

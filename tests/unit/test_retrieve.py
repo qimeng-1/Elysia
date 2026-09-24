@@ -279,6 +279,28 @@ def test_select_hooks_dedupe_keeps_distinct_memories() -> None:
     assert [h.memory_id for h in hooks] == [1, 2, 3]
 
 
+def test_select_hooks_dedupes_reworded_same_event() -> None:
+    """换说法的同一件事也算同一件事（第十五节 A1）：Jaccard 判不出的，覆盖通路要捞回来。"""
+    long_form = _rec(
+        mid=1,
+        level=LEVEL_DEEP,
+        importance=0.9,
+        content="那我在告诉你哦，我的生日是5月21日，要记好哦",
+        narrative="那我在告诉你哦，我的生日是5月21日，要记好哦",
+    )
+    short_form = _rec(
+        mid=2,
+        level=LEVEL_SHALLOW,
+        importance=0.4,
+        content="那我的生日呢",
+        narrative="那我的生日呢",
+    )
+    other = _rec(mid=3, level=LEVEL_WORKING, content="你喜欢看晚霞", narrative="你喜欢看晚霞")
+    hooks = select_hooks([long_form, short_form, other], {"chat": 0.5})
+    # 碎片式重述被并入代表（保留分数更高的那条），名额让给"另一件事"
+    assert [h.memory_id for h in hooks] == [1, 3]
+
+
 # ── 时间锚点（她能分辨新旧、说得出"你上个月告诉我的"）──────
 def test_age_phrase_buckets() -> None:
     """相对时间分档：刚刚 / 今天 / 昨天 / N天前 / 上个月 / N个月前 / 去年 / N年前。"""

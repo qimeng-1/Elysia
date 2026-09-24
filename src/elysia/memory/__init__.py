@@ -8,6 +8,7 @@
 - decay.py:  索引衰减（P3-C）
 - retrieve.py:检索 + memory_hooks 注入（P3-D）
 - sleep.py:  睡眠整合 = 做梦（P3-E）
+- similarity.py:同话题 / "同一件事"判定的单一入口（P3 §15 A1）
 
 当前进度：P3-A（levels + scorer + store 落库）已就绪。
 """
@@ -82,7 +83,8 @@ from elysia.memory.retrieve import (
     select_hooks,
     topic_match,
 )
-from elysia.memory.scorer import emotion_strength, importance, record_importance
+from elysia.memory.scorer import emotion_strength, importance
+from elysia.memory.similarity import coverage, same_event
 from elysia.memory.sleep import (
     DREAM_MAX_FRAGMENTS as DREAM_MAX_FRAGMENTS,
 )
@@ -136,6 +138,7 @@ __all__ = [
     "Promotion",
     "age_phrase",
     "can_reach_deep",
+    "coverage",
     "decay_strength",
     "decide_promotion",
     "default_narrative",
@@ -148,9 +151,9 @@ __all__ = [
     "mood_similarity",
     "promote_batch",
     "recall_for_feeling",
-    "record_importance",
     "retrieve_from_store",
     "retrieve_latency_ms",
+    "same_event",
     "score_memory",
     "select_hooks",
     "synthesize_dream",

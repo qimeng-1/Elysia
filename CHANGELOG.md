@@ -496,6 +496,24 @@
 
 ---
 
+### 第十五节 A1/A0：同话题判据统一（"换说法的同一件事"捞回来，2026-09-24）
+- **触发**：主线收口——P3-S 批内去重落地后**本库实测一次未触发**（阈值 0.35 下 top3 仍是三条生日记忆），"成组/语义召回"（`P3_MEMORY.md` 第九节问题 3）是打磨期最后一项。先出**设计稿**（`P3_MEMORY_WORKLOG.md` 第十五节）交用户评审，五个拍板点全部按"推荐"列执行：D-A1 **A 案零依赖** / D-A2 **`supersede` 不参与** / D-A3 **A2 先不做** / D-A4 **`record_importance` 同批删** / D-A5 **不引入 embedding**。**全程未代为重启灵魂**
+- **设计期只读探针（跑完即删）**：本库 327 条上对照两种口径——对称 Jaccard 在 0.35 处命中 58 对，**非对称覆盖在 0.35 处爆炸到 259 对**（单用必然误并）；但"**覆盖 ≥0.7 且 Jaccard <0.35**"的夹缝里**只有 12 对**，正是 Jaccard 漏掉、覆盖能捞回的那一类。人工判读 12 对分两类：**α 真同一件事**（换说法/共享关键片段，如「那我的生日呢」↔「那我在告诉你哦，我的生日是5月21日，要记好哦」cov 0.80/jac 0.19）与 **β 退化碎片**（「不对哦」⊂ 长句，覆盖**恒 1.0**）⇒ 覆盖通路**必须配护栏**
+- **feat（memory/similarity.py 新建）**："同一件事"判定的**单一入口**——`coverage`（非对称覆盖，Szymkiewicz–Simpson）/ `query_coverage`（固定按 query 归一）/ `same_event(a, b, *, jaccard_threshold, ...)`（**三通路**：对称 Jaccard ≥ 阈值 ∪ 覆盖 ≥0.7，且绝对重合二元组 ≥`MIN_SHARED_BIGRAMS=3` 且短方二元组 ≥`MIN_SHORTER_BIGRAMS=5`）；`_overlap` 为覆盖口径**唯一算式来源**。零依赖、纯本地启发式、确定性可测（与 `scorer.py` 同一自律）
+- **两处落地取舍（未写进设计稿，落地时定）**：① 护栏用"**二元组数**"而非"归一后字符长度"——`_normalize` 是 `supersede` 的私有函数，为不触碰它、也不造成口径分叉，`MIN_SHORTER_BIGRAMS=5` 由已有的 `bigrams` 集合直接推导（≈归一后 6 字；实样本核过不误杀 α 类）；② **`retrieve.is_related` 未迁移**（相对设计稿 15.8 的一处偏离）——它是"**绝对重合条数**门槛"（既非 Jaccard 也非覆盖，与 A1 不同宗），且须复用同一份 query 二元组以免重复计算；粒度来源本就是 `supersede.bigrams`，**不存在分叉** ⇒ 保留原样，行为零变化
+- **feat（memory/retrieve.py）**：`topic_match` 改调 `query_coverage`；`_dedupe` 判据由 `content_similarity ≥0.35` 升级为 `same_event(..., jaccard_threshold=HOOK_DUPLICATE_SIMILARITY)`；**阈值 0.35 保留**（A1 只统一**实现**，不统一**阈值**）
+- **feat（memory/sediment.py）**：两处聚类判定（簇归并 / "已递过"）改用 `same_event`；`SEDIMENT_CLUSTER_SIMILARITY` 语义改为"same_event 的**兼容阈值**"；模块 docstring 的天花板段同步
+- **memory/supersede.py 有意不动**（D-A2）：仍是对称 Jaccard 0.4，也是 `bigrams` / `content_similarity` 的唯一来源——**误判代价不对称**：`_dedupe`/`sediment` 误判只是"少给一条内容"，`supersede` 误判会**作废一条真实事实**
+- **步 A0（零调用遗留清理，D-A4）**：删 `scorer.record_importance`（连同仅它使用的 `MemoryRecord` 导入）、`memory/__init__.py` 的导出、`test_memory.py` 的导入与该用例
+- **真实库前后对照（只读探针，跑完即删；330 条 / 经历类 63 条）**：配对层 `Jaccard ≥0.35` 命中 **23 对** → `same_event` **33 对**，**新增 10 对逐对人工判读全为 α 类**（生日问答/叮嘱的同话题重述），**无一例 β 碎片、无一例不同事实**；hooks top3 在"我的生日是哪天""你还记得我的生日吗""生日"三问下**改前改后完全相同**（`[105, 81, 73]`）——A1 捞回的多是**低分重述**，够不着 3 个名额；放开名额上限可见 `#46→#81`、`#32→#50` 被正确并入 ⇒ **照实说**：A1 在本库的收益是"该合并的确实合并了"（含**沉淀候选以前根本不会产生**），而非改变 hooks 排位
+- **测试**：新增 `tests/unit/test_similarity.py` 22 项（V1 六对真实正文样本判同 **+ 逐对反证** / V2 不同事实不合并 / V3 β 碎片护栏 **+ 反证**"把护栏放开立刻判同" / 逐字重复通路不退化 / 空文本边界 / `query_coverage` 方向性）；`test_retrieve.py` 新增 `test_select_hooks_dedupes_reworded_same_event`；`test_sediment.py` 新增 `test_pattern_clusters_reworded_same_thing`（该用例**改前必然不成立**）；`test_memory.py` 删 1 项
+- 门禁：ruff lint ✅ / ruff format ✅（85 文件）/ mypy strict ✅（52 源文件）/ pytest ✅ **369 passed**（346 + 23）
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）。**本次不代为重启**，由用户自行决定时机
+- **仍待拍板（D-A6）**：`_tool_adopt` 另有两处同宗判据未迁移——M9"候选当代表"（误判=少一条竞争者，**建议随 A1 升级**）、M10"改口时作废既有的同一件事自我认知"（误判=**作废她认领过的条目**，**建议保持保守口径**）；本步未动，因 `expression_service.py` **不在已评审的设计稿文件清单内**，且 M10 属敏感路径
+- **A2（成组召回）未做**（D-A3）：等本次前后对照复盘后再定；**embedding 记为"按需启动"**，触发条件 = 真实对话里出现 A 案捞不回、又被注意到的"换说法"实例
+
+---
+
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）
 
 > 决定：不再推进新阶段（P4），转入**对 P0-P3 已交付内容的深入完善**。这是收口期——把已实现的能力打磨到真实可用、可感知、稳定。

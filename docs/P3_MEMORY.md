@@ -3,7 +3,7 @@
 > **用途**：本文件是记忆系统的**唯一主文档**——先讲清"她在做什么"（第零节，不需要懂术语），
 > 再给出系统事实（数据流 / 文件 / 规则 / 验收 / 待评审问题）。
 > 多方问询（外部 AI / 同行评审）直接投喂本文件，保证每一轮看到的是**同一版事实**。
-> **快照日期**：2026-09-24（P3-P / Q / R / S / T / U / V / W1 / W2 之后，**第八节 Self Memory S1 本体 + S2 认领 + S3 沉淀**落地）
+> **快照日期**：2026-09-24（P3-P / Q / R / S / T / U / V / W1 / W2 之后，**第八节 Self Memory S1~S7 收尾**与**§15 A1 判据统一**落地）
 > **维护约定**：代码有实质变化时更新本文件并改快照日期。外部结论**不写进本文件**，
 > 另存 `docs/MEMORY_REVIEW_NOTES.md`（见第十节）。
 
@@ -126,14 +126,15 @@ claim_status / retention_state`
 
 | 文件 | 职责 | 关键符号 | 在役？ |
 |---|---|---|---|
-| `scorer.py` | 重要性按内容评估（纯本地启发式，离线可用） | `content_salience`、`importance`、`emotion_strength`、`record_importance` | ✅ |
+| `scorer.py` | 重要性按内容评估（纯本地启发式，离线可用） | `content_salience`、`importance`、`emotion_strength` | ✅ |
 | `promote.py` | 层级晋升与细节模糊化 | `decide_promotion`、`promote_batch`、`with_narrative`、`can_reach_deep` | ✅ |
 | `decay.py` | 索引强度按年龄指数衰减 | `decay_strength`、`STRENGTH_RETRIEVE_FLOOR`、`retrieve_latency_ms` | 部分 |
 | `supersede.py` | 记忆修正 / 覆盖（旧事实作废） | `bigrams`、`content_similarity`（字符二元组 Jaccard）、`find_superseded`（阈值 0.4） | ✅ |
-| `retrieve.py` | 检索 + 情绪染色 + 两种路径 | `mood_similarity`(余弦)、`topic_match` / `is_related`(严/宽双门槛)、`age_phrase`、`score_breakdown` / `score_memory`、`_recency_factor`、`_review_factor`、`select_hooks`（含保留闸门）、`_dedupe`、`retrieve_from_store`（唤醒落 `present`）、`recall_for_feeling`、`MemoryHit.woke_from` | ✅ |
+| `similarity.py` | 同话题 / "同一件事"判定的**单一入口**（第十五节 A1） | `coverage`（非对称覆盖）、`query_coverage`（按 query 归一）、`same_event`（Jaccard ∪ 覆盖 + 碎片护栏）、`COVERAGE_THRESHOLD=0.7` / `MIN_SHARED_BIGRAMS=3` / `MIN_SHORTER_BIGRAMS=5` | ✅ |
+| `retrieve.py` | 检索 + 情绪染色 + 两种路径 | `mood_similarity`(余弦)、`topic_match`(→ `query_coverage`) / `is_related`(严/宽双门槛)、`age_phrase`、`score_breakdown` / `score_memory`、`_recency_factor`、`_review_factor`、`select_hooks`（含保留闸门）、`_dedupe`(→ `same_event`)、`retrieve_from_store`（唤醒落 `present`）、`recall_for_feeling`、`MemoryHit.woke_from` | ✅ |
 | `sleep.py` | 睡眠整合＝做梦（P3-E 设计） | `Dream`、`synthesize_dream` | ❌ 未插电 |
 | `hooks.py` | 记忆缺口信号（"想不起来"的物理体现） | `GapSignal`、`detect_gap` | ✅ |
-| `sediment.py` | 自我认知的沉淀（第八节 S3）：找"重复模式"生成候选 | `find_candidate`、`PatternSignal`、`_is_experience` / `_is_taken`、`SEDIMENT_*` | ✅ |
+| `sediment.py` | 自我认知的沉淀（第八节 S3）：找"重复模式"生成候选；**A1 起聚类走 `similarity.same_event`** | `find_candidate`、`PatternSignal`、`_is_experience` / `_is_taken`、`SEDIMENT_*` | ✅ |
 
 **C. 运行时接线**
 
@@ -151,7 +152,7 @@ claim_status / retention_state`
 | 文件 | 职责 |
 |---|---|
 | `src/elysia/tools/memory_view.py` | PySide6 只读记忆浏览器（观测：存储 / 打分 / 召回 / 沉淀 / **看身份**）；3s 自动刷新；被召回记忆高亮；**S4 增「标签」列与「候选（待她认领）」筛选项**（自我 = 她已认领、进身份段每句在场；候选 = 程序递给她待认领、不进话语）；**S5/S7 增第三档「出生设定」**（程序幂等种入的过渡打底）与状态栏「身份段 x/5」） |
-| `tests/unit/test_memory.py`、`test_retrieve.py`、`test_promote.py`、`test_decay.py`、`test_sleep.py`、`test_memory_view.py`、`test_identity.py`、`test_sediment.py`、`test_expression_service_memory.py` | 记忆系统单测 |
+| `tests/unit/test_memory.py`、`test_retrieve.py`、`test_promote.py`、`test_decay.py`、`test_sleep.py`、`test_memory_view.py`、`test_identity.py`、`test_sediment.py`、`test_similarity.py`、`test_expression_service_memory.py` | 记忆系统单测 |
 | `tests/acceptance/test_p3_gate.py` | P3 阶段门禁 |
 
 ## 五、完整规则（一张表）
@@ -173,7 +174,8 @@ claim_status / retention_state`
 | **时间锚点（P3-Q）** | 注入形如 `（3天前）你生日是5月21日`；分档 刚刚 / 今天 / 昨天 / N天前 / 上个月 / N个月前 / 去年 / N年前；无 `now` 则不提时间 |
 | **复习加成（P3-R）** | `0.06 × log(1+access) × e^(−距上次想起/14天)`，封顶 `0.3`；**不落库**（不污染 importance） |
 | **复习** | 命中 → `touch_memory`（access_count+1、更新 last_access_ts）→ 驱动"浅层→工作"晋升 |
-| **批内去重（P3-S）** | 排序后 Jaccard ≥0.35 视为"同一件事"，只留最高分一条 |
+| **批内去重（P3-S / §15 A1）** | 排序后按 `similarity.same_event` 判"同一件事"，只留最高分一条（兼容阈值 Jaccard ≥0.35） |
+| **同话题判据（§15 A1）** | "同一件事"= `similarity.same_event`（**对称 Jaccard ≥ 传入阈值** ∪ **非对称覆盖 ≥0.7** 且 绝对重合二元组 ≥3 且 短方二元组 ≥5）——覆盖通路专捞"共享关键片段的换说法"，两道护栏专挡"碎片被完全包含"；三处消费（`_dedupe` / `sediment` / 未来 `adopt`）**共用实现、各自阈值**；`supersede` **不参与**（仍对称 Jaccard 0.4：作废一条真实事实不可容忍） |
 | **话题门槛** | 程序推：二元组重合 ≥2（追问措辞下 ≥1）｜她自己 recall：重合 ≥1 |
 | **回声排除** | 检索排除 `KIND_EXPRESSION`（不复述自己刚说的） |
 | **来源闸门（P3-T）** | 检索排除 `source ∈ {inference, system}` 与 `certainty = speculative`——程序推断/系统注入不得升格成"她的事实"；**感受路径不受此限** |
@@ -197,7 +199,6 @@ claim_status / retention_state`
 |---|---|---|
 | `sleep.py::synthesize_dream` | 睡眠期把碎片合成"梦" | 运行时零调用，仅单测覆盖 |
 | `decay.py::retrieve_latency_ms` | "记忆越旧越难想起"的物理体现（检索延迟） | 无运行时调用 |
-| `scorer.py::record_importance` | 重算单条记录的重要性 | 无运行时调用（疑似遗留，待删） |
 | `levels.py::detail_level` | 细节模糊化的载体 | 数值在写，但**检索路径零消费** |
 
 ## 七、规模与实测事实（供评审判断复杂度）
@@ -209,7 +210,7 @@ claim_status / retention_state`
 | 情绪维度 | 6 维：`miss / chat / curiosity / explore / rest / self_check`，染色只看前 4 维 |
 | 用户数 | 1（单机桌宠，用户＝开发者＝持有 DB 文件与源码） |
 | 依赖 | 离线优先；仅主声 LLM 联网（DeepSeek），TTS 为独立本地服务（端口 9880） |
-| 实测天花板 | 字符二元组 Jaccard 对"**换说法的同一事实**"识别力有限：同义重述相似度仅 **0.26~0.33**，低于任何可用阈值（调低即开始误杀"共享措辞但不同的事件"）。此局限同时影响 `supersede` 与批内去重 |
+| 实测天花板 | 字符二元组**对称 Jaccard** 对"**换说法的同一事实**"识别力有限：同义重述相似度仅 **0.26~0.33**，低于任何可用阈值（调低即开始误杀"共享措辞但不同的事件"）。**§15 A1 起已换口径补一条非对称覆盖通路**（本库实测配对命中 23 → 33 对，新增 10 对全为真"同一件事"），天花板抬到"**共享关键片段**"这一层；**无字符重叠的纯语义等价**仍识别不了（`supersede` 有意保持最保守的 Jaccard 0.4） |
 
 ## 八、验收矩阵（路线图 §8.7）
 
@@ -234,8 +235,15 @@ claim_status / retention_state`
    **默认 `claimed`（可用）**，`rejected` 只能由她的动作（`disclaim`）产生。
    待评审：拒绝认领之后，那条记忆在她眼里算什么？（"主动遗忘 / 失去访问权 /
    忘了但仍有影响"归 `retention_state`，见 `P3_MEMORY_WORKLOG.md` 第七节）
-3. **语义粒度的天花板**：是否引入 embedding？在"离线优先 + 单用户 260 条"约束下，
-   一次投入可同时修 批内去重 / `supersede` 判同话题 / 成组召回 三处。代价与收益是否划算？
+3. **语义粒度的天花板**（**第一层已落地 §15 A1，2026-09-24**；见 `P3_MEMORY_WORKLOG.md` 第十五/十六节）：
+   引入 embedding？**尚未**。已按"零依赖先抬天花板"落地 A1——新增 `memory/similarity.py`
+   作为"同一件事"判定的**单一入口**（对称 Jaccard ∪ **非对称覆盖 0.7** + 两道碎片护栏），
+   `_dedupe` / `sediment` 改用它（`supersede` 有意保持 Jaccard 0.4：误判代价不对称）。
+   本库前后对照：配对命中 23 → **33 对**，新增 10 对**全为真"同一件事"**；但 hooks top3 **未变**
+   （A1 捞回的多是低分重述，够不着 3 个名额）⇒ 真实收益是"沉淀候选更容易出现"。
+   **embedding 记为"按需启动"**：触发条件 = A 案落地后真实对话里出现 A 案捞不回、
+   又被她/用户注意到的"换说法"实例（本库当前**无纯语义样本可作验收靶子**）。
+   **仍待拍板**：`adopt` 路径另有两处同宗判据未迁移（M9 建议迁、M10 建议不迁）。
 4. **未插电模块的取舍**：`sleep.py`（做梦）是**接线**还是**删除**？
    若接线，接到哪一拍、推什么脉冲？
 5. **层数是否够**：当前 3 层（shallow/working/deep）+ 2 张表。

@@ -508,6 +508,7 @@
 - **真实库前后对照（只读探针，跑完即删；330 条 / 经历类 63 条）**：配对层 `Jaccard ≥0.35` 命中 **23 对** → `same_event` **33 对**，**新增 10 对逐对人工判读全为 α 类**（生日问答/叮嘱的同话题重述），**无一例 β 碎片、无一例不同事实**；hooks top3 在"我的生日是哪天""你还记得我的生日吗""生日"三问下**改前改后完全相同**（`[105, 81, 73]`）——A1 捞回的多是**低分重述**，够不着 3 个名额；放开名额上限可见 `#46→#81`、`#32→#50` 被正确并入 ⇒ **照实说**：A1 在本库的收益是"该合并的确实合并了"（含**沉淀候选以前根本不会产生**），而非改变 hooks 排位
 - **测试**：新增 `tests/unit/test_similarity.py` 22 项（V1 六对真实正文样本判同 **+ 逐对反证** / V2 不同事实不合并 / V3 β 碎片护栏 **+ 反证**"把护栏放开立刻判同" / 逐字重复通路不退化 / 空文本边界 / `query_coverage` 方向性）；`test_retrieve.py` 新增 `test_select_hooks_dedupes_reworded_same_event`；`test_sediment.py` 新增 `test_pattern_clusters_reworded_same_thing`（该用例**改前必然不成立**）；`test_memory.py` 删 1 项
 - 门禁：ruff lint ✅ / ruff format ✅（85 文件）/ mypy strict ✅（52 源文件）/ pytest ✅ **369 passed**（346 + 23）
+- **提交**：`6322f5a`（12 文件 / +589 −46），已推送（`af0a928..6322f5a`）；pre-commit 四件套（ruff lint / ruff format check / mypy strict / pytest regression）全部 Passed
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）。**本次不代为重启**，由用户自行决定时机
 - **仍待拍板（D-A6）**：`_tool_adopt` 另有两处同宗判据未迁移——M9"候选当代表"（误判=少一条竞争者，**建议随 A1 升级**）、M10"改口时作废既有的同一件事自我认知"（误判=**作废她认领过的条目**，**建议保持保守口径**）；本步未动，因 `expression_service.py` **不在已评审的设计稿文件清单内**，且 M10 属敏感路径
 - **A2（成组召回）未做**（D-A3）：等本次前后对照复盘后再定；**embedding 记为"按需启动"**，触发条件 = 真实对话里出现 A 案捞不回、又被注意到的"换说法"实例

@@ -1459,7 +1459,7 @@ if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:   # 替换不计入新
   （S7 的 346 → +23：新增 `test_similarity.py` 22 项 + 去重/沉淀各 1 项 − 删 `record_importance` 1 项）。
 - 文档四处同步：本节 + `docs/P3_MEMORY.md`（第五节文件地图 / 第九节问题 3）+ `CHANGELOG.md` + `项目元信息/开发日志.md`（仓库外）。
 - `verify_integrity.py --generate` → `--check`：全一致。
-- **提交**：（见 16.8 补记）；已推送 origin main。
+- **提交**：`6322f5a`（12 文件 / +589 −46），已推送（`af0a928..6322f5a`）；pre-commit 四件套全部 Passed。
 - **未代为重启灵魂**。
 
 ### 16.7 下一步 + 交接要点

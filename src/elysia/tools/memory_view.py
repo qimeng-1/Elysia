@@ -1,10 +1,12 @@
 """记忆浏览器（P3 观测工具）：只读可视化 heartbeat.db 中的记忆。
 
-记忆打磨期的观测抓手，回答四个问题：
+记忆打磨期的观测抓手，回答这些问题：
 - 看存储：库里有哪些记忆、层级分布、是否已被更正取代
 - 看打分：每条记忆"当下"的得分构成（层级 / 情绪 / 索引 / 新鲜度 / 复习）
 - 看召回：此刻她会想起哪 3 条（复现表达管线的 select_hooks 逻辑）
 - 看沉淀：层级、细节度、索引强度（晋升与衰减的结果）
+- 看身份（第八节 S4）：**自我**（她已认领，进身份段）与**候选**（程序递给她待认领）——
+  三级闸门的①候选与②自我在库里一眼可分；筛选下拉可只看候选
 
 只读：仅执行 SELECT，可与运行中的灵魂并存（SQLite WAL 支持并发读）。
 
@@ -40,7 +42,12 @@ from PySide6.QtWidgets import (
 )
 
 from elysia.core.config import get_settings
-from elysia.memory.levels import CLAIM_REJECTED, MemoryRecord
+from elysia.memory.levels import (
+    CLAIM_REJECTED,
+    KIND_SELF,
+    SOURCE_INFERENCE,
+    MemoryRecord,
+)
 from elysia.memory.retrieve import score_breakdown, select_hooks
 
 AUTO_REFRESH_MS = 3000
@@ -71,6 +78,14 @@ RETENTION_LABELS = {
     "dormant": "沉睡",
     "faded": "淡化",
 }
+# 第八节 S4 标签列：身份段的**两端**一眼可见
+# - 自我 = 她已认领（`kind=self`）→ 进身份段，每句在场
+# - 候选 = 程序递给她待认领（`source=inference`，与 S3 `sediment._is_taken` 同源判据）
+# 候选是"程序推断"、被来源闸门挡在话语外；认领后升格为自我（`mark_as_self` 会改写 source）。
+TAG_SELF = "自我"
+TAG_CANDIDATE = "候选"
+# 类型筛选里"只看候选"的合成值（候选不是一种 kind，是 source 维度，故单独一条）
+CANDIDATE_FILTER = "__candidate__"
 LEVEL_COLORS = {
     "deep": QColor("#dbeafe"),
     "working": QColor("#e8f5e9"),
@@ -83,6 +98,7 @@ COLUMNS = [
     "id",
     "层级",
     "类型",
+    "标签",
     "年龄",
     "重要",
     "访问",
@@ -201,6 +217,18 @@ def _state_text(rec: MemoryRecord) -> str:
     return RETENTION_LABELS.get(rec.retention_state, rec.retention_state)
 
 
+def _is_candidate(rec: MemoryRecord) -> bool:
+    """这条是不是"程序递给她、等她认领"的候选（S3 判据，与 `sediment._is_taken` 同源）。"""
+    return rec.kind != KIND_SELF and rec.source == SOURCE_INFERENCE
+
+
+def _tag_text(rec: MemoryRecord) -> str:
+    """标签列：自我（她已认领）/ 候选（待她认领）/ 空（寻常经历）。"""
+    if rec.kind == KIND_SELF:
+        return TAG_SELF
+    return TAG_CANDIDATE if _is_candidate(rec) else ""
+
+
 # ── 窗口 ───────────────────────────────────────────────
 class MemoryBrowser(QMainWindow):
     """记忆观测窗口：筛选 + 明细 + 当下召回预览，可选自动刷新。"""
@@ -221,6 +249,7 @@ class MemoryBrowser(QMainWindow):
         self._kind_combo.addItem("全部类型", None)
         for key, label in KIND_LABELS.items():
             self._kind_combo.addItem(label, key)
+        self._kind_combo.addItem(f"{TAG_CANDIDATE}（待她认领）", CANDIDATE_FILTER)
         self._hide_superseded = QCheckBox("隐藏已取代")
         self._search = QLineEdit()
         self._search.setPlaceholderText("搜索内容…")
@@ -304,7 +333,10 @@ class MemoryBrowser(QMainWindow):
         for rec in records:
             if level and rec.level != level:
                 continue
-            if kind and rec.kind != kind:
+            if kind == CANDIDATE_FILTER:
+                if not _is_candidate(rec):
+                    continue
+            elif kind and rec.kind != kind:
                 continue
             if hide_sup and rec.superseded_by is not None:
                 continue
@@ -340,6 +372,7 @@ class MemoryBrowser(QMainWindow):
                 LEVEL_LABELS.get(rec.level, rec.level),
                 f"{KIND_LABELS.get(rec.kind, rec.kind)}·"
                 f"{SOURCE_LABELS.get(rec.source, rec.source)}",
+                _tag_text(rec),
                 _fmt_age(rec.created_ts, now),
                 f"{rec.importance:.2f}",
                 str(rec.access_count),
@@ -368,13 +401,16 @@ class MemoryBrowser(QMainWindow):
         for rec in records:
             dist[rec.level] = dist.get(rec.level, 0) + 1
         superseded = sum(1 for rec in records if rec.superseded_by is not None)
+        self_count = sum(1 for rec in records if rec.kind == KIND_SELF)
+        candidate_count = sum(1 for rec in records if _is_candidate(rec))
         dist_txt = " / ".join(
             f"{LEVEL_LABELS.get(k, k)} {v}" for k, v in sorted(dist.items(), reverse=True)
         )
         mtime = _fmt_ts(db.stat().st_mtime) if db.exists() else "库不存在"
         self.statusBar().showMessage(
-            f"共 {len(records)} 条（{dist_txt}）｜已取代 {superseded}｜当前显示 {len(filtered)}"
-            f"｜库更新 {mtime}"
+            f"共 {len(records)} 条（{dist_txt}）｜{TAG_SELF} {self_count}"
+            f"｜{TAG_CANDIDATE} {candidate_count}｜已取代 {superseded}"
+            f"｜当前显示 {len(filtered)}｜库更新 {mtime}"
         )
 
     def _show_detail(self) -> None:
@@ -390,10 +426,18 @@ class MemoryBrowser(QMainWindow):
         strength = strengths.get(mid, 1.0)
         parts = score_breakdown(rec, mood, index_strength=strength, now=now)
         total = round(sum(parts.values()), 3)
+        tag = _tag_text(rec)
+        if tag == TAG_SELF:
+            tag_hint = f"{TAG_SELF}（她已认领，进身份段，每句在场）"
+        elif tag == TAG_CANDIDATE:
+            tag_hint = f"{TAG_CANDIDATE}（程序递给她待认领，不进话语）"
+        else:
+            tag_hint = "—"
 
         lines = [
             f"# {mid}  {LEVEL_LABELS.get(rec.level, rec.level)} / "
             f"{KIND_LABELS.get(rec.kind, rec.kind)}",
+            f"标签：{tag_hint}",
             f"状态：{_state_text(rec)}"
             + (f" ← 被 #{rec.superseded_by} 取代" if rec.superseded_by is not None else ""),
             f"来源：{SOURCE_LABELS.get(rec.source, rec.source)}"

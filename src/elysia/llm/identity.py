@@ -11,9 +11,19 @@
 **每句都在场**——因此它不走 hooks 段、不挤占 `MAX_HOOKS` 名额，否则重犯 P3-P 的老毛病。
 
 零变化铁律（S1）：没有任何认领记录时，身份段**逐字**等于改造前 prompt 的首句。
+
+**S4（N1 遗留的收口）**：身份段的取数入口 `identity_lines()` 是**后端无关**的公共函数，
+主声 / 次声 / 微声读的是同一份数据（都在表达指令的 `identity` 字段里）——
+"换后端不失"由此成立：这条通路不依赖任何后端的常量或实现。
+
+- **微声的口径（S4 拍板）**：**带着不说出**。微声是纯模板呓语，没有 prompt，
+  它不去"说出"身份（把身份句塞进呓语就是机械复述，重犯 P3-P）；它**带着**身份的方式是
+  结构性的——身份段随表达指令一起进 `expression_log`，断网时"她是谁"不随后端消失。
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 # 表达指令里承载身份段的字段名：由表达服务装配，后端拼进 **system** 段
 # （不随 user message 的 JSON 一起发出去，见 deepseek._messages）。
@@ -26,6 +36,17 @@ BOOTSTRAP_IDENTITY = (
 
 # 身份段条数上限（含出生设定）：8.9 验收 4——"我是谁"要少而稳，不能变成一张清单。
 MAX_IDENTITY_LINES = 5
+
+
+def identity_lines(value: Any) -> list[str]:
+    """从表达指令的 `identity` 字段取她认领的自我认知（缺失 / 非法 → 空）。
+
+    公共取数入口（S4）：任何一级后端（主声 / 将来的次声）都从这里取，
+    不必各自实现一遍——身份段是**她的数据**，不是某个后端的私有常量。
+    """
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if str(v).strip()]
 
 
 def compose_identity(self_lines: list[str] | None = None) -> str:

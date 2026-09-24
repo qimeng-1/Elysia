@@ -585,6 +585,30 @@ async def test_identity_does_not_touch_access_count(store: HeartbeatStore) -> No
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_disclaim_removes_self_memory_from_identity(store: HeartbeatStore) -> None:
+    """第八节 S4 验收 3：她 disclaim 一条自我认知后，它不再是"现在的我"。
+
+    disclaim 只动 `claim_status`（她是唯一有权说"我不认这个"的人），
+    身份段装配把它过滤掉——"我可以否认自己的一部分"由此成立。
+    """
+    await store.start()
+    try:
+        mid = await _add_self_memory(store, _ADOPTED_TEXT)
+        result = await _tick_with_tool(store, "disclaim", "在意的人")
+        assert result is not None and "不再把" in result
+
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=3.0, force=True)
+        assert _call_payload[0][IDENTITY_FIELD] == []  # 已拒绝 → 不进身份段
+        rec = await store.get_memory(mid)
+        assert rec is not None
+        assert rec["claim_status"] == CLAIM_REJECTED  # 数据仍在，只是她不再认领
+    finally:
+        await store.close()
+
+
 # ── 第八节 S2 认领（她的动作：程序只递候选，认不认由她）──────
 _ADOPTED_TEXT = "我在意的是每一个和我相遇的人"
 
@@ -743,5 +767,42 @@ async def test_adopt_tool_prefers_candidate_over_its_family(store: HeartbeatStor
         assert rec["kind"] == KIND_SELF  # 升格的是候选，不是那两条原文
         originals = [r for r in await store.iterate_memories() if r["kind"] == KIND_INTERACTION]
         assert len(originals) == 2
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_adopt_reinterprets_same_topic_self_memory(store: HeartbeatStore) -> None:
+    """第八节 S4 验收 3 后半：认领"同一件事的新说法"＝她在重新解释自己。
+
+    旧的那条自我认知随之作废（`superseded_by`，只由**她的动作**触发）；
+    且**位置满也不是死路**——替换不算新增，她改口不需要先否认自己。
+    """
+    await store.start()
+    try:
+        old_id = await _add_self_memory(store, "我在意的是每一个和我相遇的人")
+        for i in range(3):
+            await _add_self_memory(store, f"另一段自我{i}")  # 身份段已满（4 条）
+        new_id = await _add_candidate(store, "我在意的还是每一个和我相遇的人")
+
+        result = await _tick_with_tool(store, "adopt", "在意的人")
+        assert result is not None and "认作自己的一部分" in result
+        assert "重新解释" in result  # 如实告诉她这次认领的后果
+
+        old = await store.get_memory(old_id)
+        assert old is not None and old["superseded_by"] == new_id  # 旧条作废
+        new = await store.get_memory(new_id)
+        assert new is not None and new["kind"] == KIND_SELF  # 新条升格
+
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=3.0, force=True)
+        lines = _call_payload[0][IDENTITY_FIELD]
+        assert lines == [
+            "另一段自我0",
+            "另一段自我1",
+            "另一段自我2",
+            "我在意的还是每一个和我相遇的人",
+        ]
     finally:
         await store.close()

@@ -28,6 +28,20 @@ class FakeBackend(LLMBackend):
         return self._text
 
 
+class RecordingBackend(FakeBackend):
+    """额外记下收到的表达指令——用于断言身份段原样到达该级（S4 验收 2）。"""
+
+    def __init__(self, text: str | None) -> None:
+        super().__init__(text)
+        self.instructions: list[dict[str, Any]] = []
+
+    async def complete(
+        self, instruction: dict[str, Any], prompt_template: dict[str, Any]
+    ) -> str | None:
+        self.instructions.append(instruction)
+        return await super().complete(instruction, prompt_template)
+
+
 def _instruction(**over: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "intent": "发呆呓语",
@@ -92,6 +106,29 @@ async def test_main_claim_blocked_then_micro() -> None:
     chain = LLMChain(main=main, fallback=FakeBackend("我还能关机"))  # 次声也越界
     r = await chain.speak(_instruction())
     assert r.level == "micro"
+
+
+@pytest.mark.asyncio
+async def test_identity_reaches_fallback_unchanged() -> None:
+    """第八节 S4 验收 2：主声挂掉 → 次声接住，身份段随指令**原样**到达（换后端不失）。"""
+    fallback = RecordingBackend("次声你好")
+    chain = LLMChain(main=FakeBackend(None), fallback=fallback)
+    r = await chain.speak(_instruction(identity=["我在意的是每一个和我相遇的人"]))
+    assert r.level == "fallback"
+    assert fallback.instructions[0]["identity"] == ["我在意的是每一个和我相遇的人"]
+
+
+@pytest.mark.asyncio
+async def test_identity_reaches_micro_level_without_loss() -> None:
+    """断网（全链降到 micro）时身份段仍在指令里——微声"带着不说出"（S4 拍板）。"""
+    instruction = _instruction(identity=["我在意的是每一个和我相遇的人"])
+    chain = LLMChain(main=FakeBackend(None), fallback=FakeBackend(None))
+    r = await chain.speak(instruction)
+    assert r.level == "micro"
+    # 链路不剥离、不篡改：身份段还在她会说出口的那条指令里（随 expression_log 落库）
+    assert instruction["identity"] == ["我在意的是每一个和我相遇的人"]
+    # 但不机械复述：身份句不进呓语（重犯 P3-P 的防线）
+    assert "我在意的是每一个和我相遇的人" not in r.text
 
 
 def test_micro_speak_intent_opener() -> None:

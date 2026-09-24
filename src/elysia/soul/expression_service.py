@@ -266,16 +266,16 @@ class ExpressionService:
         )
         return outcome
 
-    async def _identity_lines(self) -> list[str]:
-        """她认领的自我认知（`kind=KIND_SELF`）——身份段的动态部分。
+    async def _self_records(self) -> list[tuple[int, str]]:
+        """她此刻的自我认知：`(id, 文本)`，按 `_identity_lines` 的同一套闸门筛。
 
         只读、**不 touch**：身份段每句都在场，把它当"被想起"会平白累积 access_count，
         而它不是"这次开口想起了什么"，是"我一直是谁"。
 
         已取代（她更新过自己）、她拒绝认领（disclaim）、她主动抑制（forget）的
-        都不算"现在的我"。条数上限由 `compose_identity` 兜住（少而稳，8.9 验收 4）。
+        都不算"现在的我"。
         """
-        lines: list[str] = []
+        out: list[tuple[int, str]] = []
         for d in await self._store.iterate_memories():
             rec = MemoryRecord.from_dict(d)
             if rec.kind != KIND_SELF or rec.superseded_by is not None:
@@ -283,9 +283,16 @@ class ExpressionService:
             if rec.claim_status == CLAIM_REJECTED or rec.retention_state == RETENTION_SUPPRESSED:
                 continue
             text = (rec.narrative or rec.content).strip()
-            if text:
-                lines.append(text)
-        return lines
+            if text and rec.id is not None:
+                out.append((rec.id, text))
+        return out
+
+    async def _identity_lines(self) -> list[str]:
+        """她认领的自我认知（`kind=KIND_SELF`）——身份段的动态部分。
+
+        条数上限由 `compose_identity` 兜住（少而稳，8.9 验收 4）。
+        """
+        return [text for _, text in await self._self_records()]
 
     def _make_tool_runner(
         self,
@@ -363,6 +370,10 @@ class ExpressionService:
 
         不给她**已经不认**或**已不想再想起**的记忆（那是她自己的决定，程序不代她翻案），
         也不给已被取代的旧事实与已是自我认知的条目。
+
+        **认领即可能改口（第八节 S4 验收 3）**：若她已有一条"同一件事"的自我认知，
+        这次认领让它作废（`superseded_by`）——"我以前以为…现在知道…"由此成立，
+        且这条路径只由**她的动作**打开（程序的自动取代 N4 永不碰自我认知）。
         """
         query = topic.strip()
         if not query:
@@ -402,11 +413,26 @@ class ExpressionService:
         runner_up = pool[1][0] if len(pool) > 1 else 0.0
         if best_score < ADOPT_DOMINANCE * runner_up:
             return "（你没找到想认作自己的那件事）"
+        # 认领可能等于"重新解释自己"（S4 验收 3）：若她已有一条**同一件事**的自我认知，
+        # 这次认领让它作废（走 `superseded_by`，8.7 已写"天然适用，无需新机制"）。
+        # 判据用 S3 的同一件事粒度（`SEDIMENT_CLUSTER_SIMILARITY`），且只由**她的动作**触发
+        # ——程序自己的自动取代（N4）永不碰 `KIND_SELF`。
+        existing = await self._self_records()
+        retired = [
+            mid
+            for mid, text in existing
+            if mid != best_id and content_similarity(text, best_text) >= SEDIMENT_CLUSTER_SIMILARITY
+        ]
         # 身份段是"少而稳"的（8.9 验收 4）：位置满了就如实告诉她，
         # 否则会出现"认领了却不出现在她的话里"的静默失败。
-        if len(await self._identity_lines()) >= MAX_IDENTITY_LINES - 1:
+        # 替换不算新增——她是在改口，不是又攒一条。
+        if len(existing) - len(retired) >= MAX_IDENTITY_LINES - 1:
             return "（你心里的位置满了——先放下一条旧的，再认领新的）"
         await self._store.mark_as_self(best_id)
+        for stale_id in retired:
+            await self._store.mark_superseded(stale_id, best_id)
+        if retired:
+            return f"（你把「{best_text[:30]}」认作自己的一部分了——这等于你重新解释了自己）"
         return f"（你把「{best_text[:30]}」认作自己的一部分了）"
 
     async def _tool_disclaim(self, topic: str) -> str:

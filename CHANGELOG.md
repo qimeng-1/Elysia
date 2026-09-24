@@ -467,6 +467,18 @@
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后她会多一种"心里一动"（某件事被反复提起），话里一个字不提。**S4 观测与验收待动工**
 - **粒度天花板（照实说）**：字符二元组 Jaccard 只能沉淀"措辞相近的反复提起"（同义重述仅 0.26~0.33），真语义模式待 embedding（`P3_MEMORY.md` 第九节问题 3）
 
+### 第八节 S4：Self Memory 观测与验收（2026-09-24，无 commit）
+- **触发**：第八节最后一步。用户明确"**先不重启，直接开始 S4**"——不改动运行中的灵魂，由用户自行决定装载时机。四项：① 浏览器标签 ② 8.9 四项验收 ③ 补降级链/微声（S1 的 N1 遗留）④ N6 拍板
+- **① 观测（tools/memory_view.py）**：新增 `TAG_SELF="自我"` / `TAG_CANDIDATE="候选"` + 纯函数 `_is_candidate`（`kind != KIND_SELF` 且 `source == SOURCE_INFERENCE`）/ `_tag_text`；表格在"类型"后插「标签」列；类型下拉增合成项「候选（待她认领）」（`CANDIDATE_FILTER="__candidate__"`，与真 `kind` 值不冲突）；状态栏加 `｜自我 N｜候选 N`；明细面板加"标签"一行（自我 →"她已认领，进身份段，每句在场"／候选 →"程序递给她待认领，不进话语"）；模块 docstring 增"看身份（第八节 S4）"一条
+- **③ 收口（llm/identity.py + deepseek.py + micro.py + chain.py）**：新增后端无关的公共取数入口 `identity_lines(value)`（缺失/非法 → 空列表，空白项过滤）——主声 / 未来次声 / 微声**同一口径**；`deepseek.py` 删私有 `_identity_lines` 改用公共入口；`micro.py` **零行为变化**，仅 docstring 记口径：微声不去"说出"身份（会机械复述、重犯 P3-P），"带着"身份的方式是结构性的——身份段在指令 `identity` 字段里、随指令进 `expression_log`
+- **④ N6 拍板（用户裁决）**：**要——接受**（允许她梦到自己是谁；权重表照第八节 8.12，不新增约束）
+- **验收 3 后半（真实发现，本轮唯一代码行为变化）**：`find_superseded` 豁免 `KIND_SELF`（N4）**且此前没有任何"她的动作"会写 `superseded_by`** ⇒ `P3_MEMORY.md` 4.2 表里"自我认知可被自己更新 → 天然适用"只是**写在表里、未接线**。用户拍板"**接线 `adopt` 覆盖**"：`_tool_adopt` 认领到"同一件事"（`content_similarity ≥ SEDIMENT_CLUSTER_SIMILARITY`）时，旧自我认知 `mark_superseded(old, new)`（＝改口）；容量判定改为"**替换不计入新增**"，使位置满时改口不再死路；回执在有旧条作废时补"这等于你重新解释了自己"；`ADOPT_TOOL` description 与 `chain.py` docstring 同步说明
+- **重构（soul/expression_service.py）**：`_identity_lines` 抽出 `_self_records()`（→ `list[tuple[int, str]]`，排除已取代/`rejected`/`suppressed`），装配与容量判定共用同一份取数
+- **② 四项验收（8.9，代码级闭环；验收 1 的真机体验待重启后由用户体验）**：① **重启连续性**——自我认知落库（一行 UPDATE），重启后 `identity` 段照旧装配；② **换后端不失**——`identity` 原样到达链路每一级（`RecordingBackend` 断言），微声不复述；③ **她可否认可更新**——`disclaim` 后该条不出现在身份段（再 tick 一次取到 `[]`）；同话题 `adopt` 使旧条 `superseded_by` 指向新条；④ **不重犯 P3-P**——`select_hooks` 排除 `KIND_SELF`，自我认知不进 `memory_hooks`（实测 `hooks=[]`）
+- **测试**：新增 6 项 / `336 passed`（330 + 6）——`test_identity.py` `identity_lines` 容错（None/字符串/字典/空列表 → `[]`，空白过滤）；`test_llm_chain.py` 新增 `RecordingBackend` + 两项链路测试（identity 到 fallback 不失 / 到微声不失且不复述）；`test_memory_view.py` 标签渲染；`test_expression_service_memory.py` 验收 3a（`disclaim` 后自我认知退出身份段）+ 3b（4 条已满时认领同话题候选 → 旧条作废、新条 `kind=self`、回执含"重新解释"、身份段逐条等于预期）
+- 门禁：ruff lint ✅ / ruff format ✅（83 文件）/ mypy strict ✅（51 源文件）/ pytest ✅ **336 passed**
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）；**本次不代为重启**，由用户自行决定时机。**第八节 Self Memory S1~S4 全部落地**
+
 ---
 
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）

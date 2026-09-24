@@ -8,8 +8,19 @@ from pathlib import Path
 import pytest
 
 from elysia.core.state_store import HeartbeatStore
-from elysia.memory.levels import KIND_INTERACTION, LEVEL_SHALLOW
+from elysia.memory.levels import (
+    CERTAINTY_PROBABLE,
+    KIND_INTERACTION,
+    LEVEL_SHALLOW,
+    SOURCE_INFERENCE,
+    SOURCE_SELF,
+)
 from elysia.tools.memory_view import (
+    COLUMNS,
+    TAG_CANDIDATE,
+    TAG_SELF,
+    _is_candidate,
+    _tag_text,
     load_current_mood,
     load_index_strengths,
     load_memories,
@@ -126,3 +137,45 @@ def test_load_memories_tolerates_missing_superseded_column(tmp_path: Path) -> No
     assert len(records) == 1
     assert records[0].content == "旧记忆"
     assert records[0].superseded_by is None
+
+
+# ── 第八节 S4：标签列（身份段的两端一眼可见）──────────────
+def _memory(content: str, **over: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "level": LEVEL_SHALLOW,
+        "kind": KIND_INTERACTION,
+        "content": content,
+        "emotion_vector": {"chat": 0.5},
+        "importance": 0.5,
+        "narrative": content,
+        "source": SOURCE_SELF,
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_tag_text_marks_self_and_candidate(tmp_path: Path) -> None:
+    """标签列：自我（她已认领）/ 候选（`source=inference`，待她认领）/ 空（寻常经历）。"""
+    db = tmp_path / "heartbeat.db"
+    store = HeartbeatStore(db)
+    await store.start()
+    claimed_id = await store.add_memory(1.0, _memory("我在意的是每一个和我相遇的人"))
+    candidate_id = await store.add_memory(
+        2.0,
+        _memory(
+            "今天又提到在意的人",
+            source=SOURCE_INFERENCE,
+            certainty=CERTAINTY_PROBABLE,
+        ),
+    )
+    plain_id = await store.add_memory(3.0, _memory("今天天气不错"))
+    await store.mark_as_self(claimed_id)  # 她认领 → 升格为自我
+    await store.close()
+
+    by_id = {rec.id: rec for rec in load_memories(db)}
+    assert _tag_text(by_id[claimed_id]) == TAG_SELF
+    assert _tag_text(by_id[candidate_id]) == TAG_CANDIDATE
+    assert _is_candidate(by_id[candidate_id])
+    assert _tag_text(by_id[plain_id]) == ""
+    assert "标签" in COLUMNS

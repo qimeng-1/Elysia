@@ -19,6 +19,7 @@ from elysia.llm.identity import (
     IDENTITY_FIELD,
     MAX_IDENTITY_LINES,
     compose_identity,
+    identity_lines,
 )
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
@@ -75,6 +76,17 @@ def test_compose_identity_dedupes_and_caps() -> None:
     assert parts[0] == BOOTSTRAP_IDENTITY
     assert len(parts) == MAX_IDENTITY_LINES  # 少而稳：不能变成一张清单
     assert compose_identity([BOOTSTRAP_IDENTITY]).count(BOOTSTRAP_IDENTITY) == 1
+
+
+# ── S4：取数入口是后端无关的公共函数（"换后端不失"的地基）──────
+def test_identity_lines_reads_field_safely() -> None:
+    """缺失 / 非法 / 空白一律取空，主声与次声都从这一个入口取同一份数据。"""
+    assert identity_lines(None) == []
+    assert identity_lines("乱写") == []
+    assert identity_lines({}) == []
+    assert identity_lines([]) == []
+    assert identity_lines(["我在意的是每一个和我相遇的人"]) == ["我在意的是每一个和我相遇的人"]
+    assert identity_lines(["", "   ", "我在意光"]) == ["我在意光"]
 
 
 # ── 常量与正交性（零 DDL：kind 是 TEXT，不新增层、不动层级序号）──

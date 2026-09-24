@@ -33,7 +33,7 @@ from typing import Any
 from urllib import request
 
 from elysia.llm.chain import LLMBackend, ToolRunner
-from elysia.llm.identity import IDENTITY_FIELD, compose_identity
+from elysia.llm.identity import IDENTITY_FIELD, compose_identity, identity_lines
 
 log = logging.getLogger("elysia.llm.deepseek")
 
@@ -93,19 +93,12 @@ _PERSONA_PROMPT = (
 )
 
 
-def _identity_lines(value: Any) -> list[str]:
-    """从表达指令的 `identity` 字段取她认领的自我认知（缺失/非法 → 空）。"""
-    if not isinstance(value, list):
-        return []
-    return [str(v) for v in value if str(v).strip()]
-
-
 def _system_prompt(identity: Any) -> str:
     """system 段 = 身份段（我是谁）+ 表达层人设（说话方式）。
 
     身份段来自**数据**（缺省即出生设定），换模型/断网时"她是谁"不随后端常量消失。
     """
-    return compose_identity(_identity_lines(identity)) + _PERSONA_PROMPT
+    return compose_identity(identity_lines(identity)) + _PERSONA_PROMPT
 
 
 def _first_message(data: dict[str, Any]) -> dict[str, Any]:

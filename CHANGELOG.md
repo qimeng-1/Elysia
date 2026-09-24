@@ -467,7 +467,7 @@
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后她会多一种"心里一动"（某件事被反复提起），话里一个字不提。**S4 观测与验收待动工**
 - **粒度天花板（照实说）**：字符二元组 Jaccard 只能沉淀"措辞相近的反复提起"（同义重述仅 0.26~0.33），真语义模式待 embedding（`P3_MEMORY.md` 第九节问题 3）
 
-### 第八节 S4：Self Memory 观测与验收（2026-09-24，无 commit）
+### 第八节 S4：Self Memory 观测与验收（2026-09-24，76b61df）
 - **触发**：第八节最后一步。用户明确"**先不重启，直接开始 S4**"——不改动运行中的灵魂，由用户自行决定装载时机。四项：① 浏览器标签 ② 8.9 四项验收 ③ 补降级链/微声（S1 的 N1 遗留）④ N6 拍板
 - **① 观测（tools/memory_view.py）**：新增 `TAG_SELF="自我"` / `TAG_CANDIDATE="候选"` + 纯函数 `_is_candidate`（`kind != KIND_SELF` 且 `source == SOURCE_INFERENCE`）/ `_tag_text`；表格在"类型"后插「标签」列；类型下拉增合成项「候选（待她认领）」（`CANDIDATE_FILTER="__candidate__"`，与真 `kind` 值不冲突）；状态栏加 `｜自我 N｜候选 N`；明细面板加"标签"一行（自我 →"她已认领，进身份段，每句在场"／候选 →"程序递给她待认领，不进话语"）；模块 docstring 增"看身份（第八节 S4）"一条
 - **③ 收口（llm/identity.py + deepseek.py + micro.py + chain.py）**：新增后端无关的公共取数入口 `identity_lines(value)`（缺失/非法 → 空列表，空白项过滤）——主声 / 未来次声 / 微声**同一口径**；`deepseek.py` 删私有 `_identity_lines` 改用公共入口；`micro.py` **零行为变化**，仅 docstring 记口径：微声不去"说出"身份（会机械复述、重犯 P3-P），"带着"身份的方式是结构性的——身份段在指令 `identity` 字段里、随指令进 `expression_log`

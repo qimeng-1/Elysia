@@ -1690,4 +1690,87 @@ if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:   # 替换不计入新
 
 ---
 
+## 十九、项目全量自检（2026-09-24，只读）
+
+> **触发**：用户「现在进行自检，浏览项目全体，综合评估目前的优缺点，解决方案」。
+> **用户裁决**：**先只记录，暂不动代码** —— 本节**只存档结论**，不实施任何修复。
+> **手段**：静态统计（文件数 / 行数 / 坏味道）+ 只读探针（库规模）+ 代码对读；**未改一行源码**。
+> 本节为**审计**类别：不加 CHANGELOG 条目（CHANGELOG 记"变化"）。
+
+### 19.1 总体判断
+
+**工程健康度高、正确性基础扎实；短板集中在"运维可靠性"与"未经验证的行为面"，不是代码质量问题。**
+即：**代码本身靠得住，缺的是"出事时有人兜"和"她真的用没用"这两头。**
+
+### 19.2 规模基线（2026-09-24 实测）
+
+- `src`：**52 文件 / 7956 行**（soul 2400 ／ memory 1810 ／ core 1100 ／ body 874 ／ llm 857 ／
+  tools 540 ／ tts 328 ／ protocol 43）。
+- `tests`：**32 文件 / 7063 行 / 375 passed**（与 src 行数接近 1:0.9，密度罕见地高）。
+- 最大文件：`pet.py` 695 ／ `heartbeat.py` 616 ／ `state_store.py` 601 ／
+  `expression_service.py` 593 ／ `retrieve.py` 573 ／ `memory_view.py` 539。
+- 数据：`data/heartbeat.db` **48.56 MB**、`heartbeats` **118,303 行**、WAL 伴生 4 MB。
+
+### 19.3 优点（8 条，附证据）
+
+| # | 优点 | 证据 |
+|---|---|---|
+| 1 | **分层清晰、单向数据流** | soul（大脑）与 body（桌宠窗口）经 SQLite 通信，`soul state → body presentation` 单向；src 按职责切 8 个包 |
+| 2 | **异步纪律** | 阻塞 IO 一律 `asyncio.to_thread`：`deepseek._post` 同步 HTTP 由调用点包线程、`tts/backend._call`、`checkpoint._backup_file`、`_AsyncSQLite` 的连接/查询 |
+| 3 | **单写者纪律** | `_AsyncSQLite._write_loop` 单写者队列 + `submit`/`submit_ret` 写后读一致；`PRAGMA journal_mode=WAL / busy_timeout=5000 / synchronous=NORMAL` |
+| 4 | **降级链完整** | LLM `main → fallback → micro`（断网仍能开口、身份段不随后端消失）；TTS 熔断 → 只出文本；熔断"不可知即放行" |
+| 5 | **代码卫生干净** | `TODO/FIXME` **0**、裸 `except` **0**、`print` **0**、`time.sleep` **0**；`type: ignore` 仅 5 处，`except Exception` 11 处多为"不可知即放行"的有意设计 |
+| 6 | **门禁真在跑** | pre-commit 挂 ruff-lint / ruff-format / **mypy(strict)** / pytest；`mypy strict=true`、`line-length=100` 已在 `pyproject.toml` |
+| 7 | **测试密度高** | 32 文件 / 7063 行 / 375 passed，覆盖判据、闸门、幂等迁移、golden prompt（如 `test_identity.py` 的结构性不变量） |
+| 8 | **数据纪律** | 四态遗忘机**无删除态**、迁移幂等（跑 N 次=跑 1 次）、`verify_integrity.py` 清单校验（当前 130 文件） |
+
+### 19.4 缺点（8 条，按严重度）
+
+| # | 缺点 | 证据 / 位置 | 风险 |
+|---|---|---|---|
+| 1 | **无 CI、无进程自愈** | `.github/workflows` **不存在**；门禁只在本地 pre-commit；灵魂/身体/写字进程无监督，崩了不会自动拉起 | 高：一次崩溃＝她"死"到人为发现为止 |
+| 2 | **状态库无保留策略** | `heartbeat.db` 48.56 MB、`heartbeats` **118,303 行**线性增长；全库无 DELETE/VACUUM 保留窗口；心跳 1Hz ⇒ **约 8.6 万行/天** | 高：单调膨胀，读写与备份成本随时间恶化 |
+| 3 | **她的 5 个工具零使用** | `adopt`/`forget`/`restore`/`recall`/`disclaim` 全库出现 **0** 次，`llm_text` 含工具调用 **0** | 高（未知）：能力已递到她手上，但**从未被真实验证** |
+| 4 | **追问门槛副作用** | `_PROBE_MARKERS` 含「吗 / 呢 / ？」，任何"？"结尾问句门槛降到"重合 ≥1 二元组" ⇒ 无关提问也带出 3 条 hooks（18.4 第三问即此） | 中：**P3-P"每句都强调"有回潮风险**（既有设计，非 A1/A2 回归） |
+| 5 | **外部边界无测试** | **18 个源文件无同名测试**：`llm/deepseek.py`、`tts/backend｜breaker｜cache`、`llm/micro.py`、`llm/validator.py`、`core/config.py`、`body/main.py`、`body/resource.py`、`memory/hooks｜levels｜scorer`、`protocol/snapshots.py`、`soul/main｜dimensions｜words` 等 | 中：出错最贵的边界（HTTP / GPU / 进程入口）恰是测最少的 |
+| 6 | **一处异步纪律破口** | `VramBreaker.can_speak()` 内部 `subprocess.run(..., timeout=5)` 同步阻塞，`tts/chain.py` 在 `async speak()` 里直接调用（[chain.py](file:///a:/WorkPlace/Elysia/elysia/src/elysia/tts/chain.py#L59) ／ [breaker.py](file:///a:/WorkPlace/Elysia/elysia/src/elysia/tts/breaker.py#L25-L35)） | 中：最坏每次开口阻塞事件循环最长 **5s** |
+| 7 | **调参常量散落** | 阈值/系数分居 `retrieve.py`、`similarity.py`、`supersede.py`、`sediment.py`、`expression_service.py`（如 0.35 / 0.4 / 0.7 / 0.5 / 2.0），无集中调参面 | 低：回退杠杆（`CLUSTER_COEF` 置 0 等）需逐处找 |
+| 8 | **单文件偏大 + 文档失衡** | 6 个文件 >500 行（最大 `pet.py` 695）；`P3_MEMORY_WORKLOG.md` **1693 行**，同一件事在 worklog / `P3_MEMORY.md` / `CHANGELOG.md` / 开发日志写三到四遍 | 低：维护成本与"读哪份为准"的困惑 |
+
+### 19.5 解决方案（10 条，A 立刻 / B 近期 / C 观察）
+
+**A · 立刻（低风险、收益直接）**
+
+1. **库保留窗口**：给 `heartbeats`（1Hz 纯流水）定保留策略——**先归档再裁剪**（`VACUUM INTO` 或导出快照 + 按时间/行数上限裁剪），
+   并**先在库副本上验证**。⚠️ 触碰"数据永不删除"铁律，**须先拍板口径**（归档保底 + 仅裁流水表，不碰 memories）。
+2. **VRAM 采样挪线程 / 节流**：`default_vram_sampler` 走 `asyncio.to_thread`，或加 TTL 缓存（如 5s 内复用上次结果），
+   消除 async 内的最长 5s 阻塞。
+3. **收窄追问门槛**：`_PROBE_MARKERS` 去掉「吗 / 呢 / ？」这类纯语气/标点信号（或对"纯语气命中"仍要求重合 ≥2），
+   保住"问生日要答得出"的同时压低误召。
+
+**B · 近期（中等投入）**
+
+4. **最小 CI**：GitHub Actions 跑四件套（ruff / format / mypy / pytest），与 pre-commit 同源；只做校验，不做部署。
+5. **进程监督**：`soul.ps1` 增 keep-alive / watchdog（崩溃自动重启 + 写日志），或改用 Windows 计划任务。
+6. **补外部边界测试**：优先 `deepseek.py`（HTTP 失败 / 工具协议解析）与 `tts/breaker + backend`（熔断 / 不可知 / 合成失败），
+   这两处"出错最贵、测最少"。
+7. **集中调参面**：判据阈值与系数收进单一常量表（或各级常量加索引注释），**行为零变化、只改可发现性**。
+
+**C · 观察（不排期，等条件出现）**
+
+8. **她的 5 个工具验收**：等真实对话触发；**若长期为 0，须复盘"能力是否真的递到了她手上"**
+   （prompt 是否让她看得懂"何时该用"）——这是铁律一"程序管会不会"的验收面。
+9. **embedding（B 案）**：维持"**按需启动**"，触发条件＝真实对话出现 A 案捞不回、又被注意到的"换说法"实例。
+10. **文档收敛**：worklog 定期"**结卷**"（已完成阶段归档为只读快照），同一结论只写一份源、其余引用。
+
+### 19.6 裁决与后续
+
+- **用户裁决（2026-09-24）：先只记录，暂不动代码。** 本条 8 项缺点 / 10 条方案**仅存档**，
+  等用户另行排期；本次**未改任何源码**，门禁与运行时不受影响。
+- **记录位置**：本节（审计结论）+ `项目元信息/开发日志.md` 任务记录一行；**不加 CHANGELOG 条目**。
+- **未受影响**：18.5 的两项"尚未发生"（hooks 端到端、她的工具）仍是**唯一的行为面欠观测项**，
+  与本次自检的缺点 3、方案 8 是同一件事。
+
+---
+
 *本文件随记忆打磨期持续追加；每节末尾保留"下一步 + 交接要点"。*

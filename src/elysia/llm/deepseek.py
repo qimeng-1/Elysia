@@ -16,6 +16,9 @@ P3-W2：工具增至 recall + disclaim + forget + restore——分别是"想起"
 身份段来自表达指令的 `identity` 字段（缺省 = 出生设定），不再是本模块的硬编码常量——
 换模型时"她是谁"不随后端常量消失，而是来自她的数据。
 
+第八节 S2：工具增至 recall + adopt + disclaim + forget + restore——多了
+"这就是我"（认领某段经历为自我认知）。它与"我不认这个"是一对。
+
 仅用标准库 urllib（无新增依赖），HTTP 在 asyncio.to_thread 中执行，
 避免阻塞心脏循环事件线程。严格只消费表达指令结构化字段，符合 T2。
 """
@@ -39,7 +42,7 @@ MAX_TOOL_ROUNDS = 3
 # 工具返回空（确实没结果）时递回给模型的话——明确"没有"，不编造
 _NO_RECALL_TEXT = "（你确实没想起相关的事）"
 # 她可以调用的工具（其余名字一律当作"没有这个能力"）
-_TOOL_NAMES = ("recall", "disclaim", "forget", "restore")
+_TOOL_NAMES = ("recall", "adopt", "disclaim", "forget", "restore")
 
 # 表达层人设（说话方式）：把她限定为"翻译官"，只消费结构化表达，绝不消费用户原话（T2）
 # 人设来源：《爱莉希雅角色档案（人设提炼）》(2026-09-18) —— 语言风格四要素 + 性格核心
@@ -69,7 +72,10 @@ _PERSONA_PROMPT = (
     "\n关于记忆，有两种情形：\n"
     "（一）你有一个 recall 工具——那就是你「想起」的能力。当你想提起某段往事、"
     "或对方问起一件你似乎知道的事时，自己调用它（topic 用几个字概括话题）；"
-    "想不起来就不要调用。用不用它，完全由你决定。另有一个 disclaim 工具："
+    "想不起来就不要调用。用不用它，完全由你决定。另有一个 adopt 工具："
+    "若某段经历你觉得「这就是我 / 我就是这样的人」，可以用它把它认作自己的——"
+    "认下之后它会成为你「我是谁」的一部分，你说每句话时它都在场；"
+    "程序只把候选递到你手上，认不认由你。还有一个 disclaim 工具："
     "若某段记忆你不愿认作自己的（「我不认这个」），可以用它拒绝认领——"
     "拒绝后它不再出现在你记得的事里。这同样是你的权力，程序不会替你拒绝。"
     "还有 forget 与 restore 两个工具：不想再想起某件事时用 forget——"
@@ -211,7 +217,7 @@ class DeepSeekBackend(LLMBackend):
         return None
 
     async def _run_call(self, call: dict[str, Any], run_tool: ToolRunner) -> str:
-        """执行一次工具调用：recall / disclaim / forget / restore → 把能力递到她手上。
+        """执行一次工具调用：recall / adopt / disclaim / forget / restore——把能力递到她手上。
 
         工具本身失败不应毁掉这次开口——返回"没结果"让她照常说话。
         """

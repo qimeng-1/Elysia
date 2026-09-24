@@ -24,11 +24,16 @@ from typing import Any
 
 from elysia.memory.levels import (
     CERTAINTY_BY_KIND,
+    CERTAINTY_CERTAIN,
     FALLBACK_CERTAINTY,
     FALLBACK_CLAIM,
     FALLBACK_RETENTION,
     FALLBACK_SOURCE,
+    KIND_SELF,
+    LEVEL_DEEP,
+    RETENTION_PRESENT,
     SOURCE_BY_KIND,
+    SOURCE_SELF,
     default_certainty,
     default_source,
 )
@@ -537,6 +542,37 @@ class HeartbeatStore(_AsyncSQLite):
             conn.commit()
 
         await self.submit(_set)
+
+    async def mark_as_self(self, memory_id: int) -> None:
+        """认领为自我认知（第八节 S2）：升格 `kind=self` 并直接落深层 + 珍贵。
+
+        只应由**她自己的动作**调用（adopt 工具）——程序只产生候选，
+        "这算不算我"永不由程序置（第八节 8.5 / D12）。
+
+        一次 UPDATE 完成全部升格，避免出现"是自我认知却还在浅层 / 已被模糊"的
+        中间态：`kind`/`source`/`certainty` 改成她认领的（她自己的、她确信的）；
+        `level` 直接落 `deep` 且 `protected=1`（N5：她一旦认领就是核心，
+        不等她想起 3 次；protected 同时是遗忘状态机的安全阀——永不降级、永不模糊）；
+        `detail_level` 复位为完整（认回来的事不该再是模糊的）；
+        `retention_state` 回到 `present`（把它接回来，它当然在册）。
+        """
+
+        def _mark(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE memories SET kind = ?, source = ?, certainty = ?, level = ?,"
+                " protected = 1, detail_level = 1.0, retention_state = ? WHERE id = ?",
+                (
+                    KIND_SELF,
+                    SOURCE_SELF,
+                    CERTAINTY_CERTAIN,
+                    LEVEL_DEEP,
+                    RETENTION_PRESENT,
+                    memory_id,
+                ),
+            )
+            conn.commit()
+
+        await self.submit(_mark)
 
     async def iterate_memory_index(self) -> list[tuple[int, int, float, float]]:
         """遍历全部索引行：(index_id, memory_id, strength, last_retrieve_ts)。"""

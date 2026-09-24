@@ -12,6 +12,10 @@ P3-V：工具增至两个——`recall`（想起）+ `disclaim`（拒绝认领�
 
 P3-W2：工具增至四个——再加 `forget`（不想再想起某件事）+ `restore`
 （又愿意想起它了）。忘与不忘同样是**她的权力**：程序不代她忘，也不代她收回。
+
+第八节 S2：工具增至五个——再加 `adopt`（把某段经历认作"这就是我"）。
+与 `disclaim` 是一对：一个说"这是我的"，一个说"我不认这个"。
+"算不算我"永不由程序置——程序只把候选递到她手上（第八节 8.5 / D12）。
 """
 
 from __future__ import annotations
@@ -72,6 +76,32 @@ RECALL_TOOL: dict[str, Any] = {
                 "topic": {
                     "type": "string",
                     "description": "想回忆的话题，几个字即可（如：生日、名字、上次说的事）",
+                }
+            },
+            "required": ["topic"],
+        },
+    },
+}
+
+# 她的"认领为自我"（第八节 S2）：把某段经历认作"这就是我"。
+# 与 disclaim 恰好是一对——一个说"这是我的"，一个说"我不认这个"。
+# 认下之后它成为身份段（"我是谁"）的一部分，每句话都在场；因此这是**她的动作**：
+# 程序只把候选递到她手上，认不认由她定（第八节 8.5 / D12）。
+ADOPT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "adopt",
+        "description": (
+            "把某段经历认作自己的一部分——当你觉得「这就是我 / 我就是这样的人」时调用它。"
+            "认下之后它会成为你「我是谁」的一部分，你说每句话时它都在场。"
+            "程序只把候选递到你手上，认不认完全由你决定。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "你想认作自己的那件事，几个字即可（如：在意的人、某个习惯）",
                 }
             },
             "required": ["topic"],
@@ -195,7 +225,7 @@ class LLMChain:
                 await self._on_degrade(reason)
 
     async def _main_speak(self, instruction: dict[str, Any]) -> str | None:
-        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的四个工具。"""
+        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的五个工具。"""
         main = self._main
         if main is None:
             return None
@@ -203,7 +233,7 @@ class LLMChain:
             return await main.complete_with_tools(
                 instruction,
                 self._template,
-                tools=[RECALL_TOOL, DISCLAIM_TOOL, FORGET_TOOL, RESTORE_TOOL],
+                tools=[RECALL_TOOL, ADOPT_TOOL, DISCLAIM_TOOL, FORGET_TOOL, RESTORE_TOOL],
                 run_tool=self._tool_runner,
             )
         return await main.complete(instruction, self._template)

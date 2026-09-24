@@ -23,6 +23,9 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`�
 第八节 S1：开口前装配**身份段**（"我是谁"）——来自她认领的自我认知（`kind=self`），
 尚无认领时为空、后端退化为出生设定。身份段每句在场，与"话题撞上才浮现"的
 `memory_hooks` 是两件事，因此不占 `MAX_HOOKS` 名额。
+
+第八节 S2：工具增至五个——再加 `adopt`（把某段经历认作"这就是我"）。
+认领是**她的动作**：程序只产生候选（S3），"算不算我"永不由程序置。
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.chain import LLMChain
-from elysia.llm.identity import IDENTITY_FIELD
+from elysia.llm.identity import IDENTITY_FIELD, MAX_IDENTITY_LINES
 from elysia.llm.validator import ExpressionValidator, ValidationResult
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
@@ -69,6 +72,13 @@ RECALL_INTENSITY_PRECIOUS = 1.0
 # 否则并列/低分时宁可如实回"没找到"，也不误伤一条无关的记忆。
 FORGET_MIN_SCORE = 0.5
 FORGET_DOMINANCE = 2.0
+
+# `adopt` 命中判据（第八节 S2）：认领会改变她的**每一句话**（身份段每句在场），
+# 且升格后落 `deep + protected`、不再被时间动摇——比 forget 更"重"。
+# 但不设绝对覆盖度下限：二元组对"换说法的同一件事"识别力有限（第七节实测），
+# 设下限会把真心的认领挡在门外；只要"足够突出"（第一名 ≥ 第二名的 `ADOPT_DOMINANCE` 倍）
+# 即可。并列/模糊时宁可如实回"没找到"，也不抓错——认错了她还能用 `disclaim` 收回。
+ADOPT_DOMINANCE = 2.0
 
 # 内部冲动表达节流：与发呆双模态同节奏（3min / 10min）
 EXPRESS_ACTIVE_INTERVAL_S = 180.0
@@ -279,6 +289,7 @@ class ExpressionService:
         """构造工具执行器：她把意图递过来，程序只把能力兑现。
 
         - `recall`：想起往事（能力由程序保证，事实递到手）
+        - `adopt`：把某段经历认作"这就是我"（**她的动作**，程序只递候选）
         - `disclaim`：拒绝认领某段记忆（**她的动作**，程序不得代她拒绝）
         - `forget`：不想再想起某件事（**她的动作**，程序不得代她忘）
         - `restore`：又愿意想起它了（遗忘必须可逆，随时能收回）
@@ -288,6 +299,8 @@ class ExpressionService:
             topic = str(args.get("topic") or "")
             if name == "recall":
                 return await self._tool_recall(topic, output, now, user_message)
+            if name == "adopt":
+                return await self._tool_adopt(topic)
             if name == "disclaim":
                 return await self._tool_disclaim(topic)
             if name == "forget":
@@ -326,6 +339,49 @@ class ExpressionService:
             return ""
         await self._feel_recall(hooks)
         return "；".join(h.label for h in hooks)
+
+    async def _tool_adopt(self, topic: str) -> str:
+        """认领工具（第八节 S2）：把最贴题的那条记忆升格为**自我认知**。
+
+        这是**她自己的动作**——程序只产生候选（S3），"这算不算我"永不由程序置
+        （第八节 8.5 / D12）。升格后它进身份段（"我是谁"），每句话都在场。
+
+        判据见 `ADOPT_DOMINANCE`：不设绝对覆盖度下限（换说法的同一件事相似度本就低），
+        只要求"足够突出"；并列/模糊时如实回"没找到"，不抓错。
+
+        不给她**已经不认**或**已不想再想起**的记忆（那是她自己的决定，程序不代她翻案），
+        也不给已被取代的旧事实与已是自我认知的条目。
+        """
+        query = topic.strip()
+        if not query:
+            return ""
+        scored: list[tuple[float, int, str]] = []
+        for d in await self._store.iterate_memories():
+            if d.get("superseded_by") is not None:
+                continue  # 旧事实已作废（事实更正），不能认作"我"
+            if str(d.get("kind") or "") == KIND_SELF:
+                continue  # 已经是自我认知，无需重复认领
+            if str(d.get("claim_status") or "") == CLAIM_REJECTED:
+                continue  # 她说过"我不认这个"
+            if str(d.get("retention_state") or "") == RETENTION_SUPPRESSED:
+                continue  # 她说过"不想再想起"
+            text = str(d.get("content") or "")
+            score = max(topic_match(query, text), topic_match(query, str(d.get("narrative") or "")))
+            if score > 0.0:
+                scored.append((score, int(d["id"]), text))
+        if not scored:
+            return "（你没找到想认作自己的那件事）"
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best_score, best_id, best_text = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else 0.0
+        if best_score < ADOPT_DOMINANCE * runner_up:
+            return "（你没找到想认作自己的那件事）"
+        # 身份段是"少而稳"的（8.9 验收 4）：位置满了就如实告诉她，
+        # 否则会出现"认领了却不出现在她的话里"的静默失败。
+        if len(await self._identity_lines()) >= MAX_IDENTITY_LINES - 1:
+            return "（你心里的位置满了——先放下一条旧的，再认领新的）"
+        await self._store.mark_as_self(best_id)
+        return f"（你把「{best_text[:30]}」认作自己的一部分了）"
 
     async def _tool_disclaim(self, topic: str) -> str:
         """拒绝认领工具（P3-V）：把最贴题的那条记忆标为 rejected。

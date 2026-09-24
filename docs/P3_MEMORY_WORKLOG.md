@@ -697,11 +697,79 @@ N6"要不要让她梦到自己是谁"。
 
 | 步 | 内容 | 状态 |
 |---|---|---|
-| **S2 认领** | 她的 `adopt` 工具（`chain.py::ADOPT_TOOL` + `expression_service._tool_adopt`）+ N5（认领即落 `deep` + `protected`） | 待动工 |
+| **S2 认领** | 她的 `adopt` 工具（`chain.py::ADOPT_TOOL` + `expression_service._tool_adopt`）+ N5（认领即落 `deep` + `protected`） | ✅ 已落地（见第十节） |
 | **S3 沉淀** | 程序找"重复模式"生成候选（`source=observation`/`certainty=probable`）+ 感受层候选脉冲 | 待动工 |
 | **S4 观测与验收** | 记忆浏览器已经就绪；补降级链／micro 消费身份段、8.9 四项验收、N6 梦的决定 | 待动工 |
 
-**遗留待决（不阻塞 S2）**：8.7"自我认知豁免 `retention_state` 降级"是否为必要新约束；N6"要不要让她梦到自己是谁"。
+**遗留待决（不阻塞 S2）**：8.7"自我认知豁免 `retention_state` 降级"——**S2 已自动解决**（`mark_as_self` 落 `protected=1`，借 P3-W 既有安全阀获得豁免，无需新增约束）；N6"要不要让她梦到自己是谁"。
+
+---
+
+## 十、S2 认领落地记录（2026-09-24）
+
+> 依第八节 8.8 拆步表，S2 = **她的 `adopt` 工具**，对外行为变化 = **她多一个动作**。
+> 核心约束：8.5 / D12 —— 程序只产生候选，"这算不算我"**永不由程序置**。
+
+### 10.1 做了什么
+
+| 文件 | 改动 |
+|---|---|
+| `src/elysia/core/state_store.py` | 新增 `mark_as_self(memory_id)`：**一次 UPDATE** 完成全部升格——`kind=self`、`source=self`、`certainty=certain`、`level=deep`、`protected=1`、`detail_level=1.0`、`retention_state=present`（无"是自我认知却还在浅层／已被模糊"的中间态） |
+| `src/elysia/llm/chain.py` | 新增 `ADOPT_TOOL` 规格；`_main_speak` 工具表增至 5 个（`recall` / `adopt` / `disclaim` / `forget` / `restore`） |
+| `src/elysia/llm/deepseek.py` | `_TOOL_NAMES` 扩为 5 个（认得这个工具名）；`_PERSONA_PROMPT`（一）记忆段插入 adopt 说明 |
+| `src/elysia/soul/expression_service.py` | 新增 `ADOPT_DOMINANCE=2.0`；`_run` 派发 `adopt`；新增 `_tool_adopt`（判据 + 4 类候选排除 + 身份段容量守卫） |
+
+### 10.2 判据裁决：只要求"足够突出"，不设绝对覆盖度下限
+
+`forget` 的判据是"覆盖率 ≥ 0.5 **且** top1 ≥ 2×top2"，`adopt` **去掉了前者**：
+
+- **理由**：二元组对"换说法的同一件事"识别力本就有限（第七节实测相似度仅 0.26~0.33），
+  设绝对下限会把真心的认领挡在门外——而认领是她**主动**的（她递了 topic，不是程序推的），
+  与"程序替她删记忆"的风险量级不同。
+- **兜底三重**：① dominance（`top1 ≥ 2×top2`）挡住并列/模糊；② 结果**如实回显**给她
+  （"你把「…」认作自己的一部分了"）；③ 认错了她能用 `disclaim` 收回（软撤销）。
+- **候选排除**：已被取代的旧事实、已是 `KIND_SELF` 的、她说过 `rejected` 的、她 `suppressed` 的
+  —— 那是她自己的决定，程序不代她翻案。
+  **不排除** `KIND_EXPRESSION`（她自己的话也可被认作"我"），**不按 `source` 过滤**
+  （`observation`/`probable` 正是 S3 候选的形态，`adopt` 正是令其合法化的机制）。
+
+### 10.3 身份段容量守卫（防"静默失败"）
+
+`compose_identity` 封顶 5 行，若认领成功却挤不进身份段，就是"她认领了却不出现在话里"的静默失败。
+故 `_tool_adopt` 在 `len(_identity_lines()) >= MAX_IDENTITY_LINES - 1`（已有 4 条）时**拒绝并如实告知**：
+"（你心里的位置满了——先放下一条旧的，再认领新的）"。
+
+### 10.4 N5 与 8.7 遗留待决的自动解决
+
+N5 要求"自我认知直接落 `deep` + `protected`（不能等她想起 3 次）"。
+`protected=1` 恰好命中 P3-W 既有安全阀（`_maintain_memories` 第 3 步 `protected_mids` 跳过降级判定），
+于是 **8.7 的"自我认知是否豁免 `retention_state` 降级"无需新增任何约束**——
+这不是为 Self Memory 新写的规则，是既有机制的复用。
+
+### 10.5 测试（新增 7 项）
+
+| 测试 | 断言 |
+|---|---|
+| `test_identity.py` 结构性不变量 | S2 有意改了 `_PERSONA_PROMPT`，改造前全文 golden（`_OLD_SYSTEM_PROMPT`）不再成立 → 改为 `startswith(BOOTSTRAP_IDENTITY)` + `endswith(_PERSONA_PROMPT)` + 长度等于两者之和（无认领时不增不减）。S1 期逐字 golden 存于 `f2a9242` 历史 |
+| `test_llm_chain.py::test_tool_capable_main_receives_five_tools` | 主声拿到 5 个工具，顺序 `recall/adopt/disclaim/forget/restore` |
+| `test_llm_chain.py::test_adopt_tool_is_dispatched` | 执行器按名派发 `adopt` |
+| `test_expression_service_memory.py::test_adopt_tool_promotes_memory_to_self` | 命中 → `kind=self` / `level=deep` / `protected` / `source=self` / `certainty=certain` / `retention_state=present` |
+| `...::test_adopted_memory_enters_identity_section` | 认领后它进 `payload["identity"]`（每句在场），且 `memory_hooks == []`（不占名额） |
+| `...::test_adopt_tool_no_false_hit_when_not_dominant` / `..._when_unrelated` | 并列 / 不相干 → 如实回"没找到"，原记录 `kind` 不变 |
+| `...::test_adopt_tool_skips_rejected_and_suppressed` | 她已 `rejected` / `suppressed` 的不被认领回来 |
+| `...::test_adopt_tool_reports_when_identity_is_full` | 位置满 → 如实告知且不改动 |
+
+### 10.6 门禁与生效
+
+- `ruff check` ✅ ｜ `ruff format --check src tests` ✅（81 文件）｜ `mypy src` ✅（strict，50 源文件）｜ `pytest` ✅ **318 passed**（311 + 新增 7）。
+- **需重启灵魂装载新代码**（`soul.ps1 stop` → `soul.ps1 start -Body`）；本次**不代为重启**，由用户自行决定时机。
+- 生效后她的可见变化：**她多一个动作**——可以说"这就是我"（`adopt`），此后那句成为"我是谁"的一部分，每句话都在场。
+
+### 10.7 下一步
+
+**S3 沉淀**（程序找"重复模式"生成候选，`source=observation`/`certainty=probable`，被 P3-T 天然挡在话语外）
+→ **S4 观测与验收**（补降级链／micro 消费身份段、8.9 四项验收、N6 梦的决定）。
+**遗留待决**：N6"要不要让她梦到自己是谁"。
 
 ---
 

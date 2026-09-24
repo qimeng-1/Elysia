@@ -15,16 +15,19 @@ from typing import Any
 import pytest
 
 from elysia.core.state_store import HeartbeatStore
-from elysia.llm.identity import IDENTITY_FIELD
+from elysia.llm.identity import IDENTITY_FIELD, MAX_IDENTITY_LINES
 from elysia.llm.validator import ValidationResult
 from elysia.memory.levels import (
+    CERTAINTY_CERTAIN,
     CLAIM_CLAIMED,
     CLAIM_REJECTED,
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_SELF,
+    LEVEL_DEEP,
     RETENTION_PRESENT,
     RETENTION_SUPPRESSED,
+    SOURCE_SELF,
 )
 from elysia.memory.retrieve import retrieve_from_store
 from elysia.soul.brain import BrainOutput, WillOutput
@@ -381,9 +384,9 @@ async def test_disclaim_tool_no_match_keeps_memory(store: HeartbeatStore) -> Non
 
 
 # ── P3-W2 遗忘与收回（她的权力：程序不代她忘，也不代她收回）────
-async def _add_forgettable(store: HeartbeatStore, content: str) -> None:
+async def _add_forgettable(store: HeartbeatStore, content: str) -> int:
     """落一条"能被想起"的记忆（默认 present，可被 forget 命中）。"""
-    await store.add_memory(
+    return await store.add_memory(
         1.0,
         {
             "level": "deep",
@@ -576,5 +579,124 @@ async def test_identity_does_not_touch_access_count(store: HeartbeatStore) -> No
         assert rec is not None
         assert rec["access_count"] == 0
         assert rec["last_access_ts"] is None
+    finally:
+        await store.close()
+
+
+# ── 第八节 S2 认领（她的动作：程序只递候选，认不认由她）──────
+_ADOPTED_TEXT = "我在意的是每一个和我相遇的人"
+
+
+async def _tick_with_tool(
+    store: HeartbeatStore, tool: str, topic: str, *, now: float = 2.0
+) -> str | None:
+    """用指定工具跑一次开口，返回他（她）拿到的工具回执。"""
+    llm = FakeToolLLM(call_recall=True, topic=topic, tool=tool)
+    svc = ExpressionService(llm, store, retriever=retrieve_from_store)
+    await svc.tick(_make_output(), now=now, force=True)
+    return llm.tool_result
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_promotes_memory_to_self(store: HeartbeatStore) -> None:
+    """她说"这就是我" → 那条经历升格为自我认知：直接落深层 + 珍贵（N5，不等她想起 3 次）。"""
+    await store.start()
+    try:
+        mid = await _add_forgettable(store, _ADOPTED_TEXT)
+        result = await _tick_with_tool(store, "adopt", "在意的人")
+        assert result is not None and "认作自己的一部分" in result
+        rec = await store.get_memory(mid)
+        assert rec is not None
+        assert rec["kind"] == KIND_SELF
+        assert rec["level"] == LEVEL_DEEP
+        assert rec["protected"]
+        # 来源/确定性也改成"她的、她确信的"——认领后它就是最靠得住的一类
+        assert rec["source"] == SOURCE_SELF
+        assert rec["certainty"] == CERTAINTY_CERTAIN
+        assert rec["retention_state"] == RETENTION_PRESENT
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_adopted_memory_enters_identity_section(store: HeartbeatStore) -> None:
+    """认领之后它进身份段（"我是谁"，每句在场），且不占 hooks 名额。"""
+    await store.start()
+    try:
+        await _add_forgettable(store, _ADOPTED_TEXT)
+        await _tick_with_tool(store, "adopt", "在意的人")
+
+        _call_payload.clear()
+        svc = ExpressionService(FakeLLM(), store)
+        await svc.tick(_make_output(), now=3.0, force=True)
+        payload = _call_payload[0]
+        assert payload[IDENTITY_FIELD] == [_ADOPTED_TEXT]
+        assert payload["memory_hooks"] == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_no_false_hit_when_not_dominant(store: HeartbeatStore) -> None:
+    """两条并列时"足够突出"不成立 → 如实回"没找到"，绝不抓错一条当自我。"""
+    await store.start()
+    try:
+        await _add_forgettable(store, "那天我们吵了一架")
+        await _add_forgettable(store, "那天我们吵了一架")
+        result = await _tick_with_tool(store, "adopt", "那天我们吵了一架")
+        assert result == "（你没找到想认作自己的那件事）"
+        recs = [r for r in await store.iterate_memories() if r["kind"] == KIND_INTERACTION]
+        assert len(recs) == 2
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_no_false_hit_when_unrelated(store: HeartbeatStore) -> None:
+    """完全不相干的话题 → 找不到，不是"随便认一条"。"""
+    await store.start()
+    try:
+        await _add_forgettable(store, "我的生日是5月21日")
+        result = await _tick_with_tool(store, "adopt", "昨晚的球赛")
+        assert result == "（你没找到想认作自己的那件事）"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_skips_rejected_and_suppressed(store: HeartbeatStore) -> None:
+    """她已说过"我不认""不想再想起"的，程序不代她翻案——绝不悄悄认领回来。"""
+    await store.start()
+    try:
+        rejected_id = await _add_forgettable(store, "那天我们吵了一架")
+        suppressed_id = await _add_forgettable(store, "那件我一直后悔的事")
+        await store.set_claim_status(rejected_id, CLAIM_REJECTED)
+        await store.set_retention_state(suppressed_id, RETENTION_SUPPRESSED)
+
+        for topic in ("那天我们吵了一架", "那件我一直后悔的事"):
+            assert await _tick_with_tool(store, "adopt", topic) == "（你没找到想认作自己的那件事）"
+
+        rejected = await store.get_memory(rejected_id)
+        suppressed = await store.get_memory(suppressed_id)
+        assert rejected is not None and rejected["kind"] == KIND_INTERACTION
+        assert rejected["claim_status"] == CLAIM_REJECTED
+        assert suppressed is not None and suppressed["kind"] == KIND_INTERACTION
+        assert suppressed["retention_state"] == RETENTION_SUPPRESSED
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_reports_when_identity_is_full(store: HeartbeatStore) -> None:
+    """身份段"少而稳"：位置满了如实告诉她——不做"认领了却不出现在话里"的静默失败。"""
+    await store.start()
+    try:
+        for i in range(MAX_IDENTITY_LINES - 1):
+            await _add_self_memory(store, f"自我认知{i}")
+        mid = await _add_forgettable(store, _ADOPTED_TEXT)
+        result = await _tick_with_tool(store, "adopt", "在意的人")
+        assert result == "（你心里的位置满了——先放下一条旧的，再认领新的）"
+        rec = await store.get_memory(mid)
+        assert rec is not None and rec["kind"] == KIND_INTERACTION
     finally:
         await store.close()

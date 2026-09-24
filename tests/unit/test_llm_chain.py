@@ -198,8 +198,8 @@ class FakeToolBackend:
 
 
 @pytest.mark.asyncio
-async def test_tool_capable_main_receives_four_tools() -> None:
-    """主声拿到 recall + disclaim + forget + restore 四个工具，执行器按（名, 参数）派发。"""
+async def test_tool_capable_main_receives_five_tools() -> None:
+    """主声拿到 recall + adopt + disclaim + forget + restore 五个工具，执行器按（名, 参数）派发。"""
     backend = FakeToolBackend("disclaim", {"topic": "生日"})
     seen: list[tuple[str, dict[str, Any]]] = []
 
@@ -212,6 +212,7 @@ async def test_tool_capable_main_receives_four_tools() -> None:
     r = await chain.speak(_instruction())
     assert [t["function"]["name"] for t in backend.tools] == [
         "recall",
+        "adopt",
         "disclaim",
         "forget",
         "restore",
@@ -244,3 +245,11 @@ async def test_forget_and_restore_tools_are_dispatched() -> None:
         seen, level = await _speak_with_tool(tool_name, {"topic": "那次争吵"})
         assert seen == [(tool_name, {"topic": "那次争吵"})]
         assert level == "main"
+
+
+@pytest.mark.asyncio
+async def test_adopt_tool_is_dispatched() -> None:
+    """adopt（第八节 S2）也是她的动作——"这就是我"由她认领，程序只递候选。"""
+    seen, level = await _speak_with_tool("adopt", {"topic": "在意的人"})
+    assert seen == [("adopt", {"topic": "在意的人"})]
+    assert level == "main"

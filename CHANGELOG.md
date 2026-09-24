@@ -438,6 +438,21 @@
 - **N1 遗留（已记档）**：**只让主声消费 `identity`**——降级链下级与 `micro.py` 尚未消费身份段，故验收"换后端不失"当前仍不成立，留待 S4 接线（见 `docs/P3_MEMORY.md` 第九节问题 7）
 - **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——对外行为零变化，但仍需重启装载新代码。**S2 认领 / S3 沉淀 / S4 观测待动工**
 
+### 第八节 S2：Self Memory 认领（她的 `adopt` 工具，2026-09-24）
+- **触发**：依第八节 8.8 拆步表落地 **S2 认领**——对外行为变化 = **她多一个动作**。核心约束（8.5 / D12）：程序只产生候选，"这算不算我"**永不由程序置**
+- **feat（core/state_store.py）**：新增 `mark_as_self(memory_id)`——**一次 UPDATE** 完成全部升格（`kind=self`、`source=self`、`certainty=certain`、`level=deep`、`protected=1`、`detail_level=1.0`、`retention_state=present`），不留"是自我认知却还在浅层／已被模糊"的中间态
+- **feat（llm/chain.py）**：新增 `ADOPT_TOOL` 规格；`_main_speak` 工具表增至 5 个（`recall` / `adopt` / `disclaim` / `forget` / `restore`）
+- **feat（llm/deepseek.py）**：`_TOOL_NAMES` 扩为 5 个；`_PERSONA_PROMPT`（一）记忆段插入 adopt 说明（"这就是我／我就是这样的人"）
+- **feat（soul/expression_service.py）**：新增 `ADOPT_DOMINANCE=2.0`；`_run` 派发 `adopt`；新增 `_tool_adopt`
+- **判据裁决（只要求"足够突出"，不设绝对覆盖度下限）**：`forget` 是"覆盖率 ≥ 0.5 且 top1 ≥ 2×top2"，`adopt` **去掉前者**——二元组对"换说法的同一件事"识别力本就有限（第七节实测 0.26~0.33），设下限会把真心的认领挡在门外；兜底三重 = ① dominance 挡并列/模糊 ② 结果如实回显给她 ③ 认错了能用 `disclaim` 收回
+- **候选排除**：已被取代的旧事实 / 已是 `KIND_SELF` / 她 `rejected` / 她 `suppressed`（她自己的决定，程序不代她翻案）；**不排除** `KIND_EXPRESSION`、**不按 `source` 过滤**（`observation`/`probable` 正是 S3 候选形态）
+- **身份段容量守卫**：`compose_identity` 封顶 5 行，已有 4 条时 `adopt` 拒绝并如实告知"（你心里的位置满了——先放下一条旧的，再认领新的）"——不做"认领了却不出现在话里"的静默失败
+- **N5 与 8.7 遗留待决自动解决**：认领即落 `protected=1` → 命中 P3-W 既有安全阀（`_maintain_memories` 跳过 `protected` 的降级判定），"自我认知豁免 `retention_state` 降级"**无需新增任何约束**
+- **fix（tests/unit/test_identity.py）**：S2 有意修改 `_PERSONA_PROMPT`，改造前全文 golden（`_OLD_SYSTEM_PROMPT`）不再成立 → 改为**结构性不变量**（`startswith(BOOTSTRAP_IDENTITY)` + `endswith(_PERSONA_PROMPT)` + 长度等于两者之和，无认领时不增不减）；S1 期逐字 golden 存于 `f2a9242` 历史
+- **测试**：`test_identity.py` 重构 golden；`test_llm_chain.py` 工具断言 4→5 + 新增 adopt 派发；`test_expression_service_memory.py` 新增 6 项（命中升格 / 进身份段且不占 hooks / 并列不误抓 / 不相干不误抓 / 排除 `rejected`+`suppressed` / 位置满如实告知）
+- 门禁：ruff lint ✅ / ruff format ✅（81 文件）/ mypy strict ✅（50 源文件）/ pytest ✅ **318 passed**（311 + 新增 7）
+- **生效需重启灵魂**（`soul.ps1 stop` → `start -Body`）——重启后她可以说"这就是我"。**S3 沉淀 / S4 观测与验收待动工**
+
 ---
 
 ## 近期规划 — 深入完善当前已完成内容（2026-09-20 起）

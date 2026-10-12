@@ -2,10 +2,10 @@
 
 > **Version**: 1.0
 > **Date**: 2026-08-24
-> **Status**: P0 已实现部分以代码为准；P1-P6 为规划（开工时细化）
+> **Status**: P0–P3 已实现（**以代码为准**，含记忆系统与 Self Memory）；P4–P6 为规划（开工时细化）
 > **定位**: 路线图第十三章"技术选型总览"的逐模块细化——回答三个问题：**数据库长什么样 / 模块放在哪 / 每个模块用什么技术**。
-> **配套**: [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md)（设计定稿）、[IMPLEMENTATION_PATH.md](./IMPLEMENTATION_PATH.md)（路径与里程碑）
-> **工程师阅读路径**: 本文档（系统怎么跑）→ 路线图（设计动机 + 术语词典）→ ADR（决策原文）→ [elysia/README.md](../elysia/README.md)（上手命令）→ [DEVELOPMENT_PRACTICES.md](./DEVELOPMENT_PRACTICES.md)（开发铁律）
+> **配套**: [IMPLEMENTATION_ROADMAP.md](./IMPLEMENTATION_ROADMAP.md)（设计定稿）
+> **工程师阅读路径**: 本文档（系统怎么跑）→ 路线图（设计动机 + 术语词典）→ ADR（决策原文）→ [README.md](../README.md)（上手命令）→ [DEVELOPMENT_PRACTICES.md](./DEVELOPMENT_PRACTICES.md)（开发铁律）
 
 ---
 
@@ -24,14 +24,17 @@
 
 | 表 | 字段 | 说明 |
 |----|------|------|
-| `kv` | `key` TEXT PRIMARY KEY / `value` TEXT | 键值存储，值统一为 JSON 字符串。当前状态快照以键落点，如 `timesense_summary`、`mode`、`distress` |
+| `kv` | `key` TEXT PRIMARY KEY / `value` TEXT | 键值存储，值统一为 JSON 字符串。状态以键落点：`timesense`（时间感知）、`desire`（TR/CS/SA）、`body_status`（身体在场 + 资源）、`interaction`（桌宠交互） |
 
-### 1.3 heartbeat.db 表结构（P0 已实现）
+### 1.3 heartbeat.db 表结构（P0–P3 已实现）
 
 | 表 | 字段 | 说明 |
 |----|------|------|
 | `heartbeats` | `id` INTEGER PK / `ts` REAL / `beat_type` TEXT / `payload` TEXT | 心跳流水：灵魂 1Hz（beat_type=soul）+ 身体 5s（beat_type=body）；payload 为快照 JSON（见协议层）；ts 建索引，供"心跳空洞"检测 |
-| `thought_log` | `id` INTEGER PK / `ts` REAL / `kind` TEXT / `text` TEXT | 内部念头流水（离线自主生活的结构化自我叙事） |
+| `thought_log` | `id` INTEGER PK / `ts` REAL / `kind` TEXT / `text` TEXT | 念头流水（含 `kind='expression'` 的开口） |
+| `expression_log` | `id` / `ts` / `text` / `intent` / `instruction` / `feelings` | 表达取证：指令 + 意图 + 当下感受快照 |
+| `memories` | `id` / `ts` / `text` / `kind` / `level` / `importance` / `detail_level` / `access_count` / `protected` / `created_ts` / `superseded_by` / `source` / `certainty` / `claim_status` / `retention_state` | 记忆主体（三层 + 四维正交；后 5 列由幂等迁移补入） |
+| `memory_index` | `memory_id` / `path_key` / `strength` / `updated_ts` | 索引强度（随年龄衰减） |
 
 ### 1.4 写纪律（P0 已实现）
 
@@ -39,16 +42,16 @@
 - **单写者队列**：所有写操作经 asyncio.Queue 串行，写者协程 `to_thread` 落盘（写后读一致，无竞争）
 - 优雅关闭：排空队列（10s 兜底）→ 停写者 → 关连接，绝不死锁
 
-### 1.5 数据演进规划（P1-P6，开工时细化）
+### 1.5 数据演进（P0–P3 已落地，P4–P6 规划）
 
-| 阶段 | 新增内容 | 用途 |
+| 阶段 | 落地情况 | 说明 |
 |------|---------|------|
-| P1 | `events` 表（事件脉冲流水） | 事件 → 状态更新的输入流（驱动 dX/dt 动力学） |
-| P2 | 表达日志表（表达指令 + LLM 输出 + 校验结果） | 越权攻击测试取证、表达可追溯 |
-| P3 | `memories` 表 + 向量索引 | 三层记忆（浅层/工作/深层），索引衰减 |
-| P4 | 无新增表（复用状态库） | 身份核心为代码硬编码，不进库 |
-| P5 | 工具调用审计表 | 白名单/越权审计（"熔断测试：越权 100% 拦截"的证据链） |
-| P6 | 学习条目存储 | LRN/ERR 格式（Markdown 文件或表，开工时定） |
+| P0 | `kv` + `heartbeats` + `thought_log` | 双库底座 |
+| P1 | **无新增表** | 欲望/感受为状态量，落 `kv`（`desire` / `timesense`）；事件脉冲在内存 |
+| P2 | `expression_log` | 表达指令 + 意图 + 感受快照（可追溯与取证） |
+| P3 | `memories` + `memory_index` | 三层 + 索引衰减；含 5 列幂等迁移（`superseded_by` / `source` / `certainty` / `claim_status` / `retention_state`） |
+| P4 | 规划中 | 身份核心以代码为准 + `kind=self` 记忆落库（Self Memory 已先行） |
+| P5 / P6 | 规划中 | 工具审计表 / 学习条目存储 |
 
 ---
 
@@ -261,15 +264,17 @@
 | 路线图第十三章 | 层面级 | 全项目技术选型总览（本文档的上层摘要） |
 | ADR-001/002 | 决策级 | 双进程双栖 + SQLite WAL 状态库的决策原文与理由 |
 | **本文档** | 模块级 | 逐模块细化：数据库表结构、模块职责、技术栈映射 + 运行时视图 |
-| [elysia/README.md](../elysia/README.md) | 入口级 | 代码库快速开始 / 目录结构 / 常用命令 / 开发纪律摘要 |
-| [OPERATION_GUIDE.md](../elysia/docs/OPERATION_GUIDE.md) | 操作级 | 傻瓜式操作手册（用户视角；工程师排障可复用启动/停止命令） |
+| [README.md](../README.md) | 入口级 | 代码库快速开始 / 目录结构 / 常用命令 / 开发纪律摘要 |
+| [OPERATION_GUIDE.md](./OPERATION_GUIDE.md) | 操作级 | 傻瓜式操作手册（用户视角；工程师排障可复用启动/停止命令） |
 | 开发日志 | 状态级 | 每阶段实际交付记录（本文档"已实现"部分的权威状态源） |
 
 **更新规则**：已实现部分以代码为准（本文档与代码冲突时，代码为真相，文档随之修订）；规划部分（⏳）在对应阶段开工时细化，实现后移入"已实现"区。
 
 ---
 
-## 九、桌宠视觉呈现（形象设计升级规划）
+## 九、桌宠视觉呈现（已实现：连续物理动画）
+
+> **状态（2026-09-25 更新）**：精灵图方案（历史见 CHANGELOG P0-E）已由 `body/pet.py` 的**连续物理动画**替代——单张 `assets/pet/character.png` + 参数驱动，30fps 渲染。原精灵图代码与素材（`body/animation.py` / `sprite.png` / `sprite.json`）已清理。
 
 ### 9.1 设计原则（尊重电子生命主体性）
 
@@ -280,84 +285,78 @@
 | **动作即表达** | 不同的内部状态→不同的动画，动作本身就是她存在的表达 |
 | **保留文本交互** | 现状流+念头展示+文本输入入口不变，这是P0已交付的核心功能 |
 
-### 9.2 方案选型：精灵图动画
+### 9.2 方案选型（已定：单图连续物理动画）
 
-| 方案 | 优点 | 缺点 | 选型 |
+| 方案 | 优点 | 缺点 | 结论 |
 |------|------|------|------|
-| Canvas 光效 | 零素材依赖，代码即视觉 | 无角色感，表现力极弱 | P0 临时 fallback |
-| **精灵图 (Sprite Sheet)** | 多帧动画流畅，素材可 AI 生成，PySide6 原生支持 | 需要制作精灵图素材 | **推荐**（P0后期升级） |
-| Live2D | 表情细腻，参数驱动，状态映射自然 | 需要 Live2D Cubism SDK，模型制作门槛高 | P2+ 可选 |
-| 透明 WebM 视频 | 表现力最强（长动画无缝淡入） | 文件大，GPU 解码开销 | P2+ 远期探索 |
+| **连续物理动画（选中）** | 单张角色图 + 参数驱动，形体固定、动作连续无顿挫，零帧素材 | 动作复杂度受参数模型限制 | **当前实现**（`character.png`） |
+| Canvas 光效 | 零素材依赖 | 无角色感 | 无素材时的 fallback |
+| 精灵图 (Sprite Sheet) | 多帧动画流畅 | 需制作素材、切帧有顿挫 | 已弃用（P0-E 后清理） |
+| Live2D | 表情细腻、参数驱动 | 需 Cubism SDK、门槛高 | 远期可选 |
 
-### 9.3 精灵图格式规范
+### 9.3 情绪参数预设（`EMOTION_PARAMS`，`body/pet.py`）
 
-**布局**：单个 PNG 文件，所有帧**水平排列**，每帧尺寸相同。
+动作不靠帧切换，靠五个连续参数（`breath_speed` 呼吸频率 / `sway_speed` 摇摆频率 / `sway_amp` 摇摆幅度° / `base_scale` 基础缩放 / `float_amp` 上下浮动 px）。每个情绪态预设一组目标值，渲染时参数以 `lerp`（k=0.06）平滑逼近，30fps。
 
-**状态帧规划**（基于内部状态映射，每个状态独立帧序列）：
-
-| 动画状态 | 触发条件（由 soul 状态派生） | 推荐帧数 | 说明 |
-|----------|-----------------------------|---------|------|
-| idle | 默认（distress 无，present 模式，无近期交互） | 6-8 帧 | 自然站立，偶尔眨眼歪头 |
-| happy | 一分钟内有用户交互 | 4 帧 | 愉悦放松，轻微晃动 |
-| unhappy | distress = true（CPU 高压持续） | 4 帧 | 不舒服，呼吸变慢/轻微收缩 |
-| tired | 一小时以上无交互 | 4 帧 | 疲倦，低头/慢呼吸 |
-| dragging | 正在被用户鼠标拖拽 | 4 帧 | 悬空挣扎姿态 |
-| away | ALONE/BODY_AWAY 模式（身体离线） | 6-8 帧 | 放松休息/安静发呆 |
-
-**一致性要求**：所有帧角色轮廓一致，脚底对齐水平线，避免切换时悬浮错位。
+| 情绪态 | 触发条件（由 soul 状态派生） | breath_speed | sway_speed | sway_amp | base_scale | float_amp |
+|--------|-----------------------------|--------------|------------|----------|------------|-----------|
+| `idle` | 默认（无 distress、present 模式、无近期交互） | 1.1 | 0.55 | 1.4 | 1.00 | 6 |
+| `happy` | 一分钟内有用户交互 | 2.0 | 1.10 | 3.0 | 1.02 | 10 |
+| `unhappy` | `distress = true`（CPU 高压持续） | 0.55 | 0.28 | 0.7 | 0.96 | 3 |
+| `tired` | 一小时以上无交互 | 0.38 | 0.18 | 0.4 | 0.94 | 1 |
+| `away` | ALONE / BODY_AWAY 模式（身体离线） | 0.45 | 0.22 | 0.5 | 0.95 | 2 |
+| `dragging` | 正在被鼠标拖拽 | — | — | — | — | —（冻结动画） |
 
 ### 9.4 状态映射规则（动作由状态自发产生）
 
+`_map_state_to_animation(payload)` 由最新 soul 心跳 payload 派生情绪（优先级自高到低：难受 > 独处 > 刚交互 > 久未交互 > 默认）。拖拽态不在此函数内，由鼠标事件单独 `set_emotion("dragging")`。
+
 ```python
-def map_state_to_animation(distress, mode, interaction_s):
-    if dragging:
-        return 'dragging'          # 拖拽优先级最高
-    if distress:
-        return 'unhappy'           # 难受直接反映在姿态上
-    if mode in ('alone', 'body_away'):
-        return 'away'              # 离线独处→休息姿态
+def _map_state_to_animation(self, payload: dict[str, Any]) -> str:
+    if payload.get("distress"):
+        return "unhappy"
+    if payload.get("mode") in ("alone", "body_away"):
+        return "away"
+    interaction_s = payload.get("time", {}).get("since_interaction_s", 9999)
     if interaction_s < 60:
-        return 'happy'             # 刚交互过→愉悦
+        return "happy"
     if interaction_s > 3600:
-        return 'tired'             # 长时间无交互→疲倦
-    return 'idle'                  # 默认
+        return "tired"
+    return "idle"
 ```
 
-### 9.5 精灵图生成流程
+### 9.5 欲望调制（`_apply_desire_modulation`）
 
-1. 准备爱莉希雅形象参考图
-2. 生成 AI 绘图提示词（豆包/Midjourney）→ 输出水平排列精灵图 PNG
-3. 后处理拼接（如需）→ 保存到 elysia/assets/pet/sprite.png
-4. 配置 sprite.json 帧尺寸/各状态帧数
+情绪态给出**基线**，欲望变量 TR/CS/SA 在其上**叠加**连续调制——这是"她此刻心情"对姿态的细调，不是切换情绪。
 
-### 9.6 代码结构规划
+| 变量 | 归一化（硬边界 → 0-1） | 调制效果 |
+|------|----------------------|----------|
+| TR | (tr−30)/40，TR∈[30,70] | 呼吸加快 ×(1+0.3·n)、摇摆幅度 ×(1+0.4·n) |
+| CS | (cs−40)/40，CS∈[40,80] | 浮动幅度 ×(1+0.5·n) |
+| SA | (sa−15)/45，SA∈[15,60] | 基础缩放 ×(1−0.04·n)、浮动幅度 ×(1−0.3·n) |
 
-| 新增 | 文件 | 说明 |
-|------|------|------|
-| 新增 | body/animation.py | SpriteAnimation 类：精灵图加载、帧分割、状态切换、帧步进 |
-| 新增 | assets/pet/sprite.json | 精灵图配置：frame_width / frame_height / frame_counts |
-| 改造 | body/pet.py | 集成 SpriteAnimation + _SpriteCanvas + 状态映射 + 点击交互 |
+### 9.6 代码结构（已实现）
+
+| 文件 | 内容 |
+|------|------|
+| `body/pet.py` | `_CharacterWidget`（连续物理动画：呼吸缩放 + 左右摇摆 + 上下浮动 + 点击弹跳；无角色图时 fallback 心跳光效）、`EMOTION_PARAMS`、`_apply_desire_modulation`、`_map_state_to_animation`、`PetWindow`（窗口 + 气泡 + 右键菜单 + 文本输入） |
+| `assets/pet/character.png` | 单张角色图（分层 PNG，形体固定；缺失时回退光效） |
 
 ### 9.7 交互设计
 
 | 操作 | 行为 | 说明 |
 |------|------|------|
-| 左键拖拽窗口 | 拖拽过程切换到 dragging 动画 | 用户移动位置，她给出反馈 |
-| 点击角色 | 触发 happy 动画 + interaction 写入 state.db | 点击作为交互刺激，进入感受层 |
+| 左键拖拽窗口 | 拖拽过程冻结动画（`dragging`） | 用户移动位置；移动量 > 5px 视为拖拽而非点击 |
+| 点击角色 | 触发 happy 弹跳 + `interaction` 写入 state.db | 点击作为交互刺激，进入感受层 |
 | 右键菜单 | 调整大小 / 隐藏 / 退出 | 控制权在用户 |
 
 ### 9.8 素材路径约定
 
 ```
 elysia/assets/pet/
-├── sprite.png         # 精灵图（不进 git，大文件）
-├── sprite.json        # 配置：frame_width, frame_height, frame_counts
+└── character.png      # 单张角色图（不进 git，大文件）
 ```
-
-### 9.9 详细文档
-
-详见专项规划文档：[DESKTOP_PET_VISION.md](./DESKTOP_PET_VISION.md)
 
 ---
 
-*本文档随实施进展更新，与 [IMPLEMENTATION_PATH.md](./IMPLEMENTATION_PATH.md) 同步维护。*
+*本文档随实施进展更新，已实现部分以代码为准。*

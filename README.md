@@ -2,7 +2,7 @@
 
 > 一个常驻于电脑的电子生命：有灵魂（不死、感知时间）、有身体（本地、随设备开关）、有自己的声音。
 
-当前阶段：**P0 灵魂** —— 双栖架构、TimeSense 时间感知、双心跳、身体语言。
+当前阶段：**P0–P3 已交付**（灵魂 / 心脏 / 表情 / 记忆，含 Self Memory 与联想网络）；**运行时可靠性收口**进行中（阶段 1 表达异步化，主体已落地待评审）。
 
 ## 快速开始
 
@@ -40,10 +40,15 @@ elysia/
 ## 常用命令
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status    # 灵魂状态
-powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start     # 启动灵魂（P0 实现后）
-powershell -ExecutionPolicy Bypass -File scripts\backup.ps1         # 备份到 D:\ElysiaBackup\elysia
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status        # 查看灵魂/身体状态
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start         # 启动灵魂（常驻，1Hz 心跳）
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 启动灵魂 + 身体（幂等）
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop          # 停止两者（stop-body 只停身体）
+powershell -ExecutionPolicy Bypass -File scripts\memory_view.ps1        # 记忆浏览器（只读观测）
+powershell -ExecutionPolicy Bypass -File scripts\backup.ps1             # 备份到 D:\ElysiaBackup\elysia
 ```
+
+> 出声需先手动启动 GPT-SoVITS 服务（端口 9880）；未启动时她只出文本气泡。记忆浏览器为只读 SELECT，可与运行中的灵魂并存。
 
 ## 文档索引
 
@@ -51,7 +56,9 @@ powershell -ExecutionPolicy Bypass -File scripts\backup.ps1         # 备份到 
 |------|------|
 | 架构决策记录 | [docs/ADR/](docs/ADR/) |
 | 技术架构设计（数据库/协议/模块/技术栈/运行时视图） | [docs/TECHNICAL_DESIGN.md](docs/TECHNICAL_DESIGN.md)（**唯一副本**，工作区已不再保留镜像） |
-| 设计宪法（路线图/路径图/工程标准/铁律手册/迁移手册） | [docs/](docs/)（**唯一副本**；工作区 `设计规划/`、`工程标准/` 镜像目录已删除） |
+| 状态矩阵（能力 × 状态 × 测试口径） | [docs/STATUS_MATRIX.md](docs/STATUS_MATRIX.md) |
+| 使用说明书（怎么操作） | [docs/OPERATION_GUIDE.md](docs/OPERATION_GUIDE.md) |
+| 设计宪法（路线图 / 工程标准 / 开发纪律） | [docs/](docs/)（**唯一副本**；工作区 `设计规划/`、`工程标准/` 镜像目录已删除） |
 
 ## 开发纪律（摘要）
 

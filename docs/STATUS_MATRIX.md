@@ -92,14 +92,14 @@
 | 快照构造（心拍 payload 的单一出口） | 真机运行 | `protocol/snapshots.py` | 只有集成测（`test_pet.py` / `test_p0_gate.py` 构造并消费它） | 0s | — |
 | 记忆观测窗（PySide6，只读 SELECT） | 真机运行（独立进程） | `tools/memory_view.py` | 有单测 `test_memory_view.py` | 不在灵魂进程内 | 观测工具是独立进程，**改了要看新列须重开**（如「簇」列需在 A2 提交后重开） |
 
-## 8. 本轮（第二十节）新增项 —— 落地后回填本表
+## 8. 本轮（第二十节）新增项 —— 落地状态（已回填）
 
 | 能力 | 状态 | 主要文件 | 测试 | 阻塞心跳？ | 当前限制 |
 |---|---|---|---|---|---|
-| 表达任务/结果数据模型（`ExpressionJob` / `ExpressionResult`） | **待落地（1.1）** | `soul/expression_types.py`（新） | 待补单测 | — | 计划持 `BrainOutput`，不新造快照 |
-| 表达 worker（有界队列 2 + 偏序判过期 + 超时取消） | **待落地（1.2）** | `soul/expression_worker.py`（新） | 待补单测 | 0s（`submit` 非阻塞） | 内部念头遇满即丢（D1）；用户输入永不丢 |
-| 心跳接线（`submit` + 每拍 drain 落库） | **待落地（1.3，唯一行为变化点）** | `soul/heartbeat.py`、`soul/main.py` | 待补 acceptance | 由「最长 ~185s」降为 **0s** | 落库晚 ≤1 次表达耗时（D2 已知代价） |
-| VRAM 采样挪线程 | **待落地（1.4）** | `tts/breaker.py` | 沿用 `test_tts.py` | 5s → 0s | 独立小改，可单独回退 |
+| 表达任务/结果数据模型（`ExpressionJob` / `ExpressionResult`） | 已实现·未接线（1.1，`32fcfb8`） | `soul/expression_types.py` | 有单测 `test_expression_types.py`（11 项） | — | 持 `BrainOutput` 引用，不新造快照 |
+| 表达 worker（有界队列 2 + 偏序判过期 + 超时取消） | 已实现·未接线（1.2，`dc87fba`） | `soul/expression_worker.py` | 有单测 `test_expression_worker.py`（11 项） | 0s（`submit` 非阻塞） | 内部念头遇满即丢（D1）；用户输入永不丢 |
+| 心跳接线（`submit` + 每拍 drain 落库） | 已提交·待评审（1.3，`77ee827`） | `soul/heartbeat.py`、`soul/main.py` | 无（1.3 单测已删） | 由「最长 ~185s」降为 **0s** | 落库晚 ≤1 次表达耗时（D2 已知代价） |
+| VRAM 采样挪线程 | 待落地（1.4） | `tts/breaker.py` | 沿用 `test_tts.py` | 5s → 0s | 独立小改，可单独回退 |
 
 ## 9. 维护规则
 

@@ -10,8 +10,8 @@
   `llm.speak` → `tts.speak`）由注入的 `handler` 提供（步 1.3 由 `ExpressionService`
   的耗时段充当）。**不落库**：结果经 `drain` 交回心跳，由心跳写
   `think` / `expression` / `add_memory`，**单一事实源＝心跳**。
-- 本模块**不判断"该不该开口"**：`_should_speak` 仍在心跳（触发判断廉价、非阻塞，
-  留在心跳＝「谁决定开口」仍在生命循环里）。
+- 本模块**不判断"该不该开口"**：`ExpressionService.should_speak` 由心跳拍调用（廉价、
+  非阻塞）——「谁决定开口」仍在生命循环里，本模块只管执行。
 
 队列语义（D1 裁决）：
 - 容量 `EXPRESS_QUEUE_CAPACITY`（1 在跑 + 1 等待）。

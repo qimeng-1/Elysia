@@ -1,8 +1,8 @@
 """灵魂进程入口：常驻心跳（1Hz）+ 大脑循环（P1）+ 优雅关闭。
 
 启动流程：ensure_dirs → 日志双通道 → 双库启动 → **身份种子幂等种入**（S5）
-→ TimeSense 恢复/新生 → 欲望系统恢复/新生 → 大脑循环初始化 → 心跳循环
-→ 阻塞等待停止信号 → 优雅关闭（排空写队列）。
+→ TimeSense 恢复/新生 → 欲望系统恢复/新生 → 大脑循环初始化 → 表达 worker 装配 → 心跳循环
+→ 阻塞等待停止信号 → 优雅关闭（先停表达 worker 并排空其结果，再排空写队列）。
 
 P1 新增：欲望系统 DesireSystem + 大脑循环 BrainLoop 的恢复与初始化。
 
@@ -34,6 +34,8 @@ from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireEvent, DesireSystem
 from elysia.soul.distress import DistressMonitor
 from elysia.soul.expression_service import ExpressionService, ensure_identity_seeds
+from elysia.soul.expression_types import ExpressionResult
+from elysia.soul.expression_worker import ExpressionWorker
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state, stop_with_cancel
 from elysia.tts import build_tts_chain
 
@@ -120,6 +122,9 @@ async def _run(settings: Settings) -> int:
         retriever=retrieve_from_store,
         on_recall=_on_recall,
     )
+    # 阶段 1（20.6 的 1.3）：表达耗时段（LLM/TTS）交给 worker——心跳提交任务后立刻继续走，
+    # 不再在 1Hz 主循环里等外部服务。落库仍由心跳拍做（D2），故 worker 只注入 handler。
+    expression_worker = ExpressionWorker(expression.run_job)
 
     heartbeat = SoulHeartbeat(
         state_store=state_store,
@@ -133,6 +138,7 @@ async def _run(settings: Settings) -> int:
         away_life=AwayLife(heartbeat_store),
         checkpoint=CheckpointManager(settings.data_dir),
         expression=expression,
+        expression_worker=expression_worker,
     )
 
     stop = asyncio.Event()
@@ -149,9 +155,14 @@ async def _run(settings: Settings) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        log.info("soul stopping：优雅关闭（排空写队列）")
+        log.info("soul stopping：优雅关闭（先停表达，再停心跳与库）")
         heartbeat.set_distress(False)
+        # 1.6 关闭序的 worker 段：停收新任务 → 等在跑任务 ≤ EXPRESS_TIMEOUT_S
+        # （10s 宽限）→ 超时取消 → 排空结果队列。落库归属不变（D2）：取回的结果
+        # 交回心跳写，且**先停它、再停库**。
+        pending: list[ExpressionResult] = await expression_worker.aclose()
         await heartbeat.stop()
+        await heartbeat.persist_expressions(pending)
         await stop_with_cancel(beat_task)
         await state_store.close()
         await heartbeat_store.close()

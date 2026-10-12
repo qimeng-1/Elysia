@@ -61,6 +61,8 @@ from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
 from elysia.soul.expression_service import ExpressionService
+from elysia.soul.expression_types import ExpressionJob, ExpressionResult, make_job_id
+from elysia.soul.expression_worker import ExpressionWorker
 
 logger = logging.getLogger("elysia.soul.heartbeat")
 
@@ -127,6 +129,7 @@ class SoulHeartbeat:
         away_life: AwayLife | None = None,
         checkpoint: CheckpointManager | None = None,
         expression: ExpressionService | None = None,
+        expression_worker: ExpressionWorker | None = None,
     ) -> None:
         self._state_store = state_store
         self._heartbeat_store = heartbeat_store
@@ -141,9 +144,13 @@ class SoulHeartbeat:
         self._away_life = away_life
         self._checkpoint = checkpoint
         self._expression = expression
+        # 阶段 1（20.6 的 1.3）：表达由 worker 执行——心跳只提交任务与取回落库
+        self._expression_worker = expression_worker
 
         # 交互事件追踪（防止重复触发）
         self._last_interaction_event_ts: float = 0.0
+        # 阶段 1：心跳序号（表达任务的排序键——同一拍可能有多个任务，故必须带拍号）
+        self._heartbeat_seq = 0
         # P3 记忆生命周期维护：按心跳计数节流（每 MEMORY_MAINTAIN_EVERY_N 拍一次晋升扫描）
         self._memory_maintain_tick = 0
         # P3-O 记忆感受路径：按心跳计数节流（静默唤起，只推心情）
@@ -175,6 +182,7 @@ class SoulHeartbeat:
         """心跳主循环（常驻；stop() 后退出）。"""
         self._running = True
         while self._running:
+            self._heartbeat_seq += 1
             now = self._clock.now()
             await self._sync_body_status(now)
             mode = self._mode_mgr.mode(self._timesense.state.last_body_online_ts, now)
@@ -238,46 +246,67 @@ class SoulHeartbeat:
                     brain_action=brain_action or "none",
                 )
 
-            # ── P2：表达管线（LLM → 校验 → TTS → 气泡）────
-            if self._expression is not None and not frozen and brain_output is not None:
-                await self._expression.tick(
-                    brain_output,
-                    now=now,
-                    vrram_mb=self._latest_vrram_mb(),
-                    body_left_h=float(summary["body_away_s"]) / 3600.0,
-                    day_phase=str(summary["day_phase"]),
-                    force=self._new_interaction,
-                    env=self._expression_env(brain_output, summary),
-                    user_message=self._pending_user_message,
-                )
-                # P3 运行时接线：用户输入 → 一次经历写入记忆（无论是否开口）
-                if self._pending_user_message:
-                    msg = self._pending_user_message
-                    feelings = brain_output.feelings.to_dict()
-                    # 重要性按内容信号评估（不再是固定值）：闲聊留浅层，事实才沉淀
-                    new_id = await self._heartbeat_store.add_memory(
-                        now,
-                        {
-                            "level": LEVEL_SHALLOW,
-                            "kind": KIND_INTERACTION,
-                            "content": msg,
-                            "emotion_vector": feelings,
-                            "importance": importance(
-                                kind=KIND_INTERACTION,
-                                emotion_vector=feelings,
-                                content=msg,
-                                user_related=True,
-                            ),
-                            "protected": False,
-                            "narrative": msg,
-                            # P3-T 来源标注：这是用户告知，不是她自己的话
-                            "source": SOURCE_USER,
-                            "certainty": CERTAINTY_CERTAIN,
-                        },
+            # ── P2：表达管线（提交非阻塞 + 每拍取回落库，20.6 的 1.3）────
+            # 心跳不再等 LLM/TTS：判断该不该开口（廉价、非阻塞）→ 把耗时那段交给
+            # worker 在独立任务里跑 → 结果由**心跳拍**取回并落库（D2：单一事实源＝心跳）。
+            # LLM 慢 30s 也只是她晚 30 拍才说出那句话，心跳照走 30 拍、新交互不丢。
+            worker = self._expression_worker
+            if worker is not None:
+                await self.persist_expressions(worker.drain(), now=now, frozen=frozen)
+            if (
+                self._expression is not None
+                and worker is not None
+                and not frozen
+                and brain_output is not None
+                and self._expression.should_speak(brain_output, now, self._new_interaction)
+            ):
+                worker.submit(
+                    ExpressionJob(
+                        job_id=make_job_id(self._heartbeat_seq, now),
+                        created_ts=now,
+                        heartbeat_seq=self._heartbeat_seq,
+                        output=brain_output,
+                        summary=summary,
+                        vrram_mb=self._latest_vrram_mb(),
+                        env=self._expression_env(brain_output, summary),
+                        user_message=self._pending_user_message,
+                        force=self._new_interaction,
                     )
-                    # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
-                    await self._supersede_conflicts(new_id, msg, now)
-                    self._pending_user_message = None
+                )
+
+            # ── P3 运行时接线：用户输入 → 一次经历写入记忆（无论是否开口）──
+            if (
+                self._expression is not None
+                and not frozen
+                and brain_output is not None
+                and self._pending_user_message
+            ):
+                msg = self._pending_user_message
+                feelings = brain_output.feelings.to_dict()
+                # 重要性按内容信号评估（不再是固定值）：闲聊留浅层，事实才沉淀
+                new_id = await self._heartbeat_store.add_memory(
+                    now,
+                    {
+                        "level": LEVEL_SHALLOW,
+                        "kind": KIND_INTERACTION,
+                        "content": msg,
+                        "emotion_vector": feelings,
+                        "importance": importance(
+                            kind=KIND_INTERACTION,
+                            emotion_vector=feelings,
+                            content=msg,
+                            user_related=True,
+                        ),
+                        "protected": False,
+                        "narrative": msg,
+                        # P3-T 来源标注：这是用户告知，不是她自己的话
+                        "source": SOURCE_USER,
+                        "certainty": CERTAINTY_CERTAIN,
+                    },
+                )
+                # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
+                await self._supersede_conflicts(new_id, msg, now)
+                self._pending_user_message = None
 
             # ── P3 记忆生命周期维护：周期性晋升（浅层→工作→深层）──
             self._memory_maintain_tick += 1
@@ -286,6 +315,28 @@ class SoulHeartbeat:
                 await self._maintain_memories(now)
 
             await self._clock.sleep(self._interval_s)
+
+    async def persist_expressions(
+        self,
+        results: list[ExpressionResult],
+        *,
+        now: float | None = None,
+        frozen: bool = False,
+    ) -> None:
+        """把 worker 取回的表达结果落库（D2：落库动作发生在心跳拍内，worker 零写入）。
+
+        「她说了什么」与「用户说了什么」因此仍由同一处写、同一拍相邻，顺序确定。
+
+        `frozen`（紧急冻结 5.6）时只丢弃不落库——冻结的语义是"禁止一切行为与输出"，
+        气泡也算输出。关闭时（1.6）由 `main.py` 排空结果队列并调用本方法落库。
+
+        `now` 缺省取当前时刻（关闭路径用）；正常心跳拍传入本拍时刻。
+        """
+        if frozen or self._expression is None or not results:
+            return
+        ts = self._clock.now() if now is None else now
+        for result in results:
+            await self._expression.persist(result, ts)
 
     async def _feel_memories(self, output: BrainOutput) -> None:
         """P3-O 记忆的感受路径：被"心境共鸣"唤起 → 只推心情，不进入她的话。

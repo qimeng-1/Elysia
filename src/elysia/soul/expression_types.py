@@ -12,8 +12,10 @@
   记忆/身份注入）→ `await llm.speak` → `await tts.speak`
 - **全部落库留在心跳**：`think` / `expression` / `add_memory` 仍由心跳写，因此结果
   必须把**取证所需的一切**带回来（`instruction` / `intent` / `text` / `level` /
-  `validation` / `tts`）——这是 `ExpressionResult` 比 20.6 初稿多出两个字段的原因：
-  `expression_log` 的取证行需要 `intent` 与 `instruction`（payload）。
+  `validation` / `tts`）——这是 `ExpressionResult` 比 20.6 初稿多出字段的原因：
+  `expression_log` 的取证行需要 `intent` 与 `instruction`（payload），而她这句话
+  写入记忆时的 `emotion_vector` 取的是**开口那一刻**的心情（`feelings`），
+  心跳落库时手上只有别的拍的心情 ⇒ 必须随结果一起带回来（不可用落库拍的心情顶替）。
 - **单一事实源＝心跳**：「她说了什么」与「用户说了什么」在同一处落库。
 
 `ExpressionJob` **持 `BrainOutput` 本体，不新造快照**（20.6 的 1.1「需改」）：少一层
@@ -106,4 +108,7 @@ class ExpressionResult:
     instruction: Mapping[str, Any] | None = None  # payload：expression_log 取证用
     intent: str = ""
     tts: TTSResult | None = None
+    # 开口那一刻的心情（6 维感受）：记忆 emotion_vector 用。
+    # 带上它是因为落库在**另一拍**——不能拿落库拍的心情顶替她说这句话时的心情。
+    feelings: Mapping[str, float] | None = None
     error: str | None = None

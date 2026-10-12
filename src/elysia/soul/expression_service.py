@@ -34,6 +34,15 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`�
 第八节 S5（D-S1 拍板：库为准）：身份种子（出生设定 + 边界，`IDENTITY_SEEDS`）在启动时
 **幂等种入她的库**（`ensure_identity_seeds`），身份段**以库为准**——她对种子
 `disclaim` / `forget` / `adopt` 都有效，一处豁免都不加（"bootstrap 只是过渡"由此成为可达状态）。
+
+阶段 1（20.6 的 1.3）：本服务被切成"三件各自独立的事"，因为**心跳不能等外部服务**：
+
+- `should_speak`：**该不该开口**（廉价、非阻塞）——留在心跳拍里判断，「谁决定开口」仍在生命循环。
+- `run_job`：**耗时段**（构造指令 → LLM → TTS）——交给 `ExpressionWorker` 在独立任务里跑，心跳不等。
+- `persist`：**落库**（`think` / `expression` / `add_memory`）——仍由心跳拍调用
+  （D2：单一事实源＝心跳）。
+
+`tick` 是三者的**同步一站式**，只供离线探针与单测使用；运行时走上面三步（心跳 → worker）。
 """
 
 from __future__ import annotations
@@ -41,13 +50,12 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.chain import LLMChain
 from elysia.llm.identity import IDENTITY_FIELD, IDENTITY_SEEDS, MAX_IDENTITY_LINES
-from elysia.llm.validator import ExpressionValidator, ValidationResult
+from elysia.llm.validator import ExpressionValidator
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
     CLAIM_REJECTED,
@@ -69,7 +77,16 @@ from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
 from elysia.soul.expression import build_expression
-from elysia.tts.chain import TTSChain, TTSRequest, TTSResult
+from elysia.soul.expression_types import (
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+    STATUS_SUCCESS,
+    STATUS_TIMEOUT,
+    ExpressionJob,
+    ExpressionResult,
+    make_job_id,
+)
+from elysia.tts.chain import TTSChain, TTSRequest
 
 log = logging.getLogger("elysia.soul.expression")
 
@@ -141,16 +158,6 @@ async def ensure_identity_seeds(store: HeartbeatStore, now: float) -> int:
     return seeded
 
 
-@dataclass
-class ExpressionOutcome:
-    """一次"开口"的完整结果（供心跳拍/测试断言）。"""
-
-    text: str
-    level: str  # "main" | "fallback" | "micro"
-    validation: ValidationResult | None
-    tts: TTSResult | None = None
-
-
 class ExpressionService:
     """灵魂侧的表达式调度：触发判断 + LLM/TTS 全链路 + 落库取证。"""
 
@@ -182,60 +189,62 @@ class ExpressionService:
     def last_express_ts(self) -> float | None:
         return self._last_express_ts
 
-    def _should_speak(self, output: BrainOutput, now: float, force: bool) -> bool:
-        """触发判断：外部交互立即开口；内部冲动按双模态节流。"""
+    def should_speak(self, output: BrainOutput, now: float, force: bool) -> bool:
+        """触发判断（20.6 的 1.3）：外部交互立即开口；内部冲动按双模态节流。
+
+        由**心跳拍**调用（廉价、非阻塞）——「谁决定开口」因此仍在生命循环里，
+        worker 只管执行，不判断该不该说。
+
+        判定为真即**记下开口时刻**（节流基线），不等 worker 真的说出口：提交被队列
+        丢弃时也照样推进——丢弃＝「她这次决定不说」（D1），若等到执行成功才推进，
+        同一句话会在队列满的每一拍被重新判定、反复丢弃。
+        """
         if force:
+            self._last_express_ts = now
             return True
         interval = (
             EXPRESS_ACTIVE_INTERVAL_S
             if output.action in ("think_active", "think_quiet") and output.will.thought_style > 0
             else EXPRESS_QUIET_INTERVAL_S
         )
-        return self._last_express_ts is None or now - self._last_express_ts >= interval
-
-    async def tick(
-        self,
-        output: BrainOutput,
-        *,
-        now: float,
-        vrram_mb: float = 0.0,
-        body_left_h: float = 0.0,
-        day_phase: str = "day",
-        force: bool = False,
-        env: dict[str, object] | None = None,
-        user_message: str | None = None,
-    ) -> ExpressionOutcome | None:
-        """每心跳拍调用：到开口时机则执行表达全链路，否则返回 None。
-
-        user_message：桌宠发来的用户输入（可选）。非空且触发开口时，
-        作为"话题"注入表达指令（T2 保持：只是话题，不做指令），并作为
-        一次经历写入记忆（P3 运行时接线）。
-        """
-        if not self._should_speak(output, now, force):
-            return None
-
+        if self._last_express_ts is not None and now - self._last_express_ts < interval:
+            return False
         self._last_express_ts = now
+        return True
+
+    async def run_job(self, job: ExpressionJob) -> ExpressionResult:
+        """worker 的执行体：构造指令 → LLM → 校验 → TTS（**不落库**）。
+
+        D2 裁决把"耗时段"切在这里：本方法**零落库**（`think` / `expression` /
+        `add_memory` 由心跳拍的 `persist` 写），因此它可安全地跑在 worker 的独立
+        任务里，不占心跳一拍——LLM 慢 30s 时心跳照走 30 拍。
+
+        时间口径：一律用 `job.created_ts`（她决定开口的那一刻）——记忆新鲜度与
+        工具检索的 now 都以它为参照，与"落库晚 ≤1 次表达耗时"无关。
+        """
+        output = job.output
+        now = job.created_ts
 
         # ── 1. 构造表达指令（决策层唯一出口）────────────
         instruction = build_expression(
             output,
-            intent="回应" if force else None,
-            vrram_mb=vrram_mb,
-            body_left_h=body_left_h,
-            day_phase=day_phase,
+            intent="回应" if job.force else None,
+            vrram_mb=job.vrram_mb,
+            body_left_h=float(job.summary.get("body_away_s", 0.0)) / 3600.0,
+            day_phase=str(job.summary.get("day_phase", "day")),
         )
         payload = self._validator.enrich_permits(
-            instruction.to_dict(), env if env is not None else {}
+            instruction.to_dict(), dict(job.env) if job.env is not None else {}
         )
 
         # ── 1a. 用户输入作为"话题"注入（T2：非指令，仅话题）────
-        if user_message:
-            payload["user_message"] = user_message
+        if job.user_message:
+            payload["user_message"] = job.user_message
 
         # ── 1b. 记忆注入：只在"话题撞上"时（被唤起才浮现，不再每句都推）──
-        if self.retriever is not None and user_message:
+        if self.retriever is not None and job.user_message:
             hooks = await self.retriever(
-                self._store, output.feelings.to_dict(), now=now, query=user_message
+                self._store, output.feelings.to_dict(), now=now, query=job.user_message
             )
             if hooks:
                 payload["memory_hooks"] = [h.label for h in hooks]
@@ -250,14 +259,21 @@ class ExpressionService:
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)
         if self.retriever is not None and callable(set_runner):
-            set_runner(self._make_tool_runner(output, now, user_message))
+            set_runner(self._make_tool_runner(output, now, job.user_message))
 
         # ── 2. LLM 翻译 → 校验 ───────────────────────────
         speak = await self._llm.speak(payload)
-        outcome = ExpressionOutcome(
+        result = ExpressionResult(
+            job_id=job.job_id,
+            status=STATUS_SUCCESS if speak.text else STATUS_SKIPPED,
+            order_key=job.order_key,
             text=speak.text,
             level=speak.level,
             validation=speak.validated,
+            instruction=payload,
+            intent=str(payload.get("intent", "")),
+            # 记忆的 emotion_vector 取"她开口那一刻"的心情，随结果回到落库拍
+            feelings=dict(output.feelings.to_dict()),
         )
 
         # ── 3. TTS 出声（可选）───────────────────────────
@@ -268,53 +284,104 @@ class ExpressionService:
                 emotion=str(tts_params.get("emotion", "default")),
                 speed=float(tts_params.get("speed", 1.0)),
             )
-            outcome.tts = await self._tts.speak(tts_req)
+            result.tts = await self._tts.speak(tts_req)
+
+        log.debug(
+            "表达执行完成 job_id=%s intent=%s level=%s tts_source=%s",
+            job.job_id,
+            result.intent,
+            result.level,
+            result.tts.source if result.tts else None,
+        )
+        return result
+
+    async def persist(self, result: ExpressionResult, now: float) -> None:
+        """把一次开口落库（**由心跳拍调用**，D2：worker 零落库）。
+
+        `now` 取**落库拍**的时刻：它是唯一的写入时间轴，「她说了什么」与
+        「用户说了什么」因此在同一拍内相邻、顺序确定、一处可查。
+
+        没说出话的两种结果不落库：执行失败（`failed`）与关停中被取消且无文本
+        （`timeout`）——没有文本就没有气泡可显示，也没有取证价值，只留一条日志。
+        """
+        if not result.text and result.status in (STATUS_FAILED, STATUS_TIMEOUT):
+            log.debug("表达未成，无需落库 job_id=%s status=%s", result.job_id, result.status)
+            return
 
         # ── 4. 落库：thought_log（桌宠气泡）+ expression_log（取证）──
-        await self._store.think(now, "expression", speak.text)
+        await self._store.think(now, "expression", result.text)
         validation = (
-            {"ok": speak.validated.ok, "reason": speak.validated.reason}
-            if speak.validated is not None
+            {"ok": result.validation.ok, "reason": result.validation.reason}
+            if result.validation is not None
             else {"ok": True, "reason": None}
         )
         await self._store.expression(
             ts=now,
-            intent=str(payload.get("intent", "")),
-            instruction=payload,
-            llm_text=speak.text,
+            intent=result.intent,
+            instruction=dict(result.instruction) if result.instruction is not None else {},
+            llm_text=result.text,
             validation=validation,
-            level=speak.level,
+            level=result.level,
         )
         # ── 4b. P3 运行时接线：她说的话成为经历 → 写入记忆 ──
-        if speak.text:
-            feelings = output.feelings.to_dict()
+        if result.text:
+            feelings = dict(result.feelings or {})
             # 重要性按内容信号评估（不再是固定值）：呓语留浅层，有分量的话才沉淀
             await self._store.add_memory(
                 now,
                 {
                     "level": LEVEL_SHALLOW,
                     "kind": KIND_EXPRESSION,
-                    "content": speak.text,
+                    "content": result.text,
                     "emotion_vector": feelings,
                     "importance": importance(
                         kind=KIND_EXPRESSION,
                         emotion_vector=feelings,
-                        content=speak.text,
+                        content=result.text,
                     ),
                     "protected": False,
-                    "narrative": speak.text,
+                    "narrative": result.text,
                     # P3-T 来源标注：这是她自己说出口的话
                     "source": SOURCE_SELF,
                     "certainty": CERTAINTY_CERTAIN,
                 },
             )
-        log.debug(
-            "表达完成 intent=%s level=%s tts_source=%s",
-            payload.get("intent"),
-            speak.level,
-            outcome.tts.source if outcome.tts else None,
+
+    async def tick(
+        self,
+        output: BrainOutput,
+        *,
+        now: float,
+        vrram_mb: float = 0.0,
+        body_left_h: float = 0.0,
+        day_phase: str = "day",
+        force: bool = False,
+        env: dict[str, object] | None = None,
+        user_message: str | None = None,
+    ) -> ExpressionResult | None:
+        """同步一站式（`should_speak` → `run_job` → `persist`），**运行时不用它**。
+
+        运行时走 20.6 的 1.3：心跳拍判断该不该开口 → `worker.submit(job)` →
+        每拍 `worker.drain()` → `persist`（耗时那段不占心跳一拍）。本方法把同样
+        三件事串成一次同步调用，供**离线探针与单测**使用——它们不需要异步调度，
+        也不必各自重搭一个 `ExpressionJob`。
+        """
+        if not self.should_speak(output, now, force):
+            return None
+        job = ExpressionJob(
+            job_id=make_job_id(0, now),
+            created_ts=now,
+            heartbeat_seq=0,
+            output=output,
+            summary={"body_away_s": body_left_h * 3600.0, "day_phase": day_phase},
+            vrram_mb=vrram_mb,
+            env=env,
+            user_message=user_message,
+            force=force,
         )
-        return outcome
+        result = await self.run_job(job)
+        await self.persist(result, now)
+        return result
 
     async def _self_records(self) -> list[tuple[int, str]]:
         """她此刻的自我认知：`(id, 文本)`，按 `_identity_lines` 的同一套闸门筛。

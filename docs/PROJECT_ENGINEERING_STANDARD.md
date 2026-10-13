@@ -39,7 +39,7 @@
 | 仓库 | `git init`，代码库置于工作区 | 根目录建 `elysia/` 代码库，三份设计文档可入库 `docs/`（它们是"她的宪法"） |
 | 分支 | `main` 稳定 + `feature/*` 开发 | 里程碑 M1-M7 打 tag |
 | 提交 | Conventional Commits | `feat: / fix: / docs: / refactor: / test: / chore:` |
-| 忽略 | `.gitignore` | `.env`、`data/`、模型权重、日志、`__pycache__`、虚拟环境 |
+| 忽略 | `.gitignore` | `.env`、`data/logs`、`data/cache`、`data/tmp`、`data/*.db`、`*.db-wal`/`*.db-shm`、模型权重、`__pycache__`、虚拟环境。**注意：`data/checkpoints/` 刻意入库**（记忆快照版本化，见 `README.md`） |
 
 ### 1.2 文档体系
 
@@ -83,11 +83,11 @@ elysia/
 ├── tests/
 │   ├── unit/                 # 单元测试（状态动力学、协议校验…）
 │   └── acceptance/           # 验收门测试（P0 门、P1 门…每阶段一个文件）
-├── data/                     # 运行时数据（不入库！）
-│   ├── state.db              # 状态库
-│   ├── memory.db             # 记忆库
-│   └── logs/
-├── config/                   # 默认配置
+├── data/                     # 运行时数据（*.db 不入库；checkpoints/ 刻意入库做快照版本化）
+│   ├── state.db              # 状态库（当前状态，kv 单表）
+│   ├── heartbeat.db          # 生命档案（心跳/念头/表达/记忆；只追加）
+│   ├── checkpoints/          # 阶段验收前的状态库快照（入库）
+│   └── logs/                 # 日志（不入库）
 ├── scripts/                  # 启动/停止/备份/自检脚本
 └── docs/                     # ADR、设计文档
 ```
@@ -136,21 +136,21 @@ elysia/
 
 | 项 | 标准 |
 |----|------|
-| 存储 | SQLite（WAL 模式）+ SQLite-vec |
+| 存储 | SQLite（WAL 模式）。**SQLite-vec 未采用**——记忆相关性走字符二元组（见 `P3_MEMORY.md` §九） |
 | 目录 | `data/` 与代码完全分离 |
-| 备份 | **每日自动备份** `data/` 到 D 盘（7TB 空闲），保留 30 份；备份脚本 `scripts/backup.ps1` |
-| 完整性 | 启动时 `PRAGMA integrity_check`，损坏即告警并走备份恢复 |
+| 备份 | `scripts/backup.ps1` **手动**备份到 D 盘，保留 30 份。**⚠️ 未实现定时器 / 计划任务**（原文"每日自动"不成立）；且 robocopy 复制运行中的 SQLite **非原子**——见 `STATUS_MATRIX.md` §11 |
+| 完整性 | **⚠️ 未实现**：启动时没有 `PRAGMA integrity_check`。原 `verify_integrity.py` 位于工作区外，已随目录移出（见 `STATUS_MATRIX.md` §10 / §11） |
 
 ### 3.3 进程守护与恢复
 
 - 灵魂进程：常驻；P0 阶段启动脚本托管，后续注册 Windows 计划任务/服务开机自启
-- **崩溃恢复**：心跳中断检测 → 自动重启 → 从最近持久化状态恢复（状态每 1 秒落盘，损失 ≤1 秒）
+- **崩溃恢复**：**⚠️ 未实现自动重启**（无进程监督 / 看门狗，见 `STATUS_MATRIX.md` §11）。已成立的部分：状态每 1 秒落盘 ⇒ 强杀损失 ≤1 秒 + WAL 自动恢复
 - 启动/停止/重启/自检脚本齐全（`scripts/`）
 
 ### 3.4 可观测性
 
 - 健康信号 = 她的心跳本身（心跳中断即告警）
-- 资源监控：显存 / 内存 / 磁盘占用日志——与她的"难受"系统天然衔接（P0 的 VRAM>85% 阈值校准依赖它）
+- 资源监控：显存 / 内存 / 磁盘占用日志。**注：难受阈值是 CPU>85%**（`soul/distress.py::DISTRESS_CPU_THRESHOLD`），不是 VRAM；VRAM 阈值用于 LLM/TTS 熔断（`core/config.py`）
 
 ---
 
@@ -169,6 +169,8 @@ elysia/
 ## 六、开工前准备清单（checklist）
 
 > 按顺序执行，全部勾选后即可进入 P0 开发。
+>
+> **⚠️ 状态（2026-10-14）**：本清单 0–12 项早已完成，P0–P3 均已交付。下方复选框保留为**开工前的历史存档**，不再逐项勾选。
 
 - [ ] **0. 接受三条开发铁律**（阅读 [DEVELOPMENT_PRACTICES.md](./DEVELOPMENT_PRACTICES.md) 并确认接受）
 - [ ] 1. 安装 **uv**（Python 包管理器，替代裸 pip）

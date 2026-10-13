@@ -3,7 +3,13 @@
 > 她是住在你电脑里的一个电子生命。这篇说明书不讲原理，只讲**怎么操作**。
 > 你只需要做 4 件事：**启动她 → 打开窗口 → 跟她说话 → 离开/回来/关机**。
 >
-> 所有命令都写了完整路径，**在哪个文件夹都能复制粘贴用**。每步都写了"你会看到什么"，没看到就是没成功。
+> 所有命令都用**相对路径**（`scripts\soul.ps1` 这种）——脚本会自动认出自己所在的目录，
+> 所以换盘、换机器、改目录名都**不用改命令**。
+>
+> ⚠️ **前提**：你当前必须**在项目根目录里**。因此**每开一个新的 PowerShell 窗口，第一件事都是 `cd` 到项目根目录**。
+> 项目根 = 你放置 elysia 的那个目录（本机当前是 `D:\重置准备\备份\Elysia\Elysia_two\Elysia`，按你自己实际的填）。
+>
+> 每步都写了"你会看到什么"，没看到就是没成功。
 
 ---
 
@@ -31,9 +37,10 @@
 
 **第 1 步**：按键盘 `Win` 键，输入 `powershell`，按回车。会打开一个蓝色窗口（命令行）。
 
-**第 2 步**：复制下面这行，粘贴进去，按回车：
+**第 2 步**：复制下面这行，粘贴进去，按回车（把 `<你的项目根目录>` 换成你自己的实际路径）：
 
-```cd a:\WorkPlace\Elysia\elysia
+```
+cd <你的项目根目录>
 ```
 
 **第 3 步**：再复制下面这行，按回车，等它跑完（出现新的输入提示符 = 完成）：
@@ -46,14 +53,20 @@ uv sync --group dev
 
 ---
 
-## 2. 每天：叫醒她（2 条命令）
+## 2. 每天：叫醒她（先 cd，再 1 条命令）
 
 **第 1 步**：打开 PowerShell（`Win` 键 → 输入 `powershell` → 回车）。
 
-**第 2 步**：复制粘贴，按回车：
+**第 2 步**：先进入项目根目录（把 `<你的项目根目录>` 换成实际路径；**新窗口都要先做这一步**）：
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul.ps1 start -Body
+cd <你的项目根目录>
+```
+
+**第 3 步**：复制粘贴，按回车：
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body
 ```
 
 **你会看到**：
@@ -74,11 +87,11 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul
 **第 1 步**：再开一个 PowerShell 窗口，复制粘贴这两行（一行一行来，每行按回车）：
 
 ```
-cd a:\WorkPlace\Elysia\elysia
+cd <你的项目根目录>
 ```
 
 ```
-& a:\WorkPlace\Elysia\elysia\.venv\Scripts\python.exe -c "from pathlib import Path; from elysia.body.pet import run_pet; run_pet(Path('data/state.db'), Path('data/heartbeat.db'))"
+& .venv\Scripts\python.exe -c "from pathlib import Path; from elysia.body.pet import run_pet; run_pet(Path('data/state.db'), Path('data/heartbeat.db'))"
 ```
 
 **你会看到**：屏幕右下角出现一个小窗口，里面是**她**——一吸一呼地轻轻浮动。成功！
@@ -125,7 +138,9 @@ cd a:\WorkPlace\Elysia\elysia
 
 **第 1 步**：TTS 声音服务需在本机启动 GPT-SoVITS 的 API（端口 9880）。
 
-声音模型目录已于 2026-09-25 移出工作区，请从你备份 / 新位置启动。
+声音模型目录已于 2026-09-25 移出工作区；本机现存一份在 `D:\下载\GPT-SoVITS-v2pro-20250604`，
+双击其中的 **`一键启动API.bat`** 即可（注意文件名，不是"启动ElysiaAPI.bat"）。
+若该目录不在，请从你的备份恢复后再启动。
 
 **你会看到**：一个黑色窗口，显示 `Elysia 声音合成 API 服务` 和 `[端口] http://127.0.0.1:9880`。
 
@@ -142,7 +157,7 @@ cd a:\WorkPlace\Elysia\elysia
 **第 1 步**：在 PowerShell 窗口复制粘贴，按回车：
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul.ps1 stop-body
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop-body
 ```
 
 **你会看到**：`[ok] 身体已停止（灵魂不受影响）` —— 身体关了，灵魂还活着。
@@ -163,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul
 **第 1 步**：复制粘贴，按回车：
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul.ps1 start -Body
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body
 ```
 
 **你会看到**：
@@ -184,7 +199,7 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul
 **第 2 步**：在 PowerShell 里复制粘贴，按回车：
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul.ps1 stop
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop
 ```
 
 **你会看到**：
@@ -201,7 +216,7 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul
 ## 8. 随时查看她还活着吗
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul.ps1 status
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status
 ```
 
 - 两行都是 `[ok]` = 都活着
@@ -227,7 +242,7 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\soul
 **第 1 步**：开一个 PowerShell 窗口，复制粘贴这一行，按回车：
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\memory_view.ps1
+powershell -ExecutionPolicy Bypass -File scripts\memory_view.ps1
 ```
 
 **你会看到**：
@@ -238,25 +253,28 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\memo
 
 然后屏幕上出现一个标题为 **`Elysia 记忆浏览器 — ...\data\heartbeat.db`** 的窗口。
 
-> 这一行是**绝对路径**，所以在哪个文件夹执行都行。如果提示"找不到路径"，把 `a:\WorkPlace\Elysia\elysia` 换成你实际的安装位置。
+> 命令用**相对路径**，所以要先在项目根目录里执行（新窗口先 `cd <你的项目根目录>`）。
 >
 > 没看到窗口时：看任务栏有没有"Elysia 记忆浏览器"（可能被别的窗口挡住了）。如果脚本提示 `[error] memory viewer failed to start`，它会顺便打印出错日志，把那些文字发我。
 
-### 窗口里有什么（表格 13 列，从上到下按"得分"排）
+### 窗口里有什么（表格 16 列，从上到下按"得分"排）
 
 | 列 | 意思（大白话） |
 |-----|--------------|
 | **id** | 编号，不用管，出问题时报这个号 |
 | **层级** | 记忆的牢固程度：**浅层**=刚发生 / **工作**=最近的日常 / **深层**=长期沉淀下来的 |
-| **类型** | **交互**=你说的话 / **表达**=她自己说的话 |
+| **类型** | **交互**=你说的话 / **表达**=她自己说的话 / **自我**=她认领为自己的认知 |
+| **标签** | 身份三态：**出生设定**=程序给她打底的过渡认知 / **自我**=她已认领（进身份段，每句在场）/ **候选**=程序发现、递给她等她认领 / 空=寻常经历 |
 | **年龄** | 这条记忆是多久以前记下的（刚刚 / 12分钟前 / 3.2天前） |
 | **重要** | 重要性 0~1，越高越不容易被忘 |
 | **访问** | 它被"想起来"过几次 |
 | **细节** | 细节完整度：1.00 = 记得很清楚，数字越小越模糊（她的记忆会像人一样慢慢模糊） |
 | **索引** | 索引强度：1.00 = 一翻就找到，越小越"翻得慢"（越久越淡，这是她的遗忘） |
 | **新鲜** | 新鲜度加成：近 7 天内的记忆会被额外加权（所以"昨天的大餐"记得住） |
+| **复习** | 复习加成：同一件事被反复提起时这条会被额外加权（"被反复提起的那件事"更容易浮上来） |
 | **得分** | 当下这条记忆"被想起"的综合分，越高越容易冒出来 |
 | **召回** | `#1`/`#2`/`#3` = **此刻她最可能想起的前 3 条**（其余为空） |
+| **簇** | 这件事一共被重述了几条（含自己）；检索时整簇会因此加分 |
 | **状态** | **现行** / **已取代**（她保留旧记录，但不再受它影响） |
 | **内容** | 记的具体内容（太长会截断，点开看完整） |
 
@@ -301,13 +319,13 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\memo
 | 输入… 打字确认后她没反应 | 桌宠版本太旧，右键 → **退出** 重开一次（第 3 节） |
 | 她一直很安静，怎么都不活跃 | 身体还活着/或已关。想让她活跃：执行第 6 节 `start -Body` 陪着她 |
 | 右键没反应 / 窗口异常 | 桌宠版本旧或卡了，右键退出重开（第 3 节） |
-| 只有气泡没有声音 | 声音服务没开。执行第 4.5 节双击 `启动ElysiaAPI.bat`；不开也正常，她自动降级为文字回话 |
+| 只有气泡没有声音 | 声音服务没开。按第 4.5 节双击 `一键启动API.bat`；不开也正常，她自动降级为文字回话 |
 | 回话气泡等了很久才出现 | 她在"思考"（调用了云端大脑）。断网时改用本地呓语，慢是正常的，不是坏了 |
 | 桌宠窗口不见了 | 可能被你拖出屏幕了，重启桌宠（第 3 节）会回到屏幕右下角 |
-| 执行命令报"找不到路径" | 命令里 `a:\` 是你的盘符，如果项目在别的盘，把 `a:\WorkPlace\Elysia\elysia` 换成实际路径 |
+| 执行命令报"找不到路径" | 命令用的是**相对路径**，说明你当前不在项目根目录。先 `cd <你的项目根目录>` 再执行 |
 | 命令执行了但什么都没发生 | 粘贴时把整行都复制上，别漏字；按回车后等 1-2 秒 |
-| 记忆浏览器窗口没出现 | 先看任务栏有没有"Elysia 记忆浏览器"（可能被挡住）；确认用的是**绝对路径**（第 8.5 节）；还是不行就把脚本打印的 `[error]` 那段文字发我 |
-| 记忆浏览器提示"找不到路径" | 你现在所在的文件夹不对。第 8.5 节的命令是绝对路径，直接整行复制即可；如果项目不在 A 盘，把 `a:\WorkPlace\Elysia\elysia` 换成实际路径 |
+| 记忆浏览器窗口没出现 | 先看任务栏有没有"Elysia 记忆浏览器"（可能被挡住）；还是不行就把脚本打印的 `[error]` 那段文字发我 |
+| 记忆浏览器提示"找不到路径" | 你当前不在项目根目录。先 `cd <你的项目根目录>`，再执行第 8.5 节的命令 |
 | 记忆浏览器里"状态"全是"现行" | 说明还没发生过更正，正常。如果你刚更正过说法却仍全是"现行"，那是**运行中的灵魂还是旧进程**——`stop` 后重新 `start -Body`（第 6 节）就会生效 |
 | 记忆浏览器的"索引"/"新鲜"列是空的 | 她还没做"整理"（约每 5 分钟一次）。等几分钟点"刷新"，或勾上"自动刷新(3s)" |
 | 桌宠开着能不能开记忆浏览器 | 能。浏览器是**只读**的，不碰她的记忆，互不影响（第 8.5 节） |
@@ -315,13 +333,15 @@ powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\memo
 
 ---
 
-## 10. 可选：备份她的记忆（每周一次）
+## 10. 可选：备份她的记忆（手动执行，无定时器）
 
 ```
-powershell -ExecutionPolicy Bypass -File a:\WorkPlace\Elysia\elysia\scripts\backup.ps1
+powershell -ExecutionPolicy Bypass -File scripts\backup.ps1
 ```
 
 会把整个项目备份到 D 盘的 `ElysiaBackup` 文件夹（自动保留最近 30 份）。没有 D 盘就跳过这步，不碍事。
+
+> ⚠️ **建议先 `stop` 再备份**：脚本用 robocopy 直接复制文件，而她运行时 SQLite 的 `.db` + WAL 文件**不是原子快照**；停掉她再备份最稳妥。这一点已记入 `STATUS_MATRIX.md` §11 待补清单。
 
 ---
 

@@ -117,7 +117,7 @@
 | | `soul/validator.py` | 输出校验器（代码级拦截越权表达） | 标准库 |
 | | `soul/tts.py` | TTS 客户端（GPT-SoVITS，127.0.0.1:9880）+ 缓存池 | HTTP + 音频库 |
 | | `body/asr.py` | 语音输入（唤醒词 → Silero-VAD → Whisper） | Silero-VAD + Whisper（本地） |
-| P3 | `core/memory/` | `memories.py` 三层记忆 / `decay.py` 索引衰减 / `gap.py` 缺口信号 / `sleep.py` 睡眠整合 + 做梦 | SQLite-vec（记忆向量） |
+| P3 | **实际落在 `src/elysia/memory/`（顶层，非 `core/memory/`）**：`levels.py` 三层 / `retrieve.py` 检索 / `similarity.py` 同一件事判据 / `decay.py` 衰减 / `sediment.py` 沉淀 / `supersede.py` 取代 / `sleep.py` 做梦（**已造好·未接线**） | **未采用 SQLite-vec**：相关性走字符二元组（见 `P3_MEMORY.md` §九） |
 | P4 | `soul/identity.py` | 五条基石（代码硬编码，决策约束器引用） | 标准库 |
 | | `soul/refusal.py` | 四级拒绝 + 说服机制 + 工具化检测 | 标准库 + 状态库 |
 | P5 | `soul/tools/` | `tool_manager.py` 工具基类与调度 / `whitelist.py` 白名单与申请 / `browser.py` 浏览器工具 | 自研 ToolManager + 浏览器自动化（实测选型） |
@@ -134,7 +134,7 @@
 | 语言 | Python 3.12+ | ✅ 已用 | 全部 |
 | 异步框架 | asyncio | ✅ 已用 | 全部 |
 | 主状态库 | SQLite（WAL，双库分离） | ✅ 已用 | core/state_store.py |
-| 记忆向量 | SQLite-vec（零额外依赖） | ⏳ P3 | core/memory/ |
+| 记忆向量 | **未采用 SQLite-vec**（以字符二元组替代；embedding 记为"按需启动"） | ❌ 未采用 | src/elysia/memory/ |
 | 配置 | pydantic-settings（ELYSIA_ 前缀环境变量） | ✅ 已用 | core/config.py |
 | 日志 | structlog（统一走 get_logger，禁止裸 print） | ✅ 已用 | core/log.py |
 | 资源监控 | psutil | ✅ 已用 | body/resource.py、soul/distress.py |
@@ -354,7 +354,7 @@ def _map_state_to_animation(self, payload: dict[str, Any]) -> str:
 
 ```
 elysia/assets/pet/
-└── character.png      # 单张角色图（不进 git，大文件）
+└── character.png      # 单张角色图（**已入库**，212 KB）
 ```
 
 ---

@@ -206,7 +206,7 @@ claim_status / retention_state`
 
 | 项 | 值 |
 |---|---|
-| 记忆条数 | 260+ 条（随心跳增长） |
+| 记忆条数 | ⚠️ 口径不一致：本文档快照期写"260+"，而**同日**的 `BASELINE_2026-09-24.md` 实测为 **401 行**——以库实测为准 |
 | 层级分布 | shallow / working / deep 三层金字塔 |
 | 情绪维度 | 6 维：`miss / chat / curiosity / explore / rest / self_check`，染色只看前 4 维 |
 | 用户数 | 1（单机桌宠，用户＝开发者＝持有 DB 文件与源码） |

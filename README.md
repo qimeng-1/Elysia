@@ -33,7 +33,7 @@ elysia/
 ├── tests/          # unit（单元）+ acceptance（验收门）
 ├── assets/pet/     # 桌宠素材（character.png）
 ├── data/           # 运行时数据（进 git 做记忆快照版本化；logs/cache/tmp 除外）
-├── scripts/        # soul.ps1（进程控制）/ memory_view.ps1（记忆浏览器）/ backup.ps1（每日备份 D 盘，保留 30 份）
+├── scripts/        # soul.ps1（进程控制）/ memory_view.ps1（记忆浏览器）/ backup.ps1（**手动**备份 D 盘，保留 30 份；未实现定时器）
 └── docs/           # ADR + 设计宪法副本 + 仓库独有文档（操作手册 / P2·P3 规划与工作日志 / 人设）
 ```
 

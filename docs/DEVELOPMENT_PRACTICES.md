@@ -182,3 +182,74 @@
 > **"我接受了这三条铁律。我知道灵感受欢迎但不越阶段，bug 分轻重地基要优先，验收由我自己的感受判断而非测试结果。"**
 
 接受后，正式进入 P0。
+
+---
+
+## AI 协作者的作业规程（2026-10-14 增补）
+
+> 本节记录**踩过的坑与必须照做的动作**，让任何接手本仓库的 AI（或未来的人）不必重新踩一遍。
+> 与三条铁律同级：铁律讲"该不该做"，本节讲"怎么做得不出错"。
+
+### 一、命令必须"先 `cd`，再用相对路径"
+
+```powershell
+cd <项目根>                                          # 每个新 PowerShell 窗口的第一步
+uv run pytest
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body
+```
+
+脚本用 `Split-Path $PSScriptRoot -Parent` **自定位**，不依赖盘符；文档里也一律相对路径。
+出现"找不到路径"几乎总是因为**当前不在项目根目录**。
+
+### 二、改动 `scripts/*.ps1` 必须**保住 UTF-8 BOM**
+
+`soul.ps1` / `backup.ps1` 含中文，**必须有 UTF-8 BOM**——Windows PowerShell 5.1 会把无 BOM 的
+`.ps1` 当 ANSI 解码，中文乱码后**可能直接解析失败**。多数编辑工具会**静默剥掉 BOM**，改完务必校验：
+
+```powershell
+$b = [System.IO.File]::ReadAllBytes("scripts\soul.ps1"); $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF
+```
+
+`scripts/memory_view.ps1` **相反**：它故意保持**纯 ASCII + 无 BOM**（其文件头有说明）。
+
+### 三、提交前把 `.venv\Scripts` 放进 `PATH`
+
+pre-commit 钩子里写的是 **Windows 反斜杠路径**，而它由 **Git Bash** 执行 POSIX sh
+⇒ `[ -x ]` 判断必然失败。未激活虚拟环境时 `git commit` 会报 `` `pre-commit` not found ``。
+两种可行方式：**激活 `.venv`**，或直接用 **`uv run pre-commit run --all-files`**。
+
+### 四、门禁四件套（缺一不可）
+
+```powershell
+uv run ruff check  ;  uv run ruff format --check  ;  uv run mypy src  ;  uv run pytest
+```
+
+### 五、新增"状态变量 / 意图 / 阈值 / 词汇"必须过 **T1 闸门**
+
+`tests/acceptance/test_t1_cancel.py` 是**闸门**，不是普通测试：
+
+| 你新增了什么 | 必须补什么断言 |
+|---|---|
+| 感受维度 / 状态变量 | **取消性**：停用后表达必须可测量变化 |
+| 意图 / 受保护词 | **可达性**：必须存在合法状态能触发它 |
+| 消费端阈值 | 阈值**严格落在真实值域内**（取到上界 ⇒ 死分支） |
+| 授权环境的新键 | 必须是**活值**（历史教训：4 个键被写成字面量 `0`） |
+
+> 历史教训：`curiosity` 与 `rest` 两条"**永远不可达**"的分支，在
+> ruff / mypy strict / 397 项回归**全绿**的情况下照样活着。只有 T1 闸门能拦住这类东西。
+
+### 六、文档纪律：**活文档**与**历史文档**分开
+
+- **活文档**（README / TECHNICAL_DESIGN / STATUS_MATRIX / ROADMAP_V2）→ 必须与代码同步，直接改
+- **历史文档**（CHANGELOG / P3_MEMORY_WORKLOG / BASELINE）→ **只追加，不改写**：
+  它们记录"当时是什么样"。失效引用统一登记在 `STATUS_MATRIX §10`，**不回头改历史**
+
+### 七、真机冒烟（改过进程装配/心跳后必做）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status      # 期望两行 [ok]
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop
+```
+
+收尾确认**无残留 python 进程**、`data\logs\soul.err.log` 与 `body.err.log` 为空。

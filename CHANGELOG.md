@@ -585,3 +585,13 @@
 - **feat（tests/acceptance/test_t1_cancel.py，11 项）**：把铁律一从**原则**变成**闸门**——① 可达性：6 种语音情绪都必须够得到（旧代码 `tired`/`curious` 永远够不到）；② 取消性：停用任一感受维度后表达必须变化，否则该维度是装饰；③ 端到端：`BrainLoop.step(memory_gap=…)` → 表达情绪；④ 受保护词可达性 + 授权环境必须是**活值**（防"看起来接好了、实际恒 0"）
 - **新发现缺陷（登记于 STATUS_MATRIX §12，共 6 项）**：#1 最值得记——T1 端到端用例连续两次 `step()` 读到**同一个值**，暴露 `BrainOutput` 持有**活引用**（`desire.py:155` 返回 `self._state`、`dimensions.py:85` 返回 `self._current`）⇒ `ExpressionJob` 交给 worker 异步执行时读到的是**执行那一刻**的状态，与 1.3 用 `created_ts` 锚定决策时刻的意图矛盾。**该缺陷不是读代码发现的，是"取消测试"的跨拍比较逼出来的**。#2~#4 已随本批修好；#5（三处 VRAM 阈值 8510/9510/10240 **全部高于本机 6 GB 显存总量**，且两处数字不一致）、#6（`error_burst` 无真实来源，「痛」永久禁用）待定夺 / 待补
 - 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **408 passed**（397 + 11）
+
+### 阶段 5 第二批：#1 别名缺陷（表达消费"决策时刻"的状态）
+- **fix（brain.py）**：构造 `BrainOutput` 时对 `desire` / `feelings` 取 `.copy()`，使其成为**真快照**。
+  根因：`DesireSystem.step()` 返回 `self._state`、`FeelingMapper.compute()` 返回 `self._current`，
+  两者都是心跳每拍**原地改写**的内部对象；`BrainOutput` 直接持有它们 ⇒ 交给 worker **异步执行**的
+  `ExpressionJob` 读到的是"执行那一刻"的状态，而非"决定开口那一刻"的状态——与 1.3 用 `created_ts`
+  锚定决策时刻的口径自相矛盾
+- **test（+1）**：`test_brain_output_is_snapshot_not_live_reference`——连续两拍，第二拍不得改写
+  第一拍已交付的快照。**已验证该用例是有效闸门**：临时还原旧写法 → 用例失败；恢复 → 通过
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **409 passed**（408 + 1）

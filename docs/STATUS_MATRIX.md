@@ -153,7 +153,7 @@
 
 | # | 缺陷 | 位置 | 症状 | 影响 | 状态 |
 |---|---|---|---|---|---|
-| 1 | **`BrainOutput` 持有活引用（别名缺陷）** | `desire.py:155`（`step()` 返回 `self._state`）；`dimensions.py:85`（`compute()` 返回 `self._current`） | `BrainOutput.desire` / `.feelings` 与系统内部对象**是同一个对象**，心跳每拍原地改写 | `ExpressionJob` 把 `BrainOutput` 交给 worker **异步执行**（可能数拍之后）⇒ 她说出口的话消费的是**执行那一刻**的状态，而非"决定开口那一刻"的状态；与 1.3 改用 `created_ts` 锚定决策时刻的设计意图自相矛盾 | **待定夺**（修复涉及共享对象语义） |
+| 1 | **`BrainOutput` 持有活引用（别名缺陷）** | `desire.py:155`（`step()` 返回 `self._state`）；`dimensions.py:85`（`compute()` 返回 `self._current`） | `BrainOutput.desire` / `.feelings` 与系统内部对象**是同一个对象**，心跳每拍原地改写 | `ExpressionJob` 把 `BrainOutput` 交给 worker **异步执行**（可能数拍之后）⇒ 她说出口的话消费的是**执行那一刻**的状态，而非"决定开口那一刻"的状态；与 1.3 改用 `created_ts` 锚定决策时刻的设计意图自相矛盾 | ✅ **已修**（`brain.py` 构造 `BrainOutput` 时对 `desire` / `feelings` 取 `.copy()`，使其成为**真快照**；`test_t1_cancel.py::test_brain_output_is_snapshot_not_live_reference` 加锁——已验证：还原旧写法该用例**失败**） |
 | 2 | **受保护词授权环境是字面量**（T2 防线半死） | `heartbeat.py::_expression_env` 原写 `cpu_pct: 0.0` / `q_len: 0` / `memory_gap: 0` | 谓词永远拿到 0 ⇒「难受」「累」「好像忘了什么」**永远无法授权** | T2 的词汇硬约束对这三个词形同虚设（她永远说不出"我难受""我好像忘了什么"） | ✅ **已修**（阶段 5 第一批：接活值 `cpu_pct` / `q_len` / `memory_gap`，并由 `test_t1_cancel.py` 加锁） |
 | 3 | **`memory_gap` 谓词量纲错误** | `words.py` 原写 `_num(env,"memory_gap",0) > 10` | 缺口强度是 **0-1**，阈值却是 10 ⇒ 即便接了活值也不可说 | 「好像忘了什么」永久禁用 | ✅ **已修**（阈值改 `> 0.4`，与好奇心的消费阈值同源） |
 | 4 | **`q_len` 谓词量程错误** | `words.py` 原写 `_num(env,"q_len",0) > 10` | 表达队列容量 2、最大深度 3，阈值 10 永不成立 | 「累」只剩 VRAM 一条路，而 VRAM 那条…见 #5 | ✅ **已修**（阈值改 `>= 2`，语义＝"队列有积压"） |

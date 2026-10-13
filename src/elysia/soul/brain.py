@@ -128,8 +128,13 @@ class BrainLoop:
         action = self._action_layer(will, mode)
 
         output = BrainOutput(
-            desire=desire_state,
-            feelings=feelings,
+            # ⚠️ 必须拷贝成**快照**：`DesireSystem.step()` 返回 `self._state`、
+            # `FeelingMapper.compute()` 返回 `self._current`，两者都是心跳每拍**原地改写**
+            # 的内部对象。若 BrainOutput 直接持有它们，交给 worker **异步执行**的
+            # `ExpressionJob` 就会读到"执行那一刻"的状态，而不是"决定开口那一刻"的状态
+            # （与 `created_ts` 锚定决策时刻的口径矛盾；见 STATUS_MATRIX §12 缺陷 #1）。
+            desire=desire_state.copy(),
+            feelings=feelings.copy(),
             will=will,
             action=action,
         )

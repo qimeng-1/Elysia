@@ -208,7 +208,40 @@ def test_converged_rest_never_exceeds_raw_ceiling() -> None:
     assert not (converged.rest > 0.5), "严格大于 0.5 永不成立——这正是旧 tired 分支死掉的原因"
 
 
-# ── 4. 受保护词（T2 防线）也要过 T1：每个词都必须说得出口 ─────────
+# ── 4. 快照性：BrainOutput 不得持有活引用 ────────────────────────
+
+
+def test_brain_output_is_snapshot_not_live_reference() -> None:
+    """`BrainOutput` 必须是**快照**：后续拍的演化不得改写已交付的那一份。
+
+    真缺陷（STATUS_MATRIX §12 #1）：`DesireSystem.step()` 返回 `self._state`、
+    `FeelingMapper.compute()` 返回 `self._current`，心跳每拍**原地改写**；
+    若 `BrainOutput` 直接持有它们，交给 worker 异步执行的 `ExpressionJob`
+    会读到"执行那一刻"的状态，而不是"决定开口那一刻"的状态。
+    """
+    loop = BrainLoop(
+        DesireSystem(initial=DesireState(tr=45.0, cs=70.0, sa=20.0)),
+        rng=random.Random(0),
+    )
+    first = loop.step(distress=False, mode="present", memory_gap=1.0, dt=1.0)
+    # 立刻记录第一拍交付时的真实值
+    first_curiosity = first.feelings.curiosity
+    first_tr = first.desire.tr
+
+    # 第二拍用完全不同的条件推一步
+    second = loop.step(distress=True, mode="present", memory_gap=0.0, dt=1.0)
+
+    assert first.feelings is not second.feelings, "两拍的感受必须是各自独立的对象"
+    assert first.desire is not second.desire, "两拍的欲望必须是各自独立的对象"
+    assert first.feelings.curiosity == pytest.approx(first_curiosity), (
+        "第二拍改写了第一拍已交付的快照 —— BrainOutput 又变回活引用了"
+    )
+    assert first.desire.tr == pytest.approx(first_tr), (
+        "第二拍改写了第一拍已交付的欲望快照 —— BrainOutput 又变回活引用了"
+    )
+
+
+# ── 5. 受保护词（T2 防线）也要过 T1：每个词都必须说得出口 ─────────
 
 
 def test_protected_words_all_reachable() -> None:

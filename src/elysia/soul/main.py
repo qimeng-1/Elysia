@@ -140,6 +140,8 @@ async def _run(settings: Settings) -> int:
         checkpoint=CheckpointManager(settings.data_dir),
         expression=expression,
         expression_worker=expression_worker,
+        # 显存阈值与 TTS 熔断**同源**（单一出处）：「累」的授权据此判定
+        vram_threshold_pct=settings.vram_threshold_pct,
     )
 
     stop = asyncio.Event()

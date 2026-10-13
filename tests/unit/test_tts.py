@@ -25,8 +25,9 @@ class _FakeSynth:
         return self.result
 
 
-def _breaker(used_mb: int | None) -> VramBreaker:
-    return VramBreaker(threshold_mb=10240, sampler=lambda: used_mb)
+def _breaker(used_pct: int | None) -> VramBreaker:
+    """注入固定显存占用**百分比**（None = 不可知）。"""
+    return VramBreaker(threshold_pct=85.0, sampler=lambda: used_pct)
 
 
 def _chain(
@@ -50,7 +51,7 @@ def _chain(
 @pytest.mark.asyncio
 async def test_cache_hit_does_not_call_synth(tmp_path: Path) -> None:
     synth = _FakeSynth()
-    chain = _chain(tmp_path, synth, _breaker(1000))
+    chain = _chain(tmp_path, synth, _breaker(10))
     req = TTSRequest(text="我在", emotion="default", speed=1.0)
 
     first = await chain.speak(req)
@@ -65,7 +66,7 @@ async def test_cache_hit_does_not_call_synth(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_cache_key_differs_by_speed_and_emotion(tmp_path: Path) -> None:
     synth = _FakeSynth()
-    chain = _chain(tmp_path, synth, _breaker(1000))
+    chain = _chain(tmp_path, synth, _breaker(10))
 
     await chain.speak(TTSRequest(text="嗯嗯", emotion="default", speed=1.0))
     await chain.speak(TTSRequest(text="嗯嗯", emotion="default", speed=1.5))
@@ -108,7 +109,7 @@ async def test_synth_failure_returns_muted_no_block(tmp_path: Path) -> None:
     degrade: list[str] = []
     synth = _FakeSynth()
     synth.result = None  # 模拟 GPT-SoVITS 不可用
-    chain = _chain(tmp_path, synth, _breaker(1000), degrade)
+    chain = _chain(tmp_path, synth, _breaker(10), degrade)
 
     result = await chain.speak(TTSRequest(text="好呀"))
 
@@ -140,7 +141,7 @@ async def test_degrade_exception_is_swallowed(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_prewarm_populates_cache_best_effort(tmp_path: Path) -> None:
     synth = _FakeSynth()
-    chain = _chain(tmp_path, synth, _breaker(1000))
+    chain = _chain(tmp_path, synth, _breaker(10))
 
     await chain.prewarm([("我在", "default", 1.0), ("好呀", "default", 1.0)])
 

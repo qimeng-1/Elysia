@@ -84,6 +84,14 @@ class TimeSense:
         """距上次交互时长（被遗忘的感觉来源）。"""
         return max(0.0, self.now() - self._state.last_interaction_ts)
 
+    def hour(self, tz: timezone | None = None) -> int:
+        """本地小时（0-23）——「困」用的"凌晨 2-5 点"判据（路线图 §7.6）。
+
+        `day_phase` 只到"夜"这一档（21:00-05:00），比设计的"凌晨 2-5 点"宽；
+        「困」需要的是真正的小时，故单列一个精确取数口（见 STATUS_MATRIX §12 #8）。
+        """
+        return datetime.fromtimestamp(self.now(), tz).hour
+
     def day_phase(self, tz: timezone | None = None) -> str:
         """昼夜相位：dawn(5-9) / day(9-17) / dusk(17-21) / night。
 
@@ -121,6 +129,7 @@ class TimeSense:
             "presence_s": round(self.presence_seconds()),
             "since_interaction_s": round(self.since_interaction_seconds()),
             "day_phase": self.day_phase(),
+            "hour": self.hour(),
             "age_days": round(self.age_days(), 3),
             "away_grade": self.away_grade(),
         }

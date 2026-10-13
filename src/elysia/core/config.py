@@ -55,7 +55,9 @@ class Settings(BaseSettings):
     llm_fallback_api_key: str = ""
     llm_fallback_model: str = "qwen:7b"
     # 资源熔断：VRAM(MB) 超过阈值切次声/微声
-    llm_vram_threshold_mb: int = 9510
+    # （⚠️ 该键**从未被任何代码读取**，已删除——见 STATUS_MATRIX §12 #7。
+    #   主声/次声的挂载只看 key 与 endpoint 是否配置，与显存无关。）
+    vram_threshold_pct: float = 85.0  # 显存占用百分比阈值（TTS 熔断与「累」共用，单一出处）
     # 降级即感受：每次 fallback 写入感受层的 SA 增量
     llm_degrade_sa_delta: float = 2.0
 
@@ -65,8 +67,8 @@ class Settings(BaseSettings):
     tts_text_lang: str = "zh"
     tts_prompt_lang: str = "zh"
     tts_timeout_s: float = 60.0
-    # 资源熔断：VRAM(MB) 超过阈值或队列拥塞 → 只输出文本不阻塞对话
-    tts_vram_threshold_mb: int = 10240
+    # 资源熔断：VRAM 占用百分比超阈值或队列拥塞 → 只输出文本不阻塞对话
+    # （百分比与 `vram_threshold_pct` 同源；旧键 `tts_vram_threshold_mb` 因高于本机显存总量而失效）
     # 降级即感受：TTS 降级（熔断/合成失败）时写入感受层的 SA 增量
     tts_degrade_sa_delta: float = 1.0
     # 低负载期预合成的高频短语

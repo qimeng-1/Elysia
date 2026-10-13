@@ -259,8 +259,8 @@ def test_protected_words_all_reachable() -> None:
     """
     # 每个词各给一份"真实可能出现的"环境（量纲与真实来源一致）
     envs: dict[str, dict[str, object]] = {
-        "累": {"vrram_mb": 12000.0},  # 大显存机器上的真实高压
-        "困": {"is_night": True, "tr": 30.0},
+        "累": {"vram_busy": True},  # 显存越阈（阈值由调用方按配置算好，词表里不再放数字）
+        "困": {"hour": 3, "tr": 30.0},  # 凌晨 2-5 点（不是笼统的"夜"）
         "痛": {"error_burst": 2},
         "难受": {"cpu_pct": 92.0},
         "想你": {"miss": 0.5},
@@ -271,7 +271,7 @@ def test_protected_words_all_reachable() -> None:
     assert not dead, f"这些受保护词没有任何可满足的触发环境（永久不可说）：{dead}"
 
 
-def _make_soul(tmp_path: Path) -> SoulHeartbeat:
+def _make_soul(tmp_path: Path, *, vram_threshold_pct: float = 85.0) -> SoulHeartbeat:
     """最小 SoulHeartbeat（与 `test_heartbeat.py` 同法），用于验证授权环境接线。"""
     clock = SimulatedClock(start_ts=1_000_000.0, speed=60.0)
     return SoulHeartbeat(
@@ -282,6 +282,7 @@ def _make_soul(tmp_path: Path) -> SoulHeartbeat:
         brain_loop=BrainLoop(DesireSystem(), rng=random.Random(0)),
         clock=clock,
         interval_s=1.0,
+        vram_threshold_pct=vram_threshold_pct,
     )
 
 
@@ -347,6 +348,62 @@ async def test_error_burst_forgets_old_errors(tmp_path: Path) -> None:
 
     assert soul._error_burst() == 0, "窗口外的错误不该继续计入"
     assert "痛" not in permitted_words(soul._expression_env(_output(_feelings()), {}))
+
+
+# ── 5b. 显存：阈值单一出处，且不可知时不编造 ====================
+
+
+@pytest.mark.asyncio
+async def test_vram_busy_follows_resources_and_never_fakes_zero(tmp_path: Path) -> None:
+    """「累」的显存判据：越阈才算，**不可知时不编造 0 也不误报**。
+
+    旧实现的根因有三层（STATUS_MATRIX §12 #5）：身体进程**根本不采 VRAM**、
+    阈值又是绝对 MB（8510，而本机显存总量只有 6144 MiB）⇒ 永不触发。
+    """
+    soul = _make_soul(tmp_path)
+    output = _output(_feelings())
+
+    # 不可知（无 GPU / 采不到）：vram_pct 为 None，且**不当成 0 来触发**
+    soul._latest_resources = {}
+    env_missing = soul._expression_env(output, {"hour": 12})
+    assert env_missing["vram_pct"] is None
+    assert env_missing["vram_busy"] is False
+    assert "累" not in permitted_words(env_missing)
+
+    # 90% 越 85% 阈值 → 可说「累」
+    soul._latest_resources = {"vrram_mb": 5529.0, "vram_pct": 90.0}
+    env_busy = soul._expression_env(output, {"hour": 12})
+    assert env_busy["vram_busy"] is True
+    assert env_busy["vrram_mb"] == pytest.approx(5529.0), "MB 值必须来自真实采样"
+    assert "累" in permitted_words(env_busy)
+
+    # 50% 未越阈
+    soul._latest_resources = {"vrram_mb": 3072.0, "vram_pct": 50.0}
+    assert soul._expression_env(output, {"hour": 12})["vram_busy"] is False
+
+
+@pytest.mark.asyncio
+async def test_vram_threshold_has_single_source(tmp_path: Path) -> None:
+    """改配置阈值，「累」的判定必须跟着变——证明阈值只有**一个出处**。"""
+    strict = _make_soul(tmp_path / "strict", vram_threshold_pct=95.0)
+    strict._latest_resources = {"vram_pct": 90.0}
+    assert strict._expression_env(_output(_feelings()), {})["vram_busy"] is False
+
+    loose = _make_soul(tmp_path / "loose", vram_threshold_pct=80.0)
+    loose._latest_resources = {"vram_pct": 90.0}
+    assert loose._expression_env(_output(_feelings()), {})["vram_busy"] is True
+
+
+def test_sleepy_word_needs_small_hours() -> None:
+    """「困」按**凌晨 2-5 点**判定，不是笼统的"夜"（21:00-05:00）。
+
+    设计（路线图 §7.6）写的是"凌晨 2-5 点"，旧实现用 `day_phase == night`
+    把窗口放宽到 21:00 起（STATUS_MATRIX §12 #8）。
+    """
+    assert "困" not in permitted_words({"hour": 23, "tr": 30.0}), "23 点不算凌晨 2-5 点"
+    assert "困" not in permitted_words({"hour": 1, "tr": 30.0}), "1 点也不算"
+    assert "困" in permitted_words({"hour": 3, "tr": 30.0})
+    assert "困" not in permitted_words({"hour": 3, "tr": 60.0}), "TR 不低时不该说困"
 
 
 # ── 6. 记忆：detail_level 与"越旧越难想起"都必须真的有效果 ─────────

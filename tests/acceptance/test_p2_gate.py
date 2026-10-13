@@ -70,7 +70,7 @@ def _noop_tts(cache_dir: Path, ok: bool = True) -> TTSChain:
     return TTSChain(
         _FakeSynth(ok=ok),
         CachePool(cache_dir),
-        VramBreaker(threshold_mb=10240, sampler=lambda: 100),
+        VramBreaker(threshold_pct=85.0, sampler=lambda: 10),
     )
 
 
@@ -255,7 +255,7 @@ async def test_tts_breaker_mutes_but_text_flows(tmp_path: Path) -> None:
         tts = TTSChain(
             _FakeSynth(ok=True),
             CachePool(tmp_path / "tts-cache"),
-            VramBreaker(threshold_mb=10240, sampler=lambda: 20_000),  # 高 VRAM → 熔断
+            VramBreaker(threshold_pct=85.0, sampler=lambda: 99),  # 显存越阈 → 熔断
         )
         svc = ExpressionService(chain, store, tts_chain=tts)
 

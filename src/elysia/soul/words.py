@@ -17,11 +17,14 @@ from collections.abc import Callable
 # 说明：trigger_* 为运行环境提供的实时指标，由调用方（heartbeat/main）填充
 #
 # ⚠️ **阈值必须与来源的真实量纲/量程一致**，否则该词永久不可说（T1 同类缺陷）：
-#   - `memory_gap` 是缺口强度 0-1（不是 0-100 的百分数）
+#   - `vram_busy` 由调用方按**配置阈值**（`settings.vram_threshold_pct`）算好传入
+#     ——阈值只有**一个出处**，本表不再放第二个 VRAM 数字（旧写法 `vrram_mb > 8510`
+#     既把"85%"错当成绝对 MB，又高于本机显存总量 ⇒ 永不触发）
 #   - `q_len` 是表达队列在飞任务数，容量 2、最多 3（不是几十的大队列）
+#   - `hour` 是本地小时 0-23（`day_phase` 的"夜"档跨 21:00-05:00，比"凌晨 2-5 点"宽）
 _PROTECTED_WORD_PREDICATES: dict[str, Callable[[dict[str, object]], bool]] = {
-    "累": lambda env: _num(env, "vrram_mb", 0) > 8510 or _num(env, "q_len", 0) >= 2,
-    "困": lambda env: _bool(env, "is_night") and _num(env, "tr", 100) < 45,
+    "累": lambda env: _bool(env, "vram_busy") or _num(env, "q_len", 0) >= 2,
+    "困": lambda env: 2 <= _num(env, "hour", -1) < 5 and _num(env, "tr", 100) < 45,
     "痛": lambda env: _num(env, "error_burst", 0) > 1,
     "难受": lambda env: _num(env, "cpu_pct", 0) > 85,
     "想你": lambda env: _num(env, "miss", 0.0) > 0.4 or _num(env, "cs", 100) < 40,

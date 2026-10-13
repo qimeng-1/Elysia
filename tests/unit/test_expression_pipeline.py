@@ -93,10 +93,11 @@ def test_protected_words_require_trigger() -> None:
 
 
 def test_permitted_words_marked_by_trigger() -> None:
-    env = {"is_night": True, "tr": 30, "vrram_mb": 9000}
+    # 环境键与真实来源同量纲：hour = 本地小时；vram_busy = 调用方按配置阈值算好的布尔
+    env = {"hour": 3, "tr": 30, "vram_busy": True}
     permits = permitted_words(env)
-    assert "困" in permits  # 深夜 + 低 TR
-    assert "累" in permits  # 高 VRAM
+    assert "困" in permits  # 凌晨 2-5 点 + 低 TR（路线图 §7.6）
+    assert "累" in permits  # 显存越阈
     assert "想你" not in permits  # miss/CS 未触发
 
 
@@ -155,7 +156,7 @@ def test_validator_rejects_empty() -> None:
 def test_validator_enrich_permits_from_env() -> None:
     v = ExpressionValidator()
     instr = {"lexical_permits": []}
-    env = {"is_night": True, "tr": 30}
+    env = {"hour": 3, "tr": 30}
     enriched = v.enrich_permits(instr, env)
     assert "困" in enriched["lexical_permits"]
     assert "累" not in enriched["lexical_permits"]  # 未触发

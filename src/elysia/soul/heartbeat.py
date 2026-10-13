@@ -155,6 +155,7 @@ class SoulHeartbeat:
         checkpoint: CheckpointManager | None = None,
         expression: ExpressionService | None = None,
         expression_worker: ExpressionWorker | None = None,
+        vram_threshold_pct: float = 85.0,
     ) -> None:
         self._state_store = state_store
         self._heartbeat_store = heartbeat_store
@@ -163,6 +164,9 @@ class SoulHeartbeat:
         self._brain_loop = brain_loop
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._interval_s = interval_s
+        # 显存阈值（百分比）：与 TTS 熔断**同源**（`settings.vram_threshold_pct`），
+        # 「累」的授权据此判定——词表里不再放第二个 VRAM 数字（STATUS_MATRIX §12 #5）
+        self._vram_threshold_pct = vram_threshold_pct
         self._running = False
         self._distress = False
         self._distress_monitor = distress_monitor
@@ -773,6 +777,15 @@ class SoulHeartbeat:
         raw = self._latest_resources.get("vrram_mb")
         return float(raw) if isinstance(raw, (int, float)) else 0.0
 
+    def _latest_vram_pct(self) -> float | None:
+        """身体进程采到的显存占用**百分比**；不可知 → `None`。
+
+        **不编造 0**：无 GPU 时 `vram_busy` 判 False（不误报"累"），
+        而 `state_brief` 里的 MB 值仍按旧语义取 0。
+        """
+        raw = self._latest_resources.get("vram_pct")
+        return float(raw) if isinstance(raw, (int, float)) else None
+
     def _expression_env(self, output: BrainOutput, summary: dict[str, Any]) -> dict[str, object]:
         """词汇表授权环境的实时状态（§六 词 → 触发状态）。
 
@@ -784,15 +797,21 @@ class SoulHeartbeat:
         resources = self._latest_resources
         raw_cpu = resources.get("cpu_percent")
         worker = self._expression_worker
+        vram_pct = self._latest_vram_pct()
         return {
             "vrram_mb": self._latest_vrram_mb(),
             "tr": output.desire.tr,
             "cs": output.desire.cs,
             "miss": output.feelings.miss,
-            "is_night": str(summary.get("day_phase", "")) == "night",
+            # 「困」：本地小时（`day_phase` 的"夜"档跨 21:00-05:00，比"凌晨 2-5 点"宽）
+            "hour": int(summary.get("hour", -1)) if summary.get("hour") is not None else -1,
             # 「难受」：吃她此刻真实的 CPU 占用（与 distress 同一份资源样本）
             "cpu_pct": float(raw_cpu) if isinstance(raw_cpu, (int, float)) else 0.0,
-            # 「累」：表达队列里的在飞任务数（她自己也"忙不过来"）
+            # 「累」：显存占用是否越过**配置阈值**（与 TTS 熔断同源，词表里不再放第二个数字）
+            "vram_busy": vram_pct is not None and vram_pct >= self._vram_threshold_pct,
+            # 观测用：显存占用百分比（不可知时 None）
+            "vram_pct": vram_pct,
+            # 「累」的另一条路：表达队列里的在飞任务数（她自己也"忙不过来"）
             "q_len": worker.depth if worker is not None else 0,
             # 「痛」：窗口内"真的出错了"的次数（此前是字面量 0 ⇒ 该词永久禁用）
             "error_burst": self._error_burst(),

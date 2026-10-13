@@ -42,5 +42,5 @@ def build_tts_chain(
         timeout_s=settings.tts_timeout_s,
     )
     cache = CachePool(settings.tts_cache_dir)
-    breaker = VramBreaker(threshold_mb=settings.tts_vram_threshold_mb)
+    breaker = VramBreaker(threshold_pct=settings.vram_threshold_pct)
     return TTSChain(synthesizer, cache, breaker, on_degrade=on_degrade)

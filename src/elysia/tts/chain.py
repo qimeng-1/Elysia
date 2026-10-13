@@ -56,7 +56,7 @@ class TTSChain:
 
     async def speak(self, req: TTSRequest) -> TTSResult:
         """出声：熔断 → 缓存 → 合成。全程不抛出、不阻塞对话。"""
-        if not self._breaker.can_speak():
+        if not await self._breaker.can_speak():
             await self._degrade("tts_breaker")
             return TTSResult(text=req.text, audio=None, source="muted")
 
@@ -74,7 +74,7 @@ class TTSChain:
 
     async def prewarm(self, phrases: list[tuple[str, str, float]]) -> None:
         """低负载期预合成高频短语（§7.1）。best-effort，失败不抛出。"""
-        if not self._breaker.can_speak():
+        if not await self._breaker.can_speak():
             return
         for text, emotion, speed in phrases:
             if self._cache.get(text, emotion, speed) is not None:

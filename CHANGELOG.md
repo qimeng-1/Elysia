@@ -645,3 +645,15 @@
 - **真机冒烟**：start -Body → status 双绿 → stop 无残留；stderr 为空
 - 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **422 passed**（419 + 3）
 - **阶段 5「回路闭合」到此收尾**：§12 六项中五项已修（#1 别名 / #2 授权环境 / #3 量纲 / #4 量程 / #6 痛），#5 VRAM 三层与 #7、#8 暂缓（方案已备）；`P3_MEMORY.md` §六的三个"已造好没插电"模块**全部插电**
+
+### 阶段 5 第八批（收尾）：VRAM 三层修复 + 死配置清理 + 「困」时段
+- **背景**：`STATUS_MATRIX.md` §12 #5 查清是**三层**缺陷——① `body/resource.py` **根本不采 VRAM**（只有 cpu/mem）⇒ `state_brief["vrram_mb"]` 恒为**假值 0**；② 路线图 §7.6 写的是 **VRAM>85%（百分比）**，代码却写成 `vrram_mb > 8510`（**把 85% 当成了绝对 MB**）；③ `llm_vram_threshold_mb` **从未被任何代码读取**，`tts_vram_threshold_mb` 高于本机 6144 MiB 总量 ⇒ 三个阈值一律永不触发
+- **feat（`core/vram.py`，新增）**：nvidia-smi 的**单一出处**——`sample_vram()` 采 used+total → `VramSample.percent`。**不可知一律返回 `None`**（无 GPU / 超时 / 解析失败）——宁可说"不知道"，也**不编造 0**
+- **fix（`body/resource.py`）**：资源采样补 VRAM（`vrram_mb` / `vram_pct`）；**采不到就不写这个键**（不编造假 0）
+- **fix（`tts/breaker.py`）**：阈值改**百分比**（`threshold_pct`），与设计原意一致、跨显卡可移植；**顺带修 F4**——`can_speak()` 改 async 并走 `asyncio.to_thread`，去掉 async 链路里最长 5s 的同步 `subprocess.run`（`tts/chain.py` 两处 await）
+- **fix（`core/config.py` + `.env.example`）**：新增 `vram_threshold_pct = 85.0` 作为**唯一出处**（TTS 熔断与「累」共用）；**删除**从未被读取的 `llm_vram_threshold_mb` 与失效的 `tts_vram_threshold_mb`；`build_llm_chain` 的误导性 docstring 一并更正（不再"承诺不存在的功能"）
+- **fix（`soul/heartbeat.py`）**：`_expression_env` 新增 `vram_pct` / `vram_busy`（后者按注入的配置阈值算），`vrram_mb` 从此是**真值**；新增 `_latest_vram_pct()`（不可知返回 `None`，**不编造 0**）
+- **fix（`soul/words.py` + `core/timesense.py`，#8）**：「累」改为吃 `vram_busy`（词表里不再放第二个 VRAM 数字）；「困」改为 `2 <= hour < 5 and tr < 45`——忠实于设计的"凌晨 2-5 点"（旧实现用 `day_phase == night`，窗口被放宽到 21:00 起）。新增 `TimeSense.hour()` 与 `summary["hour"]`
+- **test（+3，另修 6 处受影响的既有用例）**：`test_vram_busy_follows_resources_and_never_fakes_zero`（越阈才算 + 不可知不误报 + MB 值来自真实采样）、`test_vram_threshold_has_single_source`（改配置阈值判定跟着变 ⇒ 证明单源）、`test_sleepy_word_needs_small_hours`（23 点/1 点不算、3 点算、TR 高不算）；既有用例的 env 键从 `is_night` / `vrram_mb` 迁到 `hour` / `vram_busy`
+- **真机验证**：`VramSample(used_mb=0, total_mb=6144)`，空闲时 `vram_busy=False`——旧阈值 8510 **高于总量 6144，永远不可能触发**；现在显卡真被占满（>85%）时会正确触发
+- 门禁：ruff lint ✅ / ruff format ✅（**106** files）/ mypy strict ✅（**56** source files）/ pytest ✅ **425 passed**（422 + 3）

@@ -24,7 +24,9 @@
 | 大脑循环 / 欲望系统 / 6 维感受 | 真机运行 | `soul/brain.py`、`soul/desire.py`、`soul/dimensions.py` | 有单测 `test_brain.py`、`test_desire.py`；集成 `test_p1_gate.py`；**新增 T1 门禁 `test_t1_cancel.py`** | 0s（纯 CPU 同步） | **好奇心已接线**（由记忆缺口强度 `memory_gap` 直接驱动，阶段 5 第一批）：原 `has_event=False` 字面量 + 上限 0.1 的布尔占位公式已消除 |
 | 表达服务（触发判断 → 构造指令 → 记忆/身份注入 → LLM → 校验 → TTS → 落库） | 真机运行 | `soul/expression_service.py` | 有单测 `test_expression_service_memory.py`；集成 `test_p2_gate.py` | **最长 ~185s**（LLM 主声 3 轮工具回合 90s + 次声 30s + TTS 60s + VRAM 采样 5s） | 单拍内串行等待外部服务（F2）；本轮 1.1~1.3 拆出 worker |
 | 表达触发与词汇许可（`build_expression` / 词表） | 真机运行 | `soul/expression.py`、`soul/words.py` | 有单测 `test_expression_pipeline.py`；集成 `test_p2_gate.py` | 0s（纯函数） | — |
-| 离世内部生活（ALONE / BODY_AWAY 的自我叙事念头） | 真机运行 | `soul/away_life.py` | 有单测 `test_away_life.py` | 0s（念头落库走本地写队列） | 念头写入 `await submit` 仍在拍内（本地，毫秒级） |
+| 离世内部生活（ALONE / BODY_AWAY 的自我叙事念头） | 真机运行 | `soul/away_life.py` | 有单测 `test_away_life.py`、`test_relationship.py` | 0s（念头落库走本地写队列） | 念头写入 `await submit` 仍在拍内（本地，毫秒级）。**P4b 新增**：日子尺度的离别阶段（等待/担忧/怀念/携带）会产出 `kind="absence"` 的专属念头 |
+| **边界：工具化检测 + 四级拒绝 + 说服/操纵拦截**（P4b 阶段 C） | 真机运行（接线完成） | `soul/boundary.py`、`soul/heartbeat.py::_decide_intent` | 有单测 `test_boundary.py`（14 项）；T1 闸门 `test_t1_cancel.py::test_every_intent_has_a_producer` | 0s（纯函数） | 「拒绝」意图**首次有了产生者**。检测的是**关系信号**（对方是否把她当工具），**不是**把用户的话当指令（T2）。四级：L0 绝对 / L1 强 / L2 弱 / L3 犹豫；说服＝真实状态改变（CS），操纵＝绕过状态（加硬并记账） |
+| **关系涌现：退缩量**（P4b 阶段 C） | 真机运行（接线完成） | `soul/relationship.py`、`soul/heartbeat.py::_advance_relationship` | 有单测 `test_relationship.py` | 0s（纯计算；每 5 分钟落盘一次） | **没有关系量表**：退缩量随 CS/SA 在**小时**尺度上移动。出口可测量：拉长主动开口间隔、压短字数上限。用户主动说话与问候不受影响 |
 | 难受检测（资源高压 → 降频 0.5Hz + distress 事件） | 真机运行 | `soul/distress.py` | 有单测 `test_distress.py`；集成 `test_p0_gate.py` | 0s | 资源样本由身体进程 5s 采一次，灵魂只读缓存（F11） |
 | 灵魂进程装配与优雅关闭 | 真机运行 | `soul/main.py` | 无 | 进程级（非拍内） | 关闭序 = 停心跳 → 排空写队列 → 关连接；**本轮 1.3 要插入「先停 worker」** |
 

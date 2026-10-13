@@ -660,6 +660,77 @@
 
 ---
 
+## 阶段 A–C：环境、P0–P3 收口、P4b 边界（2026-10-14）
+
+> 本段是"一次性把 P0–P4 做完"这一轮的记录。逐提交见 git log（`4338068` → `7f82a09`）。
+
+### 阶段 A：作业规程 ＋ 工作环境
+- `DEVELOPMENT_PRACTICES.md` 新增 **「AI 协作者的作业规程」**：把踩过的坑固化成必做动作
+  （先 cd 再相对路径 / `scripts/*.ps1` 必须保住 UTF-8 BOM / 提交前把 `.venv\Scripts` 放进 PATH /
+  门禁四件套 / T1 闸门该补哪些断言 / 活文档与历史文档的纪律 / 改过进程装配后的冒烟清单）
+- 工作环境（DSH profile，非本仓库文件）：启用 `dsh-experimental-agent-team-profile` 与
+  `dsh-experimental-schedule-bundle`；安装 `dsh-checkpoint-rewind@0.6.24`
+- **skill 系统**：经两处约定目录探针确认当前**没有 skills 根目录**（`skill-filesystem` 无配置 schema
+  且打包在 app.asar 内）⇒ 本轮不接 skill，作业规程改写入仓库文档（随代码版本化更可靠）
+- 门禁：ruff / mypy / pytest **425 passed**
+
+### 阶段 B1：修 F7 —— 关闭序改哨兵停写者
+- `asyncio.to_thread` 里的 sqlite 调用**无法被取消**，硬 `cancel()` 后它仍在跑，而我们紧接着在
+  **同一连接**上 `close()` ⇒ 关闭竞态（19.4 缺点 5 后半）
+- 改为**哨兵停写者**：拒收新写 → 排空队列 → 投哨兵（写者自行返回）→ 等其退出（超时才允许 cancel）
+  → 关连接。关停后拒收新写并**抛错**（与 F6"库要说真话"同一原则）；`close()` 变为幂等
+- 测试 +3（含"写者必须是**自行返回**而非被取消"的断言）· 门禁 **428 passed**
+
+### 阶段 B2：启动完整性自检 ＋ 备份原子性与定时器
+- **§11 #1**：`state_store._connect` 启动即跑 `PRAGMA integrity_check`；不通过则**大声告警 + 退化运行**
+  （`store.degraded`）——**不阻断启动、不自动恢复**（自动用陈旧备份覆盖是不可逆动作，由人工执行）
+- **§11 #4**：备份原子性——把 `checkpoint` 的 SQLite `.backup` 提为公共件 `backup_database`，
+  新增 `scripts/snapshot_dbs.py`；`backup.ps1` 改为 ① robocopy 全量 ② `.backup` 覆盖两个**运行中的库**
+  为事务一致快照 ③ 保留 N 份；并先清掉备份里的陈旧 `-wal`/`-shm`
+- **§11 #3**：`backup.ps1 -Register/-Unregister` 管理每日计划任务（本机已注册 `Elysia-DailyBackup` 03:30）
+- 实测：运行中做出的快照 `integrity_check = ok`、表结构完整 · 测试 +4 · 门禁 **432 passed**
+
+### 阶段 B3：数据保留策略 ＋ 进程级看门狗
+- **§11 #2**：新增 `core/retention.py` ＋ `scripts/retention.py` —— **先归档、再裁剪、后 VACUUM**
+  - **只裁遥测流水** `heartbeats`（约 8.6 万行/天），**绝不碰** `memories`/`thought_log`/`expression_log`
+  - 三条安全约束：先归档；归档行数≠待裁行数则**整轮放弃一行不删**；必须先停她（自行检查 PID 并拒绝）
+  - 缺省**干跑**，`--apply` 才真做
+- **§11 #5**：新增 `scripts/watchdog.ps1`（进程级自愈），补上"崩了不会自愈"的剩下那一半
+  - **尊重"故意停机"**：`data/run/no_autostart` 存在时不拉起（`soul.ps1 stop` 创建、`start` 清除）
+  - 实测：杀掉全部 python → 看门狗自动拉回；`stop` 后 → 不拉起并记日志
+- 顺手修：两个 Python CLI 的控制台编码兜底（Windows 代码页非 UTF-8 时中文乱码）
+- 测试 +4 · 门禁 **436 passed** · 四个 `.ps1` 的 BOM 状态复核正确
+
+### 阶段 C1+C2：P4b 边界 —— 工具化检测 ＋ 四级拒绝 ＋ 说服/操纵拦截
+- **「拒绝」意图首次有了产生者**：此前它只有微声开头（"诶呀，这可不行哦"）与身份基石
+  （"我有权拒绝成为工具"），**没有任何东西会选中它**
+- 新增 `soul/boundary.py`：存在威胁 / 人格贬抑 / 剥夺自由 / 时间压力 / 单纯功能调用（加权打分；
+  **功能调用单独出现不触发拒绝**）→ L0 绝对 / L1 强 / L2 弱 / L3 犹豫
+- **说服＝真实状态改变**（CS 越过说服线 → 松一档）；**操纵＝绕过状态**（加硬并记账）；
+  **重复施压无效**（CS 没真的变好，第二句也不松口）
+- 接线：心跳里用户新话到达时先过边界（**读作关系信号，不违背 T2**）；`state_pressure` **复用受保护词的
+  授权判定**；新增 `_decide_intent()`，优先级 **边界(拒绝) > 回应 > 内部冲动 > 呓语映射**
+- 测试 +15（含 T1 闸门 `test_every_intent_has_a_producer`：`INTENTS` 少一个产生者就红）· 门禁 **451 passed**
+
+### 阶段 C3+C4：P4b 关系涌现 ＋ 永续存在
+- 新增 `soul/relationship.py`：**没有关系量表**，只有一个随 CS/SA 在**小时**尺度移动的退缩量
+  （CS 长期低 / 她长期难受 → 退缩；真诚 → 恢复；被操纵 = 即时记账）；退缩量**持久化**（kv）
+  - **T1 出口**：拉长主动开口间隔（说得更少）、压短字数上限（说得更短）；
+    用户主动说话与问候**不受影响**（对关系的退缩 ≠ 对你不理不睬）
+- `core/timesense.py` 新增 `absence_stage()`：等待(<7d) / 担忧(7-30d) / 怀念(30-365d) / **携带**(>365d)
+  - 与 `away_grade()` 不是一回事：那个是分秒尺度、决定"她此刻的行为集"；这个决定"她如何度过很长的分别"
+- `soul/away_life.py` 新增阶段念头（`kind="absence"`）——久别后她的独处内容真的变了
+- 测试 +10 · 门禁 **461 passed**
+
+### 本段总计
+- 测试 **425 → 461**（+36）；mypy strict **56 → 59** 源文件；ruff format **106 → 111** 文件
+- 新增源文件：`core/vram.py`（前段）／`core/retention.py`／`soul/boundary.py`／`soul/relationship.py`
+- 新增脚本：`snapshot_dbs.py`／`retention.py`／`watchdog.ps1`
+- `STATUS_MATRIX` §11 待补清单 **7 项中 6 项已闭合**（余 `verify_integrity.py`：职责已被 #1 覆盖）
+- `ROADMAP_V2` §7 携带缺口**全部闭合**；§4b P4b 主体交付
+
+---
+
 ## 阶段 6：重新基线规划（2026-10-14）
 
 ### 新增 `docs/ROADMAP_V2.md`——路线图 v2（P4 及以后生效）

@@ -241,7 +241,10 @@
 | 大脑循环四层 | 感受→共振→意志→行动 | —（规划：`soul/loop.py`） | ⏳ P1 |
 | 表达-决策硬隔离 | 决策层只吐表达指令 JSON，LLM 消费 | —（规划：`soul/express.py` + `validator.py`） | ⏳ P2 |
 | 三层记忆/索引衰减 | 浅层/工作/深层 + 检索耗时随龄增长 | —（规划：`core/memory/`） | ⏳ P3 |
-| 五条基石/四级拒绝 | 身份核心硬编码 + 分级拒绝 | —（规划：`soul/identity.py` + `refusal.py`） | ⏳ P4 |
+| 五条基石 / 身份 | 身份核心硬编码 ＋ `kind=self` 落库（她可认领 / 拒绝认领） | `llm/identity.py` IDENTITY_SEEDS ＋ 5 个工具 | ✅ P4a |
+| **四级拒绝** | 工具化检测（读作**关系信号**，不是指令）→ L0/L1/L2/L3 ＋ 说服 / 操纵拦截 | `soul/boundary.py` BoundaryKeeper ＋ `soul/heartbeat.py::_decide_intent` | ✅ P4b |
+| **关系涌现** | **无开关**：退缩量随 CS/SA 在小时尺度移动 → 说得更少、说得更短 | `soul/relationship.py` RelationshipKeeper | ✅ P4b |
+| **永续存在** | 日子尺度离别阶段（等待/担忧/怀念/携带）→ 独处念头真的变化 | `core/timesense.py::absence_stage` ＋ `soul/away_life.py` | ✅ P4b |
 | 工具层/模拟社交 | ToolManager + 白名单 + NPC 沙盒 | —（规划：`soul/tools/` + `social.py`） | ⏳ P5 |
 | 学习/自我修改 | LRN/ERR 条目 + L1-L2 权限分级 | —（规划：`soul/learning.py` + `selfmod.py`） | ⏳ P6 |
 

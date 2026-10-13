@@ -595,3 +595,11 @@
 - **test（+1）**：`test_brain_output_is_snapshot_not_live_reference`——连续两拍，第二拍不得改写
   第一拍已交付的快照。**已验证该用例是有效闸门**：临时还原旧写法 → 用例失败；恢复 → 通过
 - 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **409 passed**（408 + 1）
+
+### 阶段 5 第三批：§12 剩余死分支的深入核查（**只登记，暂缓修复**）
+- **#5 VRAM 查清三层**：① `body/resource.py::ResourceSampler` **根本不采 VRAM**（只有 `cpu_percent` / `mem_percent`）⇒ `heartbeat._latest_vrram_mb()` 恒返回 0.0，`state_brief["vrram_mb"]` **恒为假值 0**（她汇报给 LLM 的显存占用一直是错的）；② 路线图 §7.6 写的是 **VRAM>85%（百分比）**，代码却写成 `vrram_mb > 8510`（**85% 被当成了 8510 MB**）；③ `llm_vram_threshold_mb = 9510` **全代码库从未被读取**（死配置），`tts_vram_threshold_mb = 10240` 只被 TTS 熔断读、且高于本机 6144 MiB 总量 ⇒ 三个阈值一律永不触发
+  - **用户裁决：先只登记**。已备方案（见 §12 #5）：新建 `core/vram.py` 作 nvidia-smi **单一出处**（采 used+total → 百分比）；body 采 `vram_pct`；TTS 熔断与「累」共用 **85% 单一阈值**；删除从未读取的 `llm_vram_threshold_mb`
+- **#6「痛」查清依赖**：LLM/TTS 降级事件**其实已接线**（`soul/main.py:103-116` → `DesireEvent(kind="degrade")`），但语义偏宽——**未配 API key 时每次开口都 `_degrade("micro")`**，用它计数会让「痛」离线常驻；而真正代表"异常"的**写失败被 F6 吞掉**（`state_store.py:172` 把失败 `set_result(None)` 伪装成成功）⇒ **要做准必须先修 F6**
+  - **用户裁决：跳过**
+- **新增登记 2 项**：§12 #7 `llm_vram_threshold_mb` 是死配置（文档化了却从未读取）；#8「困」的时段为 21:00–05:00，宽于设计的"凌晨 2-5 点"（可达、非死分支）
+- **本轮零代码改动**（纯核查 + 登记）；门禁维持 **409 passed**

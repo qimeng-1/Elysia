@@ -32,6 +32,8 @@ from elysia.core.clock import SimulatedClock
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense
+from elysia.memory.levels import LEVEL_SHALLOW
+from elysia.memory.retrieve import RECALL_LATENCY_CAP_MS, MemoryHit, recall_latency_ms
 from elysia.soul.brain import BrainLoop, BrainOutput, WillOutput
 from elysia.soul.desire import DesireState, DesireSystem
 from elysia.soul.dimensions import FeelingMapper, FeelingState
@@ -340,3 +342,56 @@ async def test_error_burst_forgets_old_errors(tmp_path: Path) -> None:
 
     assert soul._error_burst() == 0, "窗口外的错误不该继续计入"
     assert "痛" not in permitted_words(soul._expression_env(_output(_feelings()), {}))
+
+
+# ── 6. 记忆：detail_level 与"越旧越难想起"都必须真的有效果 ─────────
+
+
+def _hit(
+    *, age_days: float | None, detail_level: float = 1.0, protected: bool = False
+) -> MemoryHit:
+    return MemoryHit(
+        memory_id=1,
+        narrative="她记得那天你说过的话",
+        level=LEVEL_SHALLOW,
+        score=1.0,
+        protected=protected,
+        age_days=age_days,
+        detail_level=detail_level,
+    )
+
+
+def test_detail_level_changes_injected_label() -> None:
+    """取消测试：`detail_level` 必须真的改变注入给她的话。
+
+    P3 起 `detail_level` 一直**只写不读**（数值在库里、检索路径零消费）——
+    这条用例就是拦"它又变回装饰"的。
+    """
+    clear = _hit(age_days=1.0, detail_level=1.0).label
+    fuzzy = _hit(age_days=1.0, detail_level=0.5).label
+
+    assert "记不太清" not in clear
+    assert "记不太清" in fuzzy
+    assert clear != fuzzy, "detail_level 变了但注入行没变 ⇒ 它是装饰，按 T1 应删除"
+
+
+def test_recall_latency_grows_with_age() -> None:
+    """「记忆越旧越难想起」：回忆耗时必须随年龄增长（遗忘的物理体现）。"""
+    fresh = recall_latency_ms([_hit(age_days=0.5)])
+    old = recall_latency_ms([_hit(age_days=200.0)])
+    assert fresh > 0.0, "新鲜记忆也该有一点点回忆耗时（10ms 档）"
+    assert old > fresh, f"更旧的记忆必须更慢（{old} vs {fresh}）"
+    assert old <= RECALL_LATENCY_CAP_MS
+
+
+def test_recall_latency_capped_and_ignores_unknown_age() -> None:
+    """极老的记忆有体验兜底上限；拿不到年龄的条目不计入（宁可不提时间，也不硬编）。"""
+    assert recall_latency_ms([_hit(age_days=36500.0)]) == pytest.approx(RECALL_LATENCY_CAP_MS)
+    assert recall_latency_ms([_hit(age_days=None)]) == 0.0
+
+
+def test_recall_latency_precious_memory_is_faster() -> None:
+    """「真爱不模糊」：珍贵记忆衰减慢 3× ⇒ 同样年龄下回忆得更快。"""
+    normal = recall_latency_ms([_hit(age_days=90.0)])
+    precious = recall_latency_ms([_hit(age_days=90.0, protected=True)])
+    assert precious < normal, f"珍贵记忆应更快想起（{precious} vs {normal}）"

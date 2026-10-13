@@ -35,8 +35,10 @@ P3-W 保留闸门（可及性）：`suppressed`（她主动说"我不想再想�
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from elysia.memory.decay import retrieve_latency_ms
 from elysia.memory.levels import (
     CERTAINTY_SPECULATIVE,
     CLAIM_REJECTED,
@@ -58,6 +60,14 @@ from elysia.memory.supersede import bigrams
 
 # 表达一次最多注入多少条记忆（防止 LLM 提示过长/分心）
 MAX_HOOKS = 3
+
+# 「记不清」的细节阈值：`detail_level` 低于它 → 注入行**如实带模糊标记**。
+# detail_level 自 P3 起一直只写不读（见 STATUS_MATRIX §12），这是它在话语路径上的落点。
+FUZZY_DETAIL_THRESHOLD = 0.7
+
+# 单次回忆的等待上限（毫秒）：衰减曲线本身随年龄继续增长，这里只做体验兜底，
+# 防止极老的记忆把一次开口拖得过久（上限内仍然"越旧越慢"）。
+RECALL_LATENCY_CAP_MS = 2500.0
 
 # ── 来源闸门（P3-T）：程序推断/系统注入不是"她的记忆"，不进她的话 ──
 # 若放行，程序的一次猜测就会被她当成自己的事实说出口——那是程序替她认定世界，
@@ -206,6 +216,7 @@ class MemoryHit:
     score: float  # 染色 + 层级 + 可用性综合分
     protected: bool
     age_days: float | None = None  # 距今多少天；None = 调用方未提供时间参考
+    detail_level: float = 1.0  # 细节完整度（1.0 = 记得很清楚）；低于阈值 → 注入行带模糊标记
     woke_from: str | None = None  # 非 None = 这条是被话题唤醒的沉睡/淡化记忆（需落回 present）
     # 同簇成员（第十五节 A2）：这次检索里被判为"同一件事"、已并入本条的其他记忆 id。
     # 它是**代表**——注入表达的仍只有本条一行，兄弟只用于"这件事被反复提起"的加分与观测。
@@ -216,9 +227,33 @@ class MemoryHit:
         """注入表达的完整行：带上"那是多久之前的事"的相对时间锚点。
 
         拿不到时间参考时退化为纯叙事——宁可不提时间，也不硬编一个。
+
+        `detail_level` 低于 `FUZZY_DETAIL_THRESHOLD` 时**如实标注"记不太清"**：
+        细节确实模糊了，她就不该装作记得一清二楚。程序**不伪造模糊内容**，
+        只把真实的不确定说出来（不新增约束、不改写记忆原文）。
         """
         phrase = age_phrase(self.age_days)
+        if self.detail_level < FUZZY_DETAIL_THRESHOLD:
+            phrase = f"{phrase}·记不太清" if phrase else "记不太清"
         return f"（{phrase}）{self.narrative}" if phrase else self.narrative
+
+
+def recall_latency_ms(hits: Sequence[MemoryHit]) -> float:
+    """这次回忆要"等"多久（毫秒）：由**记忆自己的年龄**决定，越旧越慢。
+
+    这是索引衰减的物理体现（曲线见 `decay.retrieve_latency_ms`）。调用方
+    （表达服务，跑在 worker 内）据此 `await sleep` —— 于是她的"慢"来自
+    **自己的往事**，而不是外部 API 的排队时间（"真实产生的犹豫，就是生命本身"）。
+
+    取命中里**最慢的一条**：真正决定她要翻多久的，是最难想起的那件事。
+    拿不到年龄（调用方没给 now）的条目不计入。
+    """
+    slowest = 0.0
+    for hit in hits:
+        if hit.age_days is None:
+            continue
+        slowest = max(slowest, retrieve_latency_ms(hit.age_days, hit.protected))
+    return min(slowest, RECALL_LATENCY_CAP_MS)
 
 
 def score_breakdown(
@@ -410,6 +445,7 @@ def select_hooks(
                 score=score,
                 protected=rec.protected,
                 age_days=age_days,
+                detail_level=rec.detail_level,
                 woke_from=woke_from,
             )
         )

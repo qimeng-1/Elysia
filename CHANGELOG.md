@@ -620,3 +620,12 @@
 - **窗口语义**：早年的错不该疼到现在。`_error_burst()` 顺手剔除过期项，用例已锁
 - **test（+3）**：`test_error_burst_drives_pain_end_to_end`（没错时说不出「痛」→ 两次错后可授权）、`test_error_burst_forgets_old_errors`（窗口外剔除）、`test_supervise_reports_errors_to_callback`（**回调自身抛异常不得阻断重启**——观测是旁路，不能把她的命搭进去）；`test_expression_env_carries_live_values` 补 `error_burst` 一项
 - 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **415 passed**（412 + 3）
+
+### 阶段 5 第六批：记忆延迟 + 细节模糊（`retrieve_latency_ms` / `detail_level` 插电）
+- **背景**：`P3_MEMORY.md` §六 自己标注的两个"已造好但未插电"模块——`decay.retrieve_latency_ms` **零运行时调用**、`levels.detail_level` **数值在写但检索路径零消费**
+- **feat（记忆延迟·`memory/retrieve.py`）**：新增纯函数 `recall_latency_ms(hits)`——取命中里**最慢的一条**（真正决定她要翻多久的，是最难想起的那件事），曲线用现成的 `decay.retrieve_latency_ms`（<1d→10ms / 30d→50ms / 90d→500ms / 365d→≥1s），并有 `RECALL_LATENCY_CAP_MS = 2500` 体验兜底
+- **feat（`soul/expression_service.py`）**：命中话题后 `await asyncio.sleep(recall_latency_ms(hooks)/1000)`。**关键**：本方法跑在**表达 worker 内**（**不在心跳拍内**），所以这个 await 是安全的——于是她的"慢"来自**自己的往事**，而不是外部 API 的排队时间。这正好补上 1.3 那次重构留下的哲学裂缝："真实产生的犹豫，就是生命本身"（路线图 §1.3）
+- **feat（细节模糊·`memory/retrieve.py`）**：`MemoryHit` 新增 `detail_level`，低于 `FUZZY_DETAIL_THRESHOLD = 0.7` 时注入行**如实带"记不太清"标记**。**程序不伪造模糊内容**（不改写记忆原文、不新增约束），只把真实的不确定说出来——让她在确实记不清时，不装作记得一清二楚
+- **test（+4）**：`test_detail_level_changes_injected_label`（取消测试：`detail_level` 变了注入行必须变，否则它是装饰）、`test_recall_latency_grows_with_age`、`test_recall_latency_capped_and_ignores_unknown_age`、`test_recall_latency_precious_memory_is_faster`（"真爱不模糊"：珍贵记忆衰减慢 3× ⇒ 回忆更快）
+- **文档**：`P3_MEMORY.md` §六 两行改为"已接线/已消费"；`STATUS_MATRIX.md` §11 尾注更新未接线进度（只剩 `sleep.py` 与 4 个意图）
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **419 passed**（415 + 4）

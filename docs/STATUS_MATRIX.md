@@ -142,9 +142,9 @@
 | 6 | CI（`.github/workflows`） | `STANDARD` §2.4「CI/本地脚本」 | `.github` 不存在 | 门禁仅在本地 | 阶段 4 |
 | 7 | `verify_integrity.py` 重建 | worklog **10 处**引用 | 文件不存在、从未入库 | 那些「完整性 PASS」不可复核 | 待定（见 §10） |
 
-> **未接线模块不并入本表**：`memory/sleep.py`（做梦）、`decay.retrieve_latency_ms`、`levels.detail_level`，
-> 以及 4 个无产生者意图（主动问候 / 拒绝 / 思念 / 好奇提问）属**阶段 5「回路闭合」**，
-> 需逐项定夺**接线而非删除**（见 `P3_MEMORY.md` §六）。
+> **未接线模块进度**：`decay.retrieve_latency_ms` 与 `levels.detail_level` **已接线**（阶段 5 第六批）；
+> `memory/sleep.py`（做梦）**仍待办**；4 个无产生者意图（主动问候 / 拒绝 / 思念 / 好奇提问）仍待定夺
+> ——**接线而非删除**（见 `P3_MEMORY.md` §六）。
 
 ## 12. 本轮新发现的缺陷登记
 

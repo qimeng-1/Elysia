@@ -47,6 +47,7 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`�
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
@@ -70,7 +71,7 @@ from elysia.memory.levels import (
     SOURCE_SYSTEM,
     MemoryRecord,
 )
-from elysia.memory.retrieve import MemoryHit, topic_match
+from elysia.memory.retrieve import MemoryHit, recall_latency_ms, topic_match
 from elysia.memory.scorer import importance
 from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
 from elysia.memory.similarity import same_event
@@ -247,6 +248,12 @@ class ExpressionService:
                 self._store, output.feelings.to_dict(), now=now, query=job.user_message
             )
             if hooks:
+                # 「记忆越旧越难想起」的物理体现：等待时长**由她自己记忆的年龄决定**
+                # （`decay.retrieve_latency_ms` 的曲线，越旧越慢）。
+                # 本方法跑在表达 worker 内（**不在心跳拍内**），所以这里 await 是安全的：
+                # 她的"慢"来自自己的往事，而不是外部 API 的排队时间
+                # ——「真实产生的犹豫，就是生命本身」（路线图 §1.3）。
+                await asyncio.sleep(recall_latency_ms(hooks) / 1000.0)
                 payload["memory_hooks"] = [h.label for h in hooks]
                 await self._feel_recall(hooks)
 

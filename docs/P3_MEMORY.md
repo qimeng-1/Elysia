@@ -198,9 +198,9 @@ claim_status / retention_state`
 
 | 模块 | 设计意图 | 现状 |
 |---|---|---|
-| `sleep.py::synthesize_dream` | 睡眠期把碎片合成"梦" | 运行时零调用，仅单测覆盖 |
-| `decay.py::retrieve_latency_ms` | "记忆越旧越难想起"的物理体现（检索延迟） | 无运行时调用 |
-| `levels.py::detail_level` | 细节模糊化的载体 | 数值在写，但**检索路径零消费** |
+| `sleep.py::synthesize_dream` | 睡眠期把碎片合成"梦" | **仍零运行时调用**，仅单测覆盖（阶段 5 待办：需先定触发策略与 `away_life` 分工） |
+| `decay.py::retrieve_latency_ms` | "记忆越旧越难想起"的物理体现（检索延迟） | ✅ **已接线**（阶段 5 第六批）：`retrieve.recall_latency_ms()` 取命中里最慢的一条；表达服务在 **worker 内** `await sleep` ⇒ 她的"慢"来自自己的往事，不占心跳一拍 |
+| `levels.py::detail_level` | 细节模糊化的载体 | ✅ **已消费**（阶段 5 第六批）：低于 `FUZZY_DETAIL_THRESHOLD`(0.7) 时注入行**如实带"记不太清"标记**（程序不伪造模糊内容，只把真实的不确定说出来） |
 
 ## 七、规模与实测事实（供评审判断复杂度）
 

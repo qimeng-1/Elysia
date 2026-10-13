@@ -42,7 +42,7 @@
 | 记忆缺口信号（有些事想不起来了） | 真机运行 | `memory/hooks.py` | 有单测 `test_decay.py`；集成 `test_p3_gate.py` | 0s | — |
 | 沉淀候选（发现重复模式，递给她认领） | 真机运行 | `memory/sediment.py` | 有单测 `test_sediment.py` | 0s（每 300 拍） | — |
 | 做梦（自由联想流，无 LLM） | **已实现·未接线** | `memory/sleep.py` | 有单测 `test_sleep.py`；集成 `test_p3_gate.py` | —（不在心跳路径上） | 纯函数已就绪，运行时尚未调用 |
-| 双库底座（WAL + 单写者队列 + 幂等迁移回填） | 真机运行 | `core/state_store.py` | 有单测 `test_state_store.py` | 0s（`to_thread`） | **F6 已修**（写失败不再 `set_result(None)` 伪装成功，而是向上抛；`submit_ret` / `submit` 均已加锁）。F7 `writer.cancel()` 主手段**仍待处置** |
+| 双库底座（WAL + 单写者队列 + 幂等迁移回填） | 真机运行 | `core/state_store.py` | 有单测 `test_state_store.py` | 0s（`to_thread`） | **F6 已修**（写失败不再 `set_result(None)` 伪装成功，而是向上抛）。**F7 已修**（关闭改**哨兵停写者**：`to_thread` 里的 sqlite 调用无法取消，硬 `cancel()` 会与随后的 `close()` 竞态；`cancel()` 降为超时后的最后兜底；关停后拒收新写并抛错） |
 | 常驻协程监督器（F6 的对偶件） | 真机运行 | `core/supervisor.py` | 有单测 `test_core.py`（重启 / 取消传播） | 0s | 协程级自愈：单拍或整循环异常不再等于"她僵死"；**进程级看门狗仍未做**（见 §11 #5） |
 
 ## 3. 内核（core）

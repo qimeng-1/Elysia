@@ -41,7 +41,8 @@ from elysia.memory.levels import (
 logger = logging.getLogger("elysia.state_store")
 
 _WRITE_OP = Callable[[sqlite3.Connection], Any]
-_QUEUE_ITEM = tuple[_WRITE_OP, "asyncio.Future[Any] | None"]
+# 队列表项：`op is None` = **关闭哨兵**（写者见到即自行退出；见 `close()` 的 F7 说明）
+_QUEUE_ITEM = tuple[_WRITE_OP | None, "asyncio.Future[Any] | None"]
 _JOIN_TIMEOUT_S = 10.0
 
 _STATE_SCHEMA = """
@@ -150,8 +151,15 @@ class _AsyncSQLite:
         self._conn: sqlite3.Connection | None = None
         self._queue: asyncio.Queue[_QUEUE_ITEM] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
+        self._closed = False
+
+    def _ensure_open(self) -> None:
+        """关停后拒绝新写：**说真话**，不静默丢弃（与 F6 同一原则）。"""
+        if self._closed:
+            raise RuntimeError("状态库已关闭，拒绝新的写操作")
 
     async def start(self) -> None:
+        self._closed = False
         self._conn = await asyncio.to_thread(_connect, self._db_path)
         if self._schema is not None:
             # executescript 支持多语句 schema（建表 + 索引），自带 commit
@@ -165,16 +173,20 @@ class _AsyncSQLite:
         while True:
             op, fut = await self._queue.get()
             try:
-                result = await asyncio.to_thread(op, self._conn)
-            except Exception as exc:
-                # 写者存活（后续写入不受影响），但**失败必须被调用者看见**：
-                # 旧写法 `fut.set_result(None)` 把失败伪装成成功（F6，19.4 缺点 5）。
-                logger.exception("write op failed（写者存活，后续写入不受影响）")
-                if fut is not None and not fut.done():
-                    fut.set_exception(exc)
-            else:
-                if fut is not None and not fut.done():
-                    fut.set_result(result)
+                if op is None:
+                    # 关闭哨兵：**自行退出**（不是被 cancel）——见 `close()` 的 F7 说明
+                    return
+                try:
+                    result = await asyncio.to_thread(op, self._conn)
+                except Exception as exc:
+                    # 写者存活（后续写入不受影响），但**失败必须被调用者看见**：
+                    # 旧写法 `fut.set_result(None)` 把失败伪装成成功（F6，19.4 缺点 5）。
+                    logger.exception("write op failed（写者存活，后续写入不受影响）")
+                    if fut is not None and not fut.done():
+                        fut.set_exception(exc)
+                else:
+                    if fut is not None and not fut.done():
+                        fut.set_result(result)
             finally:
                 self._queue.task_done()
 
@@ -184,6 +196,7 @@ class _AsyncSQLite:
         调用方若是常驻循环，请用 `core.supervisor.supervise` 兜住——
         库负责说真话，循环负责不死。
         """
+        self._ensure_open()
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         await self._queue.put((op, fut))
         await self._queue.join()
@@ -191,6 +204,7 @@ class _AsyncSQLite:
 
     async def submit_ret(self, op: _WRITE_OP) -> Any:
         """提交带返回值的写操作并等待结果（单写者串行，写后读一致）。"""
+        self._ensure_open()
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         await self._queue.put((op, fut))
         await self._queue.join()
@@ -206,15 +220,37 @@ class _AsyncSQLite:
         return await asyncio.to_thread(_run, self._conn)
 
     async def close(self) -> None:
-        """优雅关闭：排空队列（10s 兜底）→ 停写者 → 关连接。"""
+        """优雅关闭：**哨兵停写者**（不再以 `cancel()` 为主手段，F7）。
+
+        顺序里每一步都为下一步消除竞态：
+
+        1. `_closed = True` —— 拒收新写（`submit` / `submit_ret` 会抛）
+        2. **排空队列**（`_JOIN_TIMEOUT_S` 兜底）——等的是"已提交的写都落盘"
+        3. 投**关闭哨兵** → 写者**自行返回**。为什么不用 `cancel()`：
+           `asyncio.to_thread` 里的 sqlite 调用**无法被取消**，硬 cancel 会让它
+           继续在线程里跑，而我们紧接着就在**同一个连接**上 `close()` ——
+           这正是 19.4 缺点 5 记的关闭竞态（F7）
+        4. 等写者真正退出（再给一个 `_JOIN_TIMEOUT_S`）；**只有**在这一步超时后，
+           才允许 `cancel()` 作为最后兜底
+        5. 关连接 —— 此刻已保证没有在飞的写
+        """
+        if self._conn is None:
+            return
+        self._closed = True
         try:
             await asyncio.wait_for(self._queue.join(), timeout=_JOIN_TIMEOUT_S)
         except TimeoutError:
-            logger.warning("write queue drain timeout（%ss），强制关闭", _JOIN_TIMEOUT_S)
+            logger.warning("write queue drain timeout（%ss），继续关闭", _JOIN_TIMEOUT_S)
         if self._writer is not None:
-            self._writer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._writer
+            await self._queue.put((None, None))  # 哨兵：写者见到即自行退出
+            try:
+                await asyncio.wait_for(asyncio.shield(self._writer), timeout=_JOIN_TIMEOUT_S)
+            except TimeoutError:
+                logger.warning("写者未在宽限内退出，强制取消（最后兜底）")
+                self._writer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._writer
+            self._writer = None
         if self._conn is not None:
             await asyncio.to_thread(self._conn.close)
             self._conn = None

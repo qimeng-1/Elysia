@@ -135,3 +135,50 @@ async def test_close_flushes_pending_writes(tmp_path: Path) -> None:
     count = conn.execute("SELECT COUNT(*) FROM heartbeats").fetchone()[0]
     assert count == 50
     conn.close()
+
+
+# ── F7：关闭序（不再以 writer.cancel() 为主手段）──────────────────
+
+
+@pytest.mark.asyncio
+async def test_close_stops_writer_by_sentinel_not_cancel(tmp_path: Path) -> None:
+    """F7：关闭以**哨兵**让写者自行退出，不再以 `cancel()` 为主手段。
+
+    根因：`asyncio.to_thread` 里的 sqlite 调用**无法被取消**——硬 cancel 会让它
+    继续在线程里跑，而我们紧接着就在**同一个连接**上 `close()`，那才是竞态
+    （19.4 缺点 5）。所以这里断言"写者是**自行返回**的，而不是被取消的"。
+    """
+    store = StateStore(tmp_path / "state.db")
+    await store.start()
+    writer = store._writer
+    assert writer is not None
+
+    await store.close()
+
+    assert writer.done(), "写者应已退出"
+    assert not writer.cancelled(), "写者应当是自行返回（哨兵），而不是被 cancel"
+
+
+@pytest.mark.asyncio
+async def test_write_after_close_is_rejected(tmp_path: Path) -> None:
+    """关停后拒收新写并**说真话**（抛错），而不是静默丢弃（与 F6 同一原则）。"""
+    store = StateStore(tmp_path / "state.db")
+    await store.start()
+    await store.close()
+
+    def noop(conn: sqlite3.Connection) -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="已关闭"):
+        await store.submit(noop)
+    with pytest.raises(RuntimeError, match="已关闭"):
+        await store.submit_ret(noop)
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent(tmp_path: Path) -> None:
+    """重复 close 不该炸（关闭序可能被多处触发：正常退出 / 异常退出 / 测试收尾）。"""
+    store = StateStore(tmp_path / "state.db")
+    await store.start()
+    await store.close()
+    await store.close()

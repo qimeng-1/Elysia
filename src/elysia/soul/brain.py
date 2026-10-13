@@ -97,10 +97,13 @@ class BrainLoop:
         *,
         distress: bool = False,
         mode: str = "present",
-        has_event: bool = False,
+        memory_gap: float = 0.0,
         dt: float = 1.0,
     ) -> BrainOutput:
         """执行一次大脑循环。
+
+        `memory_gap`（0-1）：本拍记忆缺口强度，**直接驱动好奇心**（T1）——
+        "有些事想不起来了"是好奇的真实来源（见 `memory/hooks.py`）。
 
         1. 感受层：欲望系统演化一步
         2. 共振层：状态 → 6 维感受
@@ -114,7 +117,7 @@ class BrainLoop:
         feelings = self._feelings.compute(
             desire_state,
             distress=distress,
-            has_event=has_event,
+            memory_gap=memory_gap,
             dt=dt,
         )
 

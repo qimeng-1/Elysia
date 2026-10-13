@@ -37,7 +37,8 @@ def _emoji_for(emotion_vector: dict[str, Any]) -> str:
     rest = float(emotion_vector.get("rest", 0.0))
     if miss > 0.4:
         return "，心口有点满呢"
-    if rest > 0.5:
+    # 同 expression._tts_params：rest 收敛到恰好 0.5、永不越过，故阈值必须 < 0.5
+    if rest > 0.45:
         return "，想再歇一会儿"
     if chat > 0.3:
         return "，陪你聊～"

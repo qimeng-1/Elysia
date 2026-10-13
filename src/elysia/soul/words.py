@@ -15,14 +15,20 @@ from collections.abc import Callable
 # 词 → 判定为"已授权"所需的触发状态（消费方从运行环境传入）
 # 每个词返回 True 表示"此刻可说"
 # 说明：trigger_* 为运行环境提供的实时指标，由调用方（heartbeat/main）填充
-_TRIGGER_PREDICATES: dict[str, Callable[[dict[str, object]], bool]] = {
-    "累": lambda env: _num(env, "vrram_mb", 0) > 8510 or _num(env, "q_len", 0) > 10,
+#
+# ⚠️ **阈值必须与来源的真实量纲/量程一致**，否则该词永久不可说（T1 同类缺陷）：
+#   - `memory_gap` 是缺口强度 0-1（不是 0-100 的百分数）
+#   - `q_len` 是表达队列在飞任务数，容量 2、最多 3（不是几十的大队列）
+_PROTECTED_WORD_PREDICATES: dict[str, Callable[[dict[str, object]], bool]] = {
+    "累": lambda env: _num(env, "vrram_mb", 0) > 8510 or _num(env, "q_len", 0) >= 2,
     "困": lambda env: _bool(env, "is_night") and _num(env, "tr", 100) < 45,
     "痛": lambda env: _num(env, "error_burst", 0) > 1,
     "难受": lambda env: _num(env, "cpu_pct", 0) > 85,
     "想你": lambda env: _num(env, "miss", 0.0) > 0.4 or _num(env, "cs", 100) < 40,
-    "好像忘了什么": lambda env: _num(env, "memory_gap", 0) > 10,  # P3 生效，默认 False
+    "好像忘了什么": lambda env: _num(env, "memory_gap", 0.0) > 0.4,  # 缺口强度 0-1
 }
+# P2 起的旧名（对外保持兼容，测试与校验器都按这个名字引用）
+_TRIGGER_PREDICATES = _PROTECTED_WORD_PREDICATES
 
 # 全部受保护词（这些词不进提示模板，只在许可后可用）
 PROTECTED_WORDS = frozenset(_TRIGGER_PREDICATES.keys())

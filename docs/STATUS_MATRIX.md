@@ -21,7 +21,7 @@
 | 能力 | 状态 | 主要文件 | 测试 | 阻塞心跳？ | 当前限制 |
 |---|---|---|---|---|---|
 | 心跳主循环 1Hz（同步身体 → 大脑 → 感受路径 → 落盘 → 离线生活 → 表达 → 记忆维护） | 真机运行 | `soul/heartbeat.py::run` | 有单测 `test_heartbeat.py`、`test_dual_heartbeat.py`、`test_retention.py` | **自身即心跳**；单拍最长 ≈ 下面「表达服务」那行 | 表达段在拍内 `await`（F1）——本轮 1.3 改的正是这里 |
-| 大脑循环 / 欲望系统 / 6 维感受 | 真机运行 | `soul/brain.py`、`soul/desire.py`、`soul/dimensions.py` | 有单测 `test_brain.py`、`test_desire.py`；集成 `test_p1_gate.py` | 0s（纯 CPU 同步） | `has_event=False` 是字面量 ⇒ 好奇心维恒 0（F9，本轮不做） |
+| 大脑循环 / 欲望系统 / 6 维感受 | 真机运行 | `soul/brain.py`、`soul/desire.py`、`soul/dimensions.py` | 有单测 `test_brain.py`、`test_desire.py`；集成 `test_p1_gate.py`；**新增 T1 门禁 `test_t1_cancel.py`** | 0s（纯 CPU 同步） | **好奇心已接线**（由记忆缺口强度 `memory_gap` 直接驱动，阶段 5 第一批）：原 `has_event=False` 字面量 + 上限 0.1 的布尔占位公式已消除 |
 | 表达服务（触发判断 → 构造指令 → 记忆/身份注入 → LLM → 校验 → TTS → 落库） | 真机运行 | `soul/expression_service.py` | 有单测 `test_expression_service_memory.py`；集成 `test_p2_gate.py` | **最长 ~185s**（LLM 主声 3 轮工具回合 90s + 次声 30s + TTS 60s + VRAM 采样 5s） | 单拍内串行等待外部服务（F2）；本轮 1.1~1.3 拆出 worker |
 | 表达触发与词汇许可（`build_expression` / 词表） | 真机运行 | `soul/expression.py`、`soul/words.py` | 有单测 `test_expression_pipeline.py`；集成 `test_p2_gate.py` | 0s（纯函数） | — |
 | 离世内部生活（ALONE / BODY_AWAY 的自我叙事念头） | 真机运行 | `soul/away_life.py` | 有单测 `test_away_life.py` | 0s（念头落库走本地写队列） | 念头写入 `await submit` 仍在拍内（本地，毫秒级） |
@@ -144,3 +144,27 @@
 > **未接线模块不并入本表**：`memory/sleep.py`（做梦）、`decay.retrieve_latency_ms`、`levels.detail_level`，
 > 以及 4 个无产生者意图（主动问候 / 拒绝 / 思念 / 好奇提问）属**阶段 5「回路闭合」**，
 > 需逐项定夺**接线而非删除**（见 `P3_MEMORY.md` §六）。
+
+## 12. 本轮新发现的缺陷登记
+
+> 与 §11 的区别：§11 是"文档写了、代码没有"；本节是**代码里的活 bug**，
+> 由阶段 5 建立 T1 取消测试（`tests/acceptance/test_t1_cancel.py`）时**由测试暴露**。
+> 同样先登记、后定夺，不擅自改行为语义。
+
+| # | 缺陷 | 位置 | 症状 | 影响 | 状态 |
+|---|---|---|---|---|---|
+| 1 | **`BrainOutput` 持有活引用（别名缺陷）** | `desire.py:155`（`step()` 返回 `self._state`）；`dimensions.py:85`（`compute()` 返回 `self._current`） | `BrainOutput.desire` / `.feelings` 与系统内部对象**是同一个对象**，心跳每拍原地改写 | `ExpressionJob` 把 `BrainOutput` 交给 worker **异步执行**（可能数拍之后）⇒ 她说出口的话消费的是**执行那一刻**的状态，而非"决定开口那一刻"的状态；与 1.3 改用 `created_ts` 锚定决策时刻的设计意图自相矛盾 | **待定夺**（修复涉及共享对象语义） |
+| 2 | **受保护词授权环境是字面量**（T2 防线半死） | `heartbeat.py::_expression_env` 原写 `cpu_pct: 0.0` / `q_len: 0` / `memory_gap: 0` | 谓词永远拿到 0 ⇒「难受」「累」「好像忘了什么」**永远无法授权** | T2 的词汇硬约束对这三个词形同虚设（她永远说不出"我难受""我好像忘了什么"） | ✅ **已修**（阶段 5 第一批：接活值 `cpu_pct` / `q_len` / `memory_gap`，并由 `test_t1_cancel.py` 加锁） |
+| 3 | **`memory_gap` 谓词量纲错误** | `words.py` 原写 `_num(env,"memory_gap",0) > 10` | 缺口强度是 **0-1**，阈值却是 10 ⇒ 即便接了活值也不可说 | 「好像忘了什么」永久禁用 | ✅ **已修**（阈值改 `> 0.4`，与好奇心的消费阈值同源） |
+| 4 | **`q_len` 谓词量程错误** | `words.py` 原写 `_num(env,"q_len",0) > 10` | 表达队列容量 2、最大深度 3，阈值 10 永不成立 | 「累」只剩 VRAM 一条路，而 VRAM 那条…见 #5 | ✅ **已修**（阈值改 `>= 2`，语义＝"队列有积压"） |
+| 5 | **VRAM 阈值与部署硬件不匹配** | `words.py` 的「累」用 `vrram_mb > 8510`；`core/config.py` 又有 `llm_vram_threshold_mb = 9510` / `tts_vram_threshold_mb = 10240` | **本机显卡总量 6144 MiB**，三个阈值**全部高于总量** ⇒ 一律永不触发 | 本机（RTX 3060 Laptop 6 GB）上「累」不可说、LLM/TTS 熔断形同虚设；两处 VRAM 数字还不一致（8510 vs 9510） | **待定夺**（属"按部署硬件配置"问题，需决定是改数字还是把它们收进 `core/config.py` 单一来源） |
+| 6 | **`error_burst` 无真实来源** | `heartbeat.py::_expression_env` 仍写 `error_burst: 0` | 谓词 `> 1` 永不成立 | 「痛」永久禁用 | **待补**（需要一个真实的"错误突发"计数器：谁记、记什么、多久清零） |
+
+**发现经过（照实记）**：#1 不是读代码发现的，而是写 T1 端到端用例时连续调用两次
+`loop.step()` 比较好奇心，两次读到**同一个值**——**"取消测试"的跨拍比较把它逼了出来**。
+#2–#4 则是顺着 #1 的"同一族"往下查（凡"声明了却永不触发"的分支）时找到的：
+`_expression_env` 与 `has_event=False` 是**同一类缺陷**。
+
+**影响量级（#1）**：worker 单飞 + 队列容量 2，通常只延迟一次 LLM 调用的时长（数秒）；
+欲望有恢复项、漂移慢，故实际偏差有限；但它是**非确定性的**（取决于队列与 LLM 时序），
+且让 `expression_log` 的取证行"时间戳=决策时刻、状态=执行时刻"口径不一致。

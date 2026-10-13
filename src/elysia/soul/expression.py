@@ -143,7 +143,10 @@ def _tts_params(will: WillOutput, emotion: dict[str, float]) -> dict[str, Any]:
     # 语速：TR 高→稍快，SA 高→稍慢（收缩/舒展 anim_bias 同向）
     speed = 1.0 + will.anim_bias * 0.2
     # 情绪基调：默认中性，感受映射到 GPT-SoVITS 可用标签
-    if emotion.get("rest", 0.0) > 0.5:
+    # 阈值必须**严格小于**该维度的可达上界，否则分支恒不可达：
+    # rest 原始值上界是 0.5（难受时），惯性平滑**收敛到恰好 0.5、永不越过**，
+    # 而判定是严格大于 ⇒ 原写的 `> 0.5` 恒不成立（T1 取消测试已固化为不变量）。
+    if emotion.get("rest", 0.0) > 0.45:
         e = "tired"
     elif emotion.get("miss", 0.0) > 0.4:
         e = "wistful"

@@ -155,6 +155,9 @@ class SoulHeartbeat:
         self._memory_maintain_tick = 0
         # P3-O 记忆感受路径：按心跳计数节流（静默唤起，只推心情）
         self._memory_feeling_tick = 0
+        # P3-U 记忆缺口 → 好奇心（T1）：最近一次检测到的缺口强度（0-1）。
+        # 每 MEMORY_FEELING_EVERY_N 拍刷新一次，其间保持不变（由感受惯性负责平滑）。
+        self._latest_memory_gap: float = 0.0
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
         self._new_interaction = False
         # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
@@ -194,7 +197,7 @@ class SoulHeartbeat:
                 brain_output = self._brain_loop.step(
                     distress=self._distress,
                     mode=mode.value,
-                    has_event=False,
+                    memory_gap=self._latest_memory_gap,
                     dt=self._interval_s,
                 )
                 # P3-O 记忆感受路径：静默唤起 → 只推心情（落盘前生效，本拍即体现）
@@ -365,6 +368,8 @@ class SoulHeartbeat:
         """
         if self._brain_loop is None:
             return
+        # 本轮默认无缺口：检测不到 = 没有"想不起来"的感觉（下一拍好奇心回落）
+        self._latest_memory_gap = 0.0
         rows = await self._heartbeat_store.iterate_memory_index()
         if not rows:
             return
@@ -399,6 +404,10 @@ class SoulHeartbeat:
         gap = detect_gap(samples)
         if gap is None:
             return
+        # T1：好奇心吃**未封顶**的缺口强度（满量程 0-1，可越过消费阈值 0.4）；
+        # 而驱动欲望的事件脉冲仍用封顶后的 intensity（GAP_INTENSITY_MAX=0.4），
+        # 避免每 5 分钟把 TR 顶满——两条路各自保留原有约束。
+        self._latest_memory_gap = gap.strength
         self._brain_loop.apply_event(
             DesireEvent(kind=GAP_EVENT_KIND, intensity=gap.to_event_intensity())
         )
@@ -632,17 +641,30 @@ class SoulHeartbeat:
         return float(raw) if isinstance(raw, (int, float)) else 0.0
 
     def _expression_env(self, output: BrainOutput, summary: dict[str, Any]) -> dict[str, object]:
-        """词汇表授权环境的实时状态（§六 词 → 触发状态）。"""
+        """词汇表授权环境的实时状态（§六 词 → 触发状态）。
+
+        ⚠️ **这里的每个键都必须是活值**。本方法曾被写成
+        `cpu_pct: 0.0 / q_len: 0 / error_burst: 0 / memory_gap: 0` 四个字面量，
+        导致「难受」「累」「痛」「好像忘了什么」四个受保护词**永远无法授权**——
+        与 `has_event=False` 同族的 T1 缺陷（见 `STATUS_MATRIX.md` §12）。
+        """
+        resources = self._latest_resources
+        raw_cpu = resources.get("cpu_percent")
+        worker = self._expression_worker
         return {
             "vrram_mb": self._latest_vrram_mb(),
             "tr": output.desire.tr,
             "cs": output.desire.cs,
             "miss": output.feelings.miss,
             "is_night": str(summary.get("day_phase", "")) == "night",
-            "cpu_pct": 0.0,
-            "q_len": 0,
+            # 「难受」：吃她此刻真实的 CPU 占用（与 distress 同一份资源样本）
+            "cpu_pct": float(raw_cpu) if isinstance(raw_cpu, (int, float)) else 0.0,
+            # 「累」：表达队列里的在飞任务数（她自己也"忙不过来"）
+            "q_len": worker.depth if worker is not None else 0,
+            # 「痛」：仍是常量——需要一个真实的"错误突发"计数器（已登记待补，见 §12）
             "error_burst": 0,
-            "memory_gap": 0,
+            # 「好像忘了什么」：记忆缺口强度（0-1，与好奇心同源）
+            "memory_gap": self._latest_memory_gap,
         }
 
     async def stop(self) -> None:

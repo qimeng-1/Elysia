@@ -546,3 +546,42 @@
 - 深入完善仍是当前已完成能力的增强，不引入新阶段架构
 - 每项改动过 pre-commit 门禁（ruff+mypy strict+pytest）
 - 关联灵感池待排期项暂不实现，除非与"完善现有内容"直接相关
+
+---
+
+## 清理审计（2026-10-14 起）—— 让仓库回到"零失效引用 + 可复核"
+
+> 触发：用户「将当前工程的各种无效文件、失效文件、影响工作正常运行或者阻碍发展的文件
+> 进行严格的审计删改，重新梳理规划」。按阶段推进，**每阶段独立提交并过门禁**；
+> **历史文档不改写**（`CHANGELOG` / worklog 是历史记录，只在 `STATUS_MATRIX` §10 登记）。
+
+### 阶段 1 运行阻断修复（`da7e94b`）
+- **fix（scripts/*.ps1）**：三个脚本硬编码 `A:\WorkPlace\Elysia\elysia`（本机不存在 ⇒ start/stop/status/记忆浏览器/备份**全部失效**）→ 改为 `Split-Path $PSScriptRoot -Parent` 自定位，换盘换机零改动；保持 soul/backup 的 UTF-8 BOM、memory_view 纯 ASCII
+- **fix（backup.ps1）**：`/XD` 用相对路径（`data\logs` 等）robocopy **匹配不到**、日志真的漏进备份 → 改裸目录名；补 `.mypy_cache` / `.pytest_cache` / `.ruff_cache` 排除
+- 实测：PS 5.1 下 `status` / `start` / `start -Body` / `stop` / `memory_view` / `backup` 全通过，无孤儿进程
+
+### 阶段 2 失效引用清理（`da7e94b`）
+- **fix（P3_MEMORY_WORKLOG §19.4）**：两条 `file:///a:/WorkPlace/...` 绝对链接 → 相对路径
+- **feat（IDEAS.md）**：仓库根**重建灵感池**——原 `灵感管理/` 目录已移出工作区，铁律一因此失去落地处
+- **docs（STATUS_MATRIX §10）**：新增「失效引用与仓库外依赖登记」（`verify_integrity.py` 10 处引用标为**待重建**，本轮不动）
+
+### 阶段 3 内容校正（`6acdb6d`）
+- **docs（OPERATION_GUIDE）**：14 处硬编码路径 → 相对路径 + 一次 `cd`；记忆浏览器 **13 列 → 16 列**（补 标签/复习/簇）；`启动ElysiaAPI.bat` → `一键启动API.bat`；修复 §1 代码围栏写成 ` ```cd ` 导致命令不显示的渲染缺陷
+- **docs（PROJECT_ENGINEERING_STANDARD）**：`integrity_check` / 崩溃自愈 标注**未实现**；难受阈值 VRAM → **CPU**；删"7TB 空闲"；SQLite-vec 未采用；`data/` 入库口径与 README 对齐
+- **docs（IMPLEMENTATION_ROADMAP）**：§13 技术表 8 行校正（SQLite-vec / WebSocket / Whisper / Silero-VAD **均未采用**）；Status 改为「P4 身份核心已落地大半」
+- **docs（ADR-002）**：追加「更正」节（robocopy 备份**非原子**、VACUUM **从未落地**、"每日备份"不实），原文保留
+- **docs（STATUS_MATRIX §11）**：新增「待补清单」（7 项"已写成标准但代码里没有"）
+
+### 阶段 4 空产物 + CI（`a86c5e5`）
+- **chore**：`git rm` 两个**零信息**空壳检查点库（heartbeats/thought_log/kv 全 0 行），删前已确认无引用；git 历史保留可恢复
+- **ci**：新增 `.github/workflows/ci.yml`（windows-latest + `QT_QPA_PLATFORM=offscreen`，`uv sync --frozen` → ruff → format → mypy → pytest）
+- **docs（README）**：补说明 git 钩子需能调用到 `pre-commit`（根因：钩子内是 Windows 反斜杠路径，由 Git Bash 执行 POSIX sh，`[ -x ]` 必然失败）
+
+### 阶段 5 第一批：好奇回路闭合 + T1 取消测试
+- **fix（T1 违例·好奇维度恒死）**：`curiosity` 旧实现两头都坏——产生端 `heartbeat.py` 传死值 `has_event=False`；公式端 `dimensions.py` 是 `0.1 if has_event else 0.0` 的**布尔占位**（上限 0.1）。而消费端 `expression.py` 要求 `> 0.4` ⇒「好奇」语音情绪**数学上不可达**
+- **feat（记忆缺口 → 好奇）**：`has_event: bool` **整体替换**为 `memory_gap: float`（满量程 0-1）。`heartbeat._feel_memory_gaps` 保存**未封顶**的 `gap.strength` 供好奇心使用；驱动欲望的事件脉冲仍用封顶 intensity（`GAP_INTENSITY_MAX=0.4`），避免每 5 分钟把 TR 顶满——两条路各自保留原有约束
+- **fix（T1 违例·疲惫分支恒死）**：`rest` 原始上界 0.5、惯性平滑**收敛到恰好 0.5 且永不越过**，而阈值判定是严格大于（`> 0.5`）⇒「疲惫」语音情绪**同样不可达**；`expression._tts_params` 与 `micro._emoji_for` 两处阈值改为 `> 0.45`
+- **fix（T1 违例·受保护词防线半死）**：`_expression_env` 原把 `cpu_pct` / `q_len` / `memory_gap` 写成字面量 `0` ⇒「难受」「累」「好像忘了什么」**永远无法授权**（T2 词汇硬约束对这三个词形同虚设）。改为接活值：CPU 取 `_latest_resources`、`q_len` 取 worker 队列深度、`memory_gap` 取缺口强度；并修正两处**量纲/量程错误**的谓词——`memory_gap > 10`（实为 0-1 强度）→ `> 0.4`、`q_len > 10`（队列容量仅 2）→ `>= 2`
+- **feat（tests/acceptance/test_t1_cancel.py，11 项）**：把铁律一从**原则**变成**闸门**——① 可达性：6 种语音情绪都必须够得到（旧代码 `tired`/`curious` 永远够不到）；② 取消性：停用任一感受维度后表达必须变化，否则该维度是装饰；③ 端到端：`BrainLoop.step(memory_gap=…)` → 表达情绪；④ 受保护词可达性 + 授权环境必须是**活值**（防"看起来接好了、实际恒 0"）
+- **新发现缺陷（登记于 STATUS_MATRIX §12，共 6 项）**：#1 最值得记——T1 端到端用例连续两次 `step()` 读到**同一个值**，暴露 `BrainOutput` 持有**活引用**（`desire.py:155` 返回 `self._state`、`dimensions.py:85` 返回 `self._current`）⇒ `ExpressionJob` 交给 worker 异步执行时读到的是**执行那一刻**的状态，与 1.3 用 `created_ts` 锚定决策时刻的意图矛盾。**该缺陷不是读代码发现的，是"取消测试"的跨拍比较逼出来的**。#2~#4 已随本批修好；#5（三处 VRAM 阈值 8510/9510/10240 **全部高于本机 6 GB 显存总量**，且两处数字不一致）、#6（`error_burst` 无真实来源，「痛」永久禁用）待定夺 / 待补
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **408 passed**（397 + 11）

@@ -3,7 +3,7 @@
 将 TR/CS/SA 欲望状态映射为 6 个感受维度，带惯性平滑。
 
 关系向：聊天（CS 高时亲近）    思念（CS 低时渴望）
-世界向：探索（TR 高时行动）    好奇（新奇信息时想了解）
+世界向：探索（TR 高时行动）    好奇（想不起某事时想弄清）
 自身向：休息（资源紧张时停）  自检（SA 高时确认安全）
 
 感受惯性 α=0.3（混合情绪持续久的物理基础）。
@@ -66,12 +66,16 @@ class FeelingMapper:
         desire: DesireState,
         *,
         distress: bool = False,
-        has_event: bool = False,
+        memory_gap: float = 0.0,
         dt: float = 1.0,
     ) -> FeelingState:
-        """给定欲望状态，计算 6 维感受，带惯性平滑。"""
+        """给定欲望状态，计算 6 维感受，带惯性平滑。
+
+        `memory_gap`（0-1）：P3-U 的记忆缺口强度——"有些事想不起来了"。
+        好奇心由它**直接驱动**（T1：好奇必须映射到真实物理量，不能是布尔占位）。
+        """
         # 原始映射
-        raw = self._raw_feelings(desire, distress=distress, has_event=has_event)
+        raw = self._raw_feelings(desire, distress=distress, memory_gap=memory_gap)
 
         # 惯性平滑
         alpha = self._alpha**dt  # 每步衰减
@@ -89,7 +93,7 @@ class FeelingMapper:
         self._current = FeelingState()
 
     @staticmethod
-    def _raw_feelings(desire: DesireState, *, distress: bool, has_event: bool) -> FeelingState:
+    def _raw_feelings(desire: DesireState, *, distress: bool, memory_gap: float) -> FeelingState:
         """原始映射（无惯性）。"""
         cs_norm = desire.cs / 100.0
         tr_norm = desire.tr / 100.0
@@ -101,7 +105,10 @@ class FeelingMapper:
 
         # 世界向
         explore = tr_norm  # TR 高 → 想探索
-        curiosity = 0.1 if has_event else 0.0  # 有事件 → 好奇
+        # 好奇 = 记忆缺口强度（P3-U）：想不起某事 → 想弄清楚。
+        # 连续量、满量程 0-1。旧实现是 `0.1 if has_event else 0.0` 的布尔占位：
+        # 上限 0.1 低于一切消费阈值 ⇒ 该维度恒死（T1 取消测试已固化为不变量）。
+        curiosity = max(0.0, min(1.0, memory_gap))
 
         # 自身向
         rest = 0.5 if distress else 0.05  # 难受 → 想休息

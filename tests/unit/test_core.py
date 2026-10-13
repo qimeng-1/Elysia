@@ -1,7 +1,8 @@
-"""core 模块（配置/日志）单元测试。"""
+"""core 模块（配置/日志/监督器）单元测试。"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -9,6 +10,7 @@ import structlog
 
 from elysia.core.config import Settings, get_settings
 from elysia.core.log import get_logger, setup_logging
+from elysia.core.supervisor import supervise
 
 
 def test_settings_defaults() -> None:
@@ -56,3 +58,41 @@ def test_get_logger_default_name() -> None:
     log = get_logger()
     # structlog 首次使用时惰性绑定：bind() 触发构建，返回真 BoundLogger
     assert isinstance(log.bind(), structlog.stdlib.BoundLogger)
+
+
+# ── 常驻协程监督器（F6 的对偶件）────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_supervise_restarts_after_exception() -> None:
+    """监督器：抛异常不致命——记日志后重启，直到被监督的协程**正常返回**。
+
+    这正是 F6 修复的另一半：状态库改为一失败就抛（说真话），
+    而抛出的异常不得让她的生命循环僵死。
+    """
+    calls = 0
+
+    async def factory() -> None:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("boom")
+
+    await asyncio.wait_for(supervise(factory, "test", restart_delay_s=0.01), timeout=3.0)
+    assert calls == 3, "应重启到第 3 次正常返回为止（正常返回不再重启）"
+
+
+@pytest.mark.asyncio
+async def test_supervise_propagates_cancellation() -> None:
+    """取消必须**原样抛出**（关闭序依赖它收干净），不得被当成"异常→重启"。"""
+    started = asyncio.Event()
+
+    async def factory() -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(supervise(factory, "test-cancel", restart_delay_s=0.01))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

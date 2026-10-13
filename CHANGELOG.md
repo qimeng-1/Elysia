@@ -603,3 +603,11 @@
   - **用户裁决：跳过**
 - **新增登记 2 项**：§12 #7 `llm_vram_threshold_mb` 是死配置（文档化了却从未读取）；#8「困」的时段为 21:00–05:00，宽于设计的"凌晨 2-5 点"（可达、非死分支）
 - **本轮零代码改动**（纯核查 + 登记）；门禁维持 **409 passed**
+
+### 阶段 5 第四批：修 F6（写失败不得伪装成功）+ 常驻协程监督器
+- **fix（`core/state_store.py`·F6，19.4 缺点 5）**：写失败时旧写法 `fut.set_result(None)` **把失败伪装成成功**——`await submit(bad_op)` 返回正常，调用者**无从分辨**（记忆可能静默丢失）。改为 `fut.set_exception(exc)`；`submit` 也改用 future 并 `fut.result()`，**失败一律向上抛**（`submit_ret` 原本就会抛，现在两条路一致）
+- **feat（`core/supervisor.py`·F6 的对偶件）**：诚实只是"一半"，另一半是**她不能因此僵死**——若只改成抛异常而不加保护，就是把"静默丢数据"换成"静默僵死"。新增 `supervise(factory, name)`：正常返回则结束、`CancelledError` 原样抛出（关闭序要靠它收干净）、其它异常记日志后重启。它同时覆盖 19.4 缺点 1「进程无自愈」中**程序自身能解决的那一半**
+- **fix（`soul/main.py`、`body/main.py`）**：心跳任务改由监督器承载；`soul` 关闭序的 `persist_expressions` 改**尽力而为**（写失败已不伪装成功，但不该阻断关闭 ⇒ 否则连接不关、档案不封存）
+- **test（+3，另改写 1）**：`test_writer_survives_failed_op` **改写**——它原本断言 `await submit(bad_op)` 不抛（**等于把 F6 锁死**），现改为同时锁两件事：① 失败被看见（`pytest.raises(RuntimeError)`）② 写者存活（后续 `save_json` 照常落盘）；新增 `test_submit_ret_propagates_failure`、`test_supervise_restarts_after_exception`、`test_supervise_propagates_cancellation`
+- **真机冒烟**：`soul.ps1 start -Body` → status 双绿 → `stop` 无残留；stderr 日志为空、**无监督器重启噪声**
+- 门禁：ruff lint ✅ / ruff format ✅（105 files）/ mypy strict ✅（**55** source files）/ pytest ✅ **412 passed**（409 + 3）

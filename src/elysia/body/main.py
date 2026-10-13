@@ -19,6 +19,7 @@ from elysia.core.clock import SystemClock
 from elysia.core.config import Settings, get_settings
 from elysia.core.log import get_logger, setup_logging
 from elysia.core.state_store import HeartbeatStore, StateStore
+from elysia.core.supervisor import supervise
 
 
 async def _run(settings: Settings) -> int:
@@ -47,7 +48,10 @@ async def _run(settings: Settings) -> int:
         except NotImplementedError:  # Windows：add_signal_handler 仅 Unix
             break
 
-    beat_task = asyncio.create_task(heartbeat.run(), name="body-heartbeat")
+    # F6 的对偶件：写库失败会向上抛（不再伪装成功），而上抛不得让身体僵死 ⇒ 上监督器
+    beat_task = asyncio.create_task(
+        supervise(heartbeat.run, "body-heartbeat"), name="body-heartbeat"
+    )
     try:
         await stop.wait()
     except KeyboardInterrupt:

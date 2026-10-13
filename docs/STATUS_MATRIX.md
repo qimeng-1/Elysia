@@ -42,7 +42,8 @@
 | 记忆缺口信号（有些事想不起来了） | 真机运行 | `memory/hooks.py` | 有单测 `test_decay.py`；集成 `test_p3_gate.py` | 0s | — |
 | 沉淀候选（发现重复模式，递给她认领） | 真机运行 | `memory/sediment.py` | 有单测 `test_sediment.py` | 0s（每 300 拍） | — |
 | 做梦（自由联想流，无 LLM） | **已实现·未接线** | `memory/sleep.py` | 有单测 `test_sleep.py`；集成 `test_p3_gate.py` | —（不在心跳路径上） | 纯函数已就绪，运行时尚未调用 |
-| 双库底座（WAL + 单写者队列 + 幂等迁移回填） | 真机运行 | `core/state_store.py` | 有单测 `test_state_store.py` | 0s（`to_thread`） | F6 写失败 `set_result(None)` 伪装成功、F7 `writer.cancel()` 主手段 —— 属阶段 4，本轮不动 |
+| 双库底座（WAL + 单写者队列 + 幂等迁移回填） | 真机运行 | `core/state_store.py` | 有单测 `test_state_store.py` | 0s（`to_thread`） | **F6 已修**（写失败不再 `set_result(None)` 伪装成功，而是向上抛；`submit_ret` / `submit` 均已加锁）。F7 `writer.cancel()` 主手段**仍待处置** |
+| 常驻协程监督器（F6 的对偶件） | 真机运行 | `core/supervisor.py` | 有单测 `test_core.py`（重启 / 取消传播） | 0s | 协程级自愈：单拍或整循环异常不再等于"她僵死"；**进程级看门狗仍未做**（见 §11 #5） |
 
 ## 3. 内核（core）
 
@@ -137,7 +138,7 @@
 | 2 | 定期 `VACUUM` | `ADR/002` §后果 | **从未落地** | `heartbeats` 按 1 Hz 线性增长且无保留策略（约 8.6 万行/天） | 阶段 4（需先拍板"数据永不删除"口径） |
 | 3 | 备份**定时器**（文档原写"每日自动"） | `STANDARD` §3.2 ／ `ADR/002` ／ README | `backup.ps1` 是**纯手动**脚本 | 实际不会自动备份 | 阶段 4 |
 | 4 | 备份**原子性** | `ADR/002` §后果（断言 robocopy"天然覆盖"WAL） | 非原子；已实测日志会漏进备份 | 备份可能不一致 | 阶段 4（先停她再备，或改用 `.backup` / `VACUUM INTO`） |
-| 5 | 进程监督 / 崩溃自动重启 | `STANDARD` §3.3 | 无看门狗、无计划任务 | 崩了不会自愈（19.4 缺点 1） | 阶段 4 |
+| 5 | 进程监督 / 崩溃自动重启 | `STANDARD` §3.3 | **协程级已做**（`core/supervisor.py`，阶段 5 第四批）；进程级看门狗 / 计划任务仍无 | 崩了不会自愈（19.4 缺点 1）——**该缺点现已解决一半**：心跳协程意外退出会被拉起，但**整个进程**被杀仍需人工 | 进程级部分仍待做 |
 | 6 | CI（`.github/workflows`） | `STANDARD` §2.4「CI/本地脚本」 | `.github` 不存在 | 门禁仅在本地 | 阶段 4 |
 | 7 | `verify_integrity.py` 重建 | worklog **10 处**引用 | 文件不存在、从未入库 | 那些「完整性 PASS」不可复核 | 待定（见 §10） |
 

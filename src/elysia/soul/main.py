@@ -26,6 +26,7 @@ from elysia.core.config import Settings, get_settings
 from elysia.core.log import get_logger, setup_logging
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
+from elysia.core.supervisor import supervise
 from elysia.core.timesense import TimeSense, from_payload
 from elysia.llm import build_llm_chain
 from elysia.memory.retrieve import retrieve_from_store
@@ -149,7 +150,10 @@ async def _run(settings: Settings) -> int:
         except NotImplementedError:  # Windows：add_signal_handler 仅 Unix
             break
 
-    beat_task = asyncio.create_task(heartbeat.run(), name="soul-heartbeat")
+    # F6 的对偶件：写库失败不再伪装成功（会向上抛），而抛出不得让她僵死 ⇒ 上监督器。
+    beat_task = asyncio.create_task(
+        supervise(heartbeat.run, "soul-heartbeat"), name="soul-heartbeat"
+    )
     try:
         await stop.wait()
     except KeyboardInterrupt:
@@ -162,7 +166,12 @@ async def _run(settings: Settings) -> int:
         # 交回心跳写，且**先停它、再停库**。
         pending: list[ExpressionResult] = await expression_worker.aclose()
         await heartbeat.stop()
-        await heartbeat.persist_expressions(pending)
+        # 落库是**尽力而为**：写失败已不会伪装成功（F6），但它不该阻断关闭序
+        # ——否则连接不关、档案不封存。
+        try:
+            await heartbeat.persist_expressions(pending)
+        except Exception:
+            log.exception("关闭时排空表达结果失败（继续关闭，避免连接与档案悬空）")
         await stop_with_cancel(beat_task)
         await state_store.close()
         await heartbeat_store.close()

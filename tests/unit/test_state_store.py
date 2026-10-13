@@ -84,22 +84,43 @@ async def test_gaps_detection(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_writer_survives_failed_op(tmp_path: Path) -> None:
-    """写者纪律：单个写操作异常不杀死写者，后续写入正常（实测教训固化）。"""
+    """写者纪律：单个写操作异常**向上抛出**（不伪装成功），且写者不死。
+
+    F6（19.4 缺点 5）：旧实现用 `fut.set_result(None)` 把失败伪装成成功——
+    `await store.submit(bad_op)` 返回正常，调用者**无从分辨**。本用例同时锁住两件事：
+    ① 失败被看见（抛 `RuntimeError`）；② 写者存活（后续写入照常落盘）。
+    """
     store = StateStore(tmp_path / "state.db")
     await store.start()
 
     def bad_op(conn: sqlite3.Connection) -> None:
         raise RuntimeError("boom")
 
-    await store.submit(bad_op)
-    await store.save_json("k", "v")  # 排在 bad 之后
-    await store.close()  # join 排空：bad 被捕获记日志，save 正常落盘
+    with pytest.raises(RuntimeError, match="boom"):
+        await store.submit(bad_op)
+
+    await store.save_json("k", "v")  # 写者仍存活：排在 bad 之后照常落盘
+    await store.close()
 
     # 独立连接验证落盘内容（save_json 存 JSON 序列化值，含引号）
     conn = sqlite3.connect(tmp_path / "state.db")
     rows = conn.execute("SELECT value FROM kv WHERE key = 'k'").fetchall()
     assert rows == [('"v"',)]
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_ret_propagates_failure(tmp_path: Path) -> None:
+    """`submit_ret` 同样不得伪装成功（F6）：失败要抛，而不是返回 `None` 冒充结果。"""
+    store = StateStore(tmp_path / "state.db")
+    await store.start()
+
+    def bad_op(conn: sqlite3.Connection) -> str:
+        raise RuntimeError("boom-ret")
+
+    with pytest.raises(RuntimeError, match="boom-ret"):
+        await store.submit_ret(bad_op)
+    await store.close()
 
 
 @pytest.mark.asyncio

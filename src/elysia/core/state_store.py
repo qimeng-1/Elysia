@@ -166,20 +166,28 @@ class _AsyncSQLite:
             op, fut = await self._queue.get()
             try:
                 result = await asyncio.to_thread(op, self._conn)
-            except Exception:
+            except Exception as exc:
+                # 写者存活（后续写入不受影响），但**失败必须被调用者看见**：
+                # 旧写法 `fut.set_result(None)` 把失败伪装成成功（F6，19.4 缺点 5）。
                 logger.exception("write op failed（写者存活，后续写入不受影响）")
-                if fut is not None:
-                    fut.set_result(None)
+                if fut is not None and not fut.done():
+                    fut.set_exception(exc)
             else:
-                if fut is not None:
+                if fut is not None and not fut.done():
                     fut.set_result(result)
             finally:
                 self._queue.task_done()
 
     async def submit(self, op: _WRITE_OP) -> None:
-        """提交写操作并等待执行完成（单写者串行，写后读一致）。"""
-        await self._queue.put((op, None))
+        """提交写操作并等待完成；**失败向上抛出**（不再伪装成功，F6）。
+
+        调用方若是常驻循环，请用 `core.supervisor.supervise` 兜住——
+        库负责说真话，循环负责不死。
+        """
+        fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        await self._queue.put((op, fut))
         await self._queue.join()
+        fut.result()
 
     async def submit_ret(self, op: _WRITE_OP) -> Any:
         """提交带返回值的写操作并等待结果（单写者串行，写后读一致）。"""

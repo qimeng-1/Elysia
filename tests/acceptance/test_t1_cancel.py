@@ -37,7 +37,7 @@ from elysia.memory.retrieve import RECALL_LATENCY_CAP_MS, MemoryHit, recall_late
 from elysia.soul.brain import BrainLoop, BrainOutput, WillOutput
 from elysia.soul.desire import DesireState, DesireSystem
 from elysia.soul.dimensions import FeelingMapper, FeelingState
-from elysia.soul.expression import build_expression
+from elysia.soul.expression import ACTION_TO_INTENT, INTENTS, build_expression
 from elysia.soul.heartbeat import (
     DREAM_MIN_AWAY_S,
     ERROR_BURST_WINDOW_S,
@@ -404,6 +404,45 @@ def test_sleepy_word_needs_small_hours() -> None:
     assert "困" not in permitted_words({"hour": 1, "tr": 30.0}), "1 点也不算"
     assert "困" in permitted_words({"hour": 3, "tr": 30.0})
     assert "困" not in permitted_words({"hour": 3, "tr": 60.0}), "TR 不低时不该说困"
+
+
+# ── 8. 「每个意图都必须有产生者」（T1 可达性，P4b 收口）──────────
+
+
+def test_every_intent_has_a_producer(tmp_path: Path) -> None:
+    """`expression.INTENTS` 里**每一个**意图都必须存在能选中它的产生者。
+
+    历史教训（`STATUS_MATRIX.md` §12 同族）：`主动问候 / 思念 / 好奇提问 / 拒绝`
+    四个意图长期只有微声开头与提示模板，**没有任何东西会选中它们**——
+    ruff / mypy strict / 397 项回归全绿也照样活着。本用例把它们全部钉住。
+    """
+    soul = _make_soul(tmp_path)
+    output = _output(_feelings(curiosity=1.0, miss=0.9))
+
+    # ① 呓语映射（brain_action → 意图）
+    reachable: set[str] = set(ACTION_TO_INTENT.values())
+
+    # ② 内部冲动：刚回来 / 强好奇 / 明显思念
+    soul._new_interaction = False
+    reachable.add(str(soul._decide_intent(output, greeting=True)))
+    reachable.add(str(soul._decide_intent(_output(_feelings(curiosity=1.0)), greeting=False)))
+    reachable.add(str(soul._decide_intent(_output(_feelings(miss=0.9)), greeting=False)))
+
+    # ③ 回应：用户在说话
+    soul._new_interaction = True
+    reachable.add(str(soul._decide_intent(output, greeting=False)))
+    soul._new_interaction = False
+
+    # ④ 拒绝：P4b 边界判定（工具化 / 越界）——**此前它没有任何产生者**
+    soul._boundary_decision = soul._boundary.evaluate("你不就是个程序嘛", cs=30.0, sa=60.0)
+    assert soul._boundary_decision.is_refusal, "这句必须被判为越界，否则下面的可达性是假的"
+    reached_refusal = soul._decide_intent(output, greeting=True)
+    assert reached_refusal == "拒绝", "边界必须**压过**问候（她刚被冒犯，不会先说嗨）"
+    reachable.add(reached_refusal)
+
+    reachable.discard("None")
+    missing = INTENTS - reachable
+    assert not missing, f"这些意图没有任何产生者（永远不会被选中）：{sorted(missing)}"
 
 
 # ── 6. 记忆：detail_level 与"越旧越难想起"都必须真的有效果 ─────────

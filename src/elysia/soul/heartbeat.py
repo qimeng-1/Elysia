@@ -59,6 +59,7 @@ from elysia.memory.sleep import synthesize_dream
 from elysia.memory.supersede import find_superseded
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
+from elysia.soul.boundary import STATE_PRESSURE_WORDS, BoundaryDecision, BoundaryKeeper
 from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
@@ -71,6 +72,7 @@ from elysia.soul.expression_types import (
     make_job_id,
 )
 from elysia.soul.expression_worker import ExpressionWorker
+from elysia.soul.words import permitted_words
 
 logger = logging.getLogger("elysia.soul.heartbeat")
 
@@ -198,6 +200,9 @@ class SoulHeartbeat:
         self._new_interaction = False
         # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
         self._pending_user_message: str | None = None
+        # P4b 边界（阶段 C）：工具化检测 → 四级拒绝 → 说服 / 操纵拦截
+        self._boundary = BoundaryKeeper()
+        self._boundary_decision: BoundaryDecision | None = None
         self._latest_resources: dict[str, Any] = {}
 
     @property
@@ -297,6 +302,26 @@ class SoulHeartbeat:
             worker = self._expression_worker
             if worker is not None:
                 await self.persist_expressions(worker.drain(), now=now, frozen=frozen)
+
+            # ── P4b 边界（阶段 C）：对方的话先过"工具化 / 越界"检测 ──────────
+            # 拒绝需要一个"要求"作对象，而当前唯一的外部输入就是她刚收到的这句话。
+            # ⚠️ 这不违背 T2：我们**不**把用户的话当指令执行，而是把它当**关系信号**读——
+            # 判定的是"对方是不是在把她当工具"，产物是一个态度，不是一个任务。
+            env = self._expression_env(brain_output, summary) if brain_output is not None else {}
+            if brain_output is not None and self._new_interaction and self._pending_user_message:
+                self._boundary_decision = self._boundary.evaluate(
+                    self._pending_user_message,
+                    cs=brain_output.desire.cs,
+                    sa=brain_output.desire.sa,
+                    state_pressure=self._state_pressure(env),
+                )
+                if self._boundary_decision.is_refusal:
+                    logger.info(
+                        "P4b 边界判定 %s ｜ %s",
+                        self._boundary_decision.level_name,
+                        self._boundary_decision.reason,
+                    )
+
             # 内部冲动（第七批）：刚回来 → 问候。问候**越过节流**（值得一声），
             # 但仍保持 force=False —— 队列满时它可以被丢（＝"她这次决定不说"）。
             greeting = self._greet_pending and mode is Mode.PRESENT
@@ -311,13 +336,8 @@ class SoulHeartbeat:
             ):
                 if greeting:
                     self._greet_pending = False
-                # 决策层定意图（T3：谁决定开口仍在生命循环里）：用户在说话 → 回应；
-                # 否则按状态在 主动问候 / 好奇提问 / 思念 里挑（None = 交给呓语映射）
-                intent = (
-                    "回应"
-                    if self._new_interaction
-                    else self._pick_intent(brain_output, greeting=greeting)
-                )
+                # 决策层定意图：**边界优先** → 回应 → 内部冲动 → 呓语映射（见 _decide_intent）
+                intent = self._decide_intent(brain_output, greeting=greeting)
                 worker.submit(
                     ExpressionJob(
                         job_id=make_job_id(self._heartbeat_seq, now),
@@ -326,7 +346,7 @@ class SoulHeartbeat:
                         output=brain_output,
                         summary=summary,
                         vrram_mb=self._latest_vrram_mb(),
-                        env=self._expression_env(brain_output, summary),
+                        env=env,
                         user_message=self._pending_user_message,
                         force=self._new_interaction,
                         intent=intent,
@@ -366,6 +386,7 @@ class SoulHeartbeat:
                 # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
                 await self._supersede_conflicts(new_id, msg, now)
                 self._pending_user_message = None
+                self._boundary_decision = None  # 这句话处理完了，边界判定随之清空
 
             # ── P3 记忆生命周期维护：周期性晋升（浅层→工作→深层）──
             self._memory_maintain_tick += 1
@@ -730,6 +751,39 @@ class SoulHeartbeat:
         ):
             self._greet_pending = True
         self._last_mode = mode
+
+    @staticmethod
+    def _state_pressure(env: dict[str, object]) -> bool:
+        """她此刻状态不好吗？（**复用受保护词的授权判定**——同一个真相，不另起一套）。"""
+        return any(word in STATE_PRESSURE_WORDS for word in permitted_words(env))
+
+    def _refusal_intent(self) -> str | None:
+        """P4b：这一拍若判定了拒绝，意图就是「拒绝」——它**压过**问候 / 好奇 / 思念。
+
+        这是「拒绝」意图**第一个真正的产生者**：在此之前它只有微声开头
+        （`llm/micro.py` 的"诶呀，这可不行哦"）与身份基石（"我有权拒绝成为工具"），
+        但**没有任何东西会选中它**。
+        """
+        decision = self._boundary_decision
+        if decision is not None and decision.is_refusal:
+            return "拒绝"
+        return None
+
+    def _decide_intent(self, output: BrainOutput, *, greeting: bool) -> str | None:
+        """决策层定意图（T3：谁决定开口仍在她自己的循环里）。
+
+        优先级：**边界（拒绝）> 回应 > 内部冲动 > 呓语映射（None）**。
+        她刚被冒犯时不会先来一句"嗨，你回来啦"——所以拒绝排在最前。
+
+        这条链是 `soul/expression.py::INTENTS` 七个意图**全部**的产生者所在，
+        有单测（`test_t1_cancel.py::test_every_intent_has_a_producer`）把它钉住。
+        """
+        refusal = self._refusal_intent()
+        if refusal is not None:
+            return refusal
+        if self._new_interaction:
+            return "回应"
+        return self._pick_intent(output, greeting=greeting)
 
     def _pick_intent(self, output: BrainOutput, *, greeting: bool) -> str | None:
         """内部冲动开口时，她"在说哪一类话"。返回 `None` = 交给 `brain_action` 映射。

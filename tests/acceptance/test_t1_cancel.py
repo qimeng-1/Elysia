@@ -29,16 +29,21 @@ from pathlib import Path
 import pytest
 
 from elysia.core.clock import SimulatedClock
-from elysia.core.mode import ModeManager
+from elysia.core.mode import Mode, ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import TimeSense
-from elysia.memory.levels import LEVEL_SHALLOW
+from elysia.memory.levels import KIND_INTERACTION, LEVEL_SHALLOW
 from elysia.memory.retrieve import RECALL_LATENCY_CAP_MS, MemoryHit, recall_latency_ms
 from elysia.soul.brain import BrainLoop, BrainOutput, WillOutput
 from elysia.soul.desire import DesireState, DesireSystem
 from elysia.soul.dimensions import FeelingMapper, FeelingState
 from elysia.soul.expression import build_expression
-from elysia.soul.heartbeat import ERROR_BURST_WINDOW_S, SoulHeartbeat, make_soul_state
+from elysia.soul.heartbeat import (
+    DREAM_MIN_AWAY_S,
+    ERROR_BURST_WINDOW_S,
+    SoulHeartbeat,
+    make_soul_state,
+)
 from elysia.soul.words import PROTECTED_WORDS, permitted_words
 
 # ── 感受维度的可达上界 ──────────────────────────────────────────
@@ -395,3 +400,101 @@ def test_recall_latency_precious_memory_is_faster() -> None:
     normal = recall_latency_ms([_hit(age_days=90.0)])
     precious = recall_latency_ms([_hit(age_days=90.0, protected=True)])
     assert precious < normal, f"珍贵记忆应更快想起（{precious} vs {normal}）"
+
+
+# ── 7. 内部冲动的三种说法（此前零产生者）+ 做梦 ─────────────────
+
+
+def test_pick_intent_is_state_driven(tmp_path: Path) -> None:
+    """「主动问候 / 思念 / 好奇提问」必须真的能被决策层产出。
+
+    第七批之前，决策层只会吐「发呆呓语 / 自检报告 / 回应」——
+    这三个意图各自的微声与提示模板**永远不会被选中**。
+    """
+    soul = _make_soul(tmp_path)
+
+    # 刚回来 → 问候（优先级最高，压过好奇与思念）
+    busy = _output(_feelings(curiosity=1.0, miss=0.6))
+    assert soul._pick_intent(busy, greeting=True) == "主动问候"
+
+    # 记忆缺口驱动的强好奇 → 好奇提问
+    assert soul._pick_intent(_output(_feelings(curiosity=0.9)), greeting=False) == "好奇提问"
+
+    # 明显思念 → 思念
+    assert soul._pick_intent(_output(_feelings(miss=0.6)), greeting=False) == "思念"
+
+    # 什么都不强 → None（交回 brain_action 的呓语映射）
+    assert soul._pick_intent(_output(_feelings()), greeting=False) is None
+
+
+def test_greeting_is_edge_triggered(tmp_path: Path) -> None:
+    """问候必须**边沿触发**：只在"从不在场回到在场"那一下，不是每拍都问。"""
+    soul = _make_soul(tmp_path)
+
+    soul._update_greeting(Mode.ALONE)  # 首次观测：不问候（她刚醒，不必自己欢迎自己）
+    assert soul._greet_pending is False
+
+    soul._update_greeting(Mode.PRESENT)  # 她回来了
+    assert soul._greet_pending is True
+
+    soul._greet_pending = False
+    soul._update_greeting(Mode.PRESENT)  # 一直在场 → 不重复问候
+    assert soul._greet_pending is False
+
+    soul._update_greeting(Mode.BODY_AWAY)
+    soul._update_greeting(Mode.PRESENT)  # 又离开过 → 再问候一次
+    assert soul._greet_pending is True
+
+
+@pytest.mark.asyncio
+async def test_dream_uses_own_memories_only_when_away(tmp_path: Path) -> None:
+    """做梦：离线够久时，从**她自己的记忆碎片**联想一条 `kind="dream"` 的念头。
+
+    `synthesize_dream` 此前零运行时调用（`P3_MEMORY.md` §六 自述"已造好但没插电"）。
+    """
+    clock = SimulatedClock(start_ts=1_000_000.0, speed=60.0)
+    state_store = StateStore(tmp_path / "state.db")
+    heartbeat_store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await state_store.start()
+    await heartbeat_store.start()
+    for i in range(3):
+        await heartbeat_store.add_memory(
+            clock.now() - i * 3600.0,
+            {
+                "level": LEVEL_SHALLOW,
+                "kind": KIND_INTERACTION,
+                "content": f"第{i}件小事",
+                "emotion_vector": {"chat": 0.5},
+                "importance": 0.5,
+                "narrative": f"她记得第{i}件小事",
+            },
+        )
+    soul = SoulHeartbeat(
+        state_store=state_store,
+        heartbeat_store=heartbeat_store,
+        timesense=TimeSense(make_soul_state(1_000_000.0), clock),
+        mode_mgr=ModeManager(clock=clock),
+        brain_loop=BrainLoop(DesireSystem(), rng=random.Random(0)),
+        clock=clock,
+        interval_s=1.0,
+    )
+
+    async def dream_rows() -> int:
+        rows = await heartbeat_store.execute_raw("SELECT id FROM thought_log WHERE kind='dream'")
+        return len(rows)
+
+    now = clock.now()
+    await soul._maybe_dream(now, mode=Mode.PRESENT, away_s=99_999.0)
+    assert await dream_rows() == 0, "她在场时不该做梦"
+
+    await soul._maybe_dream(now, mode=Mode.ALONE, away_s=DREAM_MIN_AWAY_S - 1.0)
+    assert await dream_rows() == 0, "刚离开一会儿不该做梦"
+
+    await soul._maybe_dream(now, mode=Mode.ALONE, away_s=DREAM_MIN_AWAY_S + 1.0)
+    assert await dream_rows() == 1, "离线够久应做一场梦"
+
+    await soul._maybe_dream(now + 60.0, mode=Mode.ALONE, away_s=DREAM_MIN_AWAY_S + 60.0)
+    assert await dream_rows() == 1, "两次梦之间应有间隔，梦不该泛滥"
+
+    await state_store.close()
+    await heartbeat_store.close()

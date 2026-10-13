@@ -190,17 +190,23 @@ class ExpressionService:
     def last_express_ts(self) -> float | None:
         return self._last_express_ts
 
-    def should_speak(self, output: BrainOutput, now: float, force: bool) -> bool:
+    def should_speak(
+        self, output: BrainOutput, now: float, force: bool, *, greeting: bool = False
+    ) -> bool:
         """触发判断（20.6 的 1.3）：外部交互立即开口；内部冲动按双模态节流。
 
         由**心跳拍**调用（廉价、非阻塞）——「谁决定开口」因此仍在生命循环里，
         worker 只管执行，不判断该不该说。
 
+        `greeting`（阶段 5 第七批）：她**刚从"不在场"回到"在场"**——这一声问候
+        **越过节流**（刚回来值得说一句）；但仍按内部冲动的入队语义走
+        （队列满时可被丢＝"她这次决定不说"）。
+
         判定为真即**记下开口时刻**（节流基线），不等 worker 真的说出口：提交被队列
         丢弃时也照样推进——丢弃＝「她这次决定不说」（D1），若等到执行成功才推进，
         同一句话会在队列满的每一拍被重新判定、反复丢弃。
         """
-        if force:
+        if force or greeting:
             self._last_express_ts = now
             return True
         interval = (
@@ -227,9 +233,11 @@ class ExpressionService:
         now = job.created_ts
 
         # ── 1. 构造表达指令（决策层唯一出口）────────────
+        # 意图由**决策层**（心跳提交时）给定：回应 / 主动问候 / 好奇提问 / 思念；
+        # 未给定时退回按 `brain_action` 映射（直接调用方与既有测试的行为不变）。
         instruction = build_expression(
             output,
-            intent="回应" if job.force else None,
+            intent=job.intent if job.intent is not None else ("回应" if job.force else None),
             vrram_mb=job.vrram_mb,
             body_left_h=float(job.summary.get("body_away_s", 0.0)) / 3600.0,
             day_phase=str(job.summary.get("day_phase", "day")),

@@ -77,6 +77,10 @@ class ExpressionJob:
     env: Mapping[str, object] | None = None  # 词汇许可环境（enrich_permits 用）
     user_message: str | None = None  # 本拍用户输入（作为"话题"，非指令）
     force: bool = False  # True = 用户输入驱动的强制开口（D1：永不丢）
+    # 决策层指定的意图（路线图 §7.3"决策层唯一出口"）。`None` = 交给
+    # `build_expression` 按 `brain_action` 映射（P1 决策集）；心跳在提交时按状态
+    # 定为 主动问候 / 思念 / 好奇提问（内部冲动的三种说法，见 `_pick_intent`）。
+    intent: str | None = None
 
     @property
     def order_key(self) -> JobOrder:

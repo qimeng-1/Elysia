@@ -23,7 +23,7 @@ from typing import Any
 
 from elysia.core.checkpoint import CheckpointManager
 from elysia.core.clock import Clock, SystemClock
-from elysia.core.mode import ModeManager
+from elysia.core.mode import Mode, ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import (
     BODY_AWAY_THRESHOLD_S,
@@ -55,6 +55,7 @@ from elysia.memory.promote import promote_batch
 from elysia.memory.retrieve import recall_for_feeling
 from elysia.memory.scorer import importance
 from elysia.memory.sediment import SEDIMENT_EVENT_KIND, PatternSignal, find_candidate
+from elysia.memory.sleep import synthesize_dream
 from elysia.memory.supersede import find_superseded
 from elysia.protocol.snapshots import build_snapshot
 from elysia.soul.away_life import AwayLife
@@ -84,6 +85,18 @@ MEMORY_FEELING_EVERY_N = 300
 # 语义是"真的出错了"（表达任务失败 / 常驻循环异常），**不含**优雅降级
 # （未配 key 时每次开口降级为微声不算痛，否则离线时她会常驻"痛"）。
 ERROR_BURST_WINDOW_S = 1800.0
+
+# ── 内部冲动的三种说法（P2 §7.3 决策层出口；此前这三个意图**没有产生者**）──
+# 思念：思念感受越过高位才说（miss ∈ [0.2, 0.6]，0.5 属"明显想"）
+MISS_SPEAK_THRESHOLD = 0.5
+# 好奇提问：记忆缺口驱动的 curiosity 越过高位才问（curiosity ∈ [0, 1]）
+CURIOSITY_SPEAK_THRESHOLD = 0.5
+
+# ── 睡眠整合＝做梦（P3 §8.6）──
+# 两个门槛：她得**真的离开过一阵**（不是转身就做梦），且两次梦之间要有间隔。
+DREAM_MIN_AWAY_S = 1800.0  # 身体离线满 30 分钟才可能做梦
+DREAM_MIN_INTERVAL_S = 7200.0  # 两次梦至少间隔 2 小时（梦不该泛滥）
+DREAM_THOUGHT_KIND = "dream"  # thought_log 的 kind（与 away_life 的念头区分开）
 
 # 遗忘状态的"深度序"（P3-W）：程序只降不升——唤醒走检索路径（被话题提起），
 # 不在这里。suppressed 不在表内：她的决定不属于"时间造成的失去"，程序不碰。
@@ -172,6 +185,11 @@ class SoulHeartbeat:
         self._latest_memory_gap: float = 0.0
         # 「痛」的物理量（路线图 §7.6）：窗口内"真的出错了"的时刻（表达失败 / 循环异常）
         self._error_times: deque[float] = deque()
+        # 内部冲动（第七批）：她刚从"不在场"回到"在场" → 待问候（**边沿触发**，只问一次）
+        self._greet_pending = False
+        self._last_mode: Mode | None = None
+        # 睡眠整合＝做梦：上一次做梦的时刻（两次梦之间要有间隔，梦不该泛滥）
+        self._last_dream_ts: float | None = None
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
         self._new_interaction = False
         # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
@@ -204,6 +222,7 @@ class SoulHeartbeat:
             await self._sync_body_status(now)
             mode = self._mode_mgr.mode(self._timesense.state.last_body_online_ts, now)
             summary = self._timesense.summary()
+            self._update_greeting(mode)
 
             # ── P1：大脑循环 ──────────────────────────────
             brain_output = None
@@ -263,6 +282,10 @@ class SoulHeartbeat:
                     brain_action=brain_action or "none",
                 )
 
+            # ── 睡眠整合＝做梦（P3 §8.6）：离线够久时，从她自己的记忆碎片联想 ──
+            if not frozen:
+                await self._maybe_dream(now, mode=mode, away_s=float(summary["body_away_s"]))
+
             # ── P2：表达管线（提交非阻塞 + 每拍取回落库，20.6 的 1.3）────
             # 心跳不再等 LLM/TTS：判断该不该开口（廉价、非阻塞）→ 把耗时那段交给
             # worker 在独立任务里跑 → 结果由**心跳拍**取回并落库（D2：单一事实源＝心跳）。
@@ -270,13 +293,27 @@ class SoulHeartbeat:
             worker = self._expression_worker
             if worker is not None:
                 await self.persist_expressions(worker.drain(), now=now, frozen=frozen)
+            # 内部冲动（第七批）：刚回来 → 问候。问候**越过节流**（值得一声），
+            # 但仍保持 force=False —— 队列满时它可以被丢（＝"她这次决定不说"）。
+            greeting = self._greet_pending and mode is Mode.PRESENT
             if (
                 self._expression is not None
                 and worker is not None
                 and not frozen
                 and brain_output is not None
-                and self._expression.should_speak(brain_output, now, self._new_interaction)
+                and self._expression.should_speak(
+                    brain_output, now, self._new_interaction, greeting=greeting
+                )
             ):
+                if greeting:
+                    self._greet_pending = False
+                # 决策层定意图（T3：谁决定开口仍在生命循环里）：用户在说话 → 回应；
+                # 否则按状态在 主动问候 / 好奇提问 / 思念 里挑（None = 交给呓语映射）
+                intent = (
+                    "回应"
+                    if self._new_interaction
+                    else self._pick_intent(brain_output, greeting=greeting)
+                )
                 worker.submit(
                     ExpressionJob(
                         job_id=make_job_id(self._heartbeat_seq, now),
@@ -288,6 +325,7 @@ class SoulHeartbeat:
                         env=self._expression_env(brain_output, summary),
                         user_message=self._pending_user_message,
                         force=self._new_interaction,
+                        intent=intent,
                     )
                 )
 
@@ -669,6 +707,66 @@ class SoulHeartbeat:
         while self._error_times and now - self._error_times[0] > ERROR_BURST_WINDOW_S:
             self._error_times.popleft()
         return len(self._error_times)
+
+    # ── 内部冲动的三种说法（P2 §7.3 决策层出口）─────────────────
+    # 此前「主动问候 / 思念 / 好奇提问」三个意图**没有任何产生者**：决策层只会吐
+    # 「发呆呓语 / 自检报告 / 回应」，于是它们各自的微声与提示模板**永远不会被选中**
+    # （与 `has_event=False` 同族的 T1 缺陷，见 STATUS_MATRIX §12）。
+
+    def _update_greeting(self, mode: Mode) -> None:
+        """问候的**边沿触发**：只在她"从不在场回到在场"那一下记一次。
+
+        不是每拍都问；首次启动（`_last_mode is None`）也不问——她刚醒，
+        不必自己欢迎自己。
+        """
+        if (
+            self._last_mode is not None
+            and self._last_mode is not Mode.PRESENT
+            and mode is Mode.PRESENT
+        ):
+            self._greet_pending = True
+        self._last_mode = mode
+
+    def _pick_intent(self, output: BrainOutput, *, greeting: bool) -> str | None:
+        """内部冲动开口时，她"在说哪一类话"。返回 `None` = 交给 `brain_action` 映射。
+
+        优先级：**刚回来（问候）> 好奇（缺口）> 思念**。三者都是**状态驱动**，
+        不是随机挑一个——「谁决定开口」因此仍在生命循环里（T3）。
+        """
+        if greeting:
+            return "主动问候"
+        if output.feelings.curiosity >= CURIOSITY_SPEAK_THRESHOLD:
+            return "好奇提问"
+        if output.feelings.miss >= MISS_SPEAK_THRESHOLD:
+            return "思念"
+        return None
+
+    # ── 睡眠整合＝做梦（P3 §8.6）─────────────────────────────
+
+    async def _maybe_dream(self, now: float, *, mode: Mode, away_s: float) -> None:
+        """身体离线够久时，从**她自己的记忆碎片**联想一场梦（无 LLM）。
+
+        与 `away_life` 的分工：`away_life` 是**通用叙事**（模板化的独处念头），
+        做梦是**取材于她真实记忆**的自由联想（`synthesize_dream` 按
+        deep > working > shallow 加权抽 2-5 片，再用"梦的语法"串起来）。
+        两者都只落 `thought_log`，用不同的 `kind` 区分，互不冒充。
+
+        「有料才有梦」：碎片不足就**没有梦**（发呆回退），不假装"我做了个梦"。
+        """
+        if mode is Mode.PRESENT or away_s < DREAM_MIN_AWAY_S:
+            return
+        if self._last_dream_ts is not None and now - self._last_dream_ts < DREAM_MIN_INTERVAL_S:
+            return
+        # 先记"尝试时刻"再做全表读取：无论有没有梦，都要等一个间隔再试——
+        # 否则离线期间会**每拍全表扫描**（真机 memories 已达数百行）。
+        self._last_dream_ts = now
+        rows = await self._heartbeat_store.iterate_memories()
+        if not rows:
+            return
+        dream = synthesize_dream([MemoryRecord.from_dict(d) for d in rows])
+        if dream is None or not dream.has_content():
+            return
+        await self._heartbeat_store.think(now, DREAM_THOUGHT_KIND, dream.stream)
 
     def _latest_vrram_mb(self) -> float:
         """最近一次资源快照的 VRAM 占用（MB），未知返回 0。"""

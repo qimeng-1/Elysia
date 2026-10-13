@@ -629,3 +629,19 @@
 - **test（+4）**：`test_detail_level_changes_injected_label`（取消测试：`detail_level` 变了注入行必须变，否则它是装饰）、`test_recall_latency_grows_with_age`、`test_recall_latency_capped_and_ignores_unknown_age`、`test_recall_latency_precious_memory_is_faster`（"真爱不模糊"：珍贵记忆衰减慢 3× ⇒ 回忆更快）
 - **文档**：`P3_MEMORY.md` §六 两行改为"已接线/已消费"；`STATUS_MATRIX.md` §11 尾注更新未接线进度（只剩 `sleep.py` 与 4 个意图）
 - 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **419 passed**（415 + 4）
+
+### 阶段 5 第七批（收尾）：做梦接线 + 内部冲动三种说法
+- **feat（做梦·`soul/heartbeat.py` `_maybe_dream`）**：`synthesize_dream` 此前**零运行时调用**（`P3_MEMORY.md` §六 自述）。现接线：身体离线 ≥ `DREAM_MIN_AWAY_S`(30min) 且距上次**尝试** ≥ `DREAM_MIN_INTERVAL_S`(2h) 时，从**她自己的记忆碎片**联想一场梦（deep>working>shallow 加权抽 2–5 片、无 LLM），落 `thought_log` 的 `kind="dream"`
+  - **与 `away_life` 的分工**：`away_life` 是**通用叙事**（模板化独处念头），做梦是**取材于她真实记忆**的自由联想；两者用不同 `kind`，互不冒充
+  - **有料才有梦**：碎片不足即无梦（发呆回退），**不假装"我做了个梦"**（符合 §8.6 原文）
+  - **节流细节**：先记"尝试时刻"再做全表读取——否则离线期间会每拍全表扫描（真机 memories 已数百行）
+- **feat（内部冲动三种说法·第 5 节）**：`主动问候 / 思念 / 好奇提问` 三个意图**此前没有任何产生者**——决策层只会吐「发呆呓语 / 自检报告 / 回应」，于是它们的微声与提示模板**永远不会被选中**（与 `has_event=False` 同族的 T1 缺陷）
+  - `_update_greeting(mode)`：**边沿触发**——只在她"从不在场回到在场"那一下记一次（不是每拍都问；首次启动也不问，她刚醒不必自己欢迎自己）
+  - `_pick_intent(output, greeting=)`：**状态驱动**、优先级确定——刚回来（问候）> 好奇（缺口高位）> 思念（`miss` 高位）> `None`（交回 `brain_action` 呓语映射）
+  - `ExpressionJob.intent`：意图由**决策层（心跳提交时）**给定（T3：谁决定开口仍在生命循环里）；`run_job` 消费它，未给定时退回原映射（直接调用方与既有测试行为不变）
+  - `should_speak(..., greeting=)`：问候**越过节流**（刚回来值得说一句），但仍按内部冲动入队语义走（队列满可被丢＝"她这次决定不说"）
+- **「拒绝」有意推迟**（第 4 个无产生者意图）：它属 P4「工具化检测」，而当前唯一输入是桌宠文本框——**没有"指令"可拒绝**，硬接只会让模板空转。待 P5 有真实外部任务时再做
+- **test（+3）**：`test_pick_intent_is_state_driven`（三个意图真的产得出来 + 优先级）、`test_greeting_is_edge_triggered`（边沿语义）、`test_dream_uses_own_memories_only_when_away`（在场不做梦 / 离线不够不做梦 / 够久做一场 / 间隔未到不连做）
+- **真机冒烟**：start -Body → status 双绿 → stop 无残留；stderr 为空
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **422 passed**（419 + 3）
+- **阶段 5「回路闭合」到此收尾**：§12 六项中五项已修（#1 别名 / #2 授权环境 / #3 量纲 / #4 量程 / #6 痛），#5 VRAM 三层与 #7、#8 暂缓（方案已备）；`P3_MEMORY.md` §六的三个"已造好没插电"模块**全部插电**

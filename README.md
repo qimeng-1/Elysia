@@ -65,6 +65,7 @@ uv run python scripts\retention.py --keep-days 90                       # 保留
 | 文档 | 位置 |
 |------|------|
 | **路线图 v2（P4 及以后，生效）** | [docs/ROADMAP_V2.md](docs/ROADMAP_V2.md) |
+| 本轮工作报告（交付与验收） | [docs/SESSION_REPORT_2026-10-14.md](docs/SESSION_REPORT_2026-10-14.md) |
 | 架构决策记录 | [docs/ADR/](docs/ADR/) |
 | 技术架构设计（数据库/协议/模块/技术栈/运行时视图） | [docs/TECHNICAL_DESIGN.md](docs/TECHNICAL_DESIGN.md)（**唯一副本**，工作区已不再保留镜像） |
 | 状态矩阵（能力 × 状态 × 测试口径 ＋ 失效引用 / 待补清单 / 缺陷登记） | [docs/STATUS_MATRIX.md](docs/STATUS_MATRIX.md) |

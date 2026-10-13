@@ -21,6 +21,9 @@ $Stdout   = Join-Path $LogDir "soul.out.log"
 $Stderr   = Join-Path $LogDir "soul.err.log"
 $BodyOut  = Join-Path $LogDir "body.out.log"
 $BodyErr  = Join-Path $LogDir "body.err.log"
+# "故意停机"标记：watchdog.ps1 见到它就**不自动拉起**（尊重你的 stop）。
+# start 会清掉它，stop 会创建它 —— 于是看门狗不会跟你抢方向盘。
+$NoAutoStart = Join-Path $RunDir "no_autostart"
 $ErrorActionPreference = "Stop"
 
 function Get-SoulPid {
@@ -66,6 +69,8 @@ switch ($Action) {
             Write-Host "[info] 灵魂已在运行 (PID $old)，跳过灵魂启动"
         } else {
             New-Item -ItemType Directory -Force -Path $RunDir, $LogDir | Out-Null
+            # 她是你**主动**启动的 → 清掉"故意停机"标记，让看门狗重新负责
+            Remove-Item $NoAutoStart -Force -ErrorAction SilentlyContinue
             # 直接启动真实 python 进程（PID 即解释器，stop 可干净回收）
             $pyExe = Get-PyExe
             $proc = Start-Process -FilePath $pyExe `
@@ -97,6 +102,9 @@ switch ($Action) {
         Write-Host "[ok] 身体已停止（灵魂不受影响）"
     }
     "stop" {
+        # 记录"这是你**故意**停的"——watchdog.ps1 据此不再自动拉起（下次 start 会清掉它）
+        New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+        New-Item -ItemType File -Force -Path $NoAutoStart | Out-Null
         # 始终停 body（如果存在）
         Stop-OneProcess $BodyPid
         Write-Host "[ok] 身体已停止（如运行中）"

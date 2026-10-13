@@ -135,10 +135,10 @@
 | # | 项 | 文档出处 | 实测现状 | 影响 | 建议落点 |
 |---|---|---|---|---|---|
 | 1 | 启动时 `PRAGMA integrity_check` + 损坏告警 | `PROJECT_ENGINEERING_STANDARD.md` §3.2 | ✅ **已实现**（阶段 B2）：`state_store._verify_integrity` 启动即校验；不通过则大声告警并标记**退化运行**（`store.degraded`） | — | 已完成 |
-| 2 | 定期 `VACUUM` | `ADR/002` §后果 | **从未落地** | `heartbeats` 按 1 Hz 线性增长且无保留策略（约 8.6 万行/天） | 阶段 B3（需先拍板"数据永不删除"口径） |
+| 2 | 定期 `VACUUM` | `ADR/002` §后果 | ✅ **已实现**（阶段 B3）：`core/retention.py` + `scripts/retention.py` —— **先归档、再裁剪、后 VACUUM**；只裁遥测流水 `heartbeats`，**绝不碰** `memories`/`thought_log`/`expression_log`；归档行数≠待裁行数则整轮放弃；要求停机执行（自行检查 PID 并拒绝） | 口径已定（归档保底 + 只裁流水）；仍为**人工**维护动作，未接自动调度 | 已完成 |
 | 3 | 备份**定时器**（文档原写"每日自动"） | `STANDARD` §3.2 ／ `ADR/002` ／ README | ✅ **已实现**（阶段 B2）：`backup.ps1 -Register` 注册每日计划任务（本机已注册 `Elysia-DailyBackup`，每天 03:30），`-Unregister` 取消 | — | 已完成 |
 | 4 | 备份**原子性** | `ADR/002` §后果（断言 robocopy"天然覆盖"WAL） | ✅ **已实现**（阶段 B2）：robocopy 之后再用 SQLite `.backup` 覆盖两个运行中的库为**事务一致快照**（`scripts/snapshot_dbs.py` → `core.checkpoint.backup_database`）；并清掉备份里的陈旧 `-wal`/`-shm`（否则将来打开备份会把旧 WAL 重放到新快照上） | — | 已完成 |
-| 5 | 进程监督 / 崩溃自动重启 | `STANDARD` §3.3 | **协程级已做**（`core/supervisor.py`，阶段 5 第四批）；进程级看门狗 / 计划任务仍无 | 崩了不会自愈（19.4 缺点 1）——**该缺点现已解决一半**：心跳协程意外退出会被拉起，但**整个进程**被杀仍需人工 | 阶段 B3 |
+| 5 | 进程监督 / 崩溃自动重启 | `STANDARD` §3.3 | ✅ **两层均已落地**：**协程级** `core/supervisor.py`（阶段 5 第四批）；**进程级** `scripts/watchdog.ps1`（阶段 B3，`-Register` 每 5 分钟检查，尊重 `no_autostart` 的故意停机）。实测：杀掉全部 python 后看门狗自动拉回；`stop` 后不再拉起 | — | 已完成 |
 | 6 | CI（`.github/workflows`） | `STANDARD` §2.4「CI/本地脚本」 | ✅ **已实现**（清理审计阶段 4）：`.github/workflows/ci.yml`，windows-latest + offscreen，与本地 pre-commit 同源 | — | 已完成 |
 | 7 | `verify_integrity.py` 重建 | worklog **10 处**引用 | 文件不存在、从未入库；但其**职责已被 §11 #1 覆盖**（启动自检 + 备份快照） | 那些「完整性 PASS」不可复核 | 待定（见 §10） |
 

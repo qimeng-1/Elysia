@@ -13,13 +13,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from pathlib import Path
 
 from elysia.core.checkpoint import backup_database
 
 
+def _force_utf8_console() -> None:
+    """控制台编码兜底：Windows 默认代码页不是 UTF-8 时中文会变乱码。"""
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+
+
 def main(pairs: list[str]) -> int:
+    _force_utf8_console()
     if not pairs or len(pairs) % 2 != 0:
         print("用法：snapshot_dbs.py <src_db> <dest_db> [<src> <dest> ...]", file=sys.stderr)
         return 2

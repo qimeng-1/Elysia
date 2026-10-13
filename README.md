@@ -38,7 +38,8 @@ elysia/
 ├── tests/          # unit（单元）+ acceptance（验收门）
 ├── assets/pet/     # 桌宠素材（character.png）
 ├── data/           # 运行时数据；*.db 与 logs/cache/tmp **不入库**，仅 checkpoints/ 快照入库（版本化）
-├── scripts/        # soul.ps1（进程控制）/ memory_view.ps1（记忆浏览器）/ backup.ps1（**手动**备份 D 盘，保留 30 份；未实现定时器）
+├── scripts/        # soul.ps1（进程控制）/ watchdog.ps1（进程级看门狗）/ backup.ps1（备份+每日计划任务）
+│                   # retention.py（保留策略：归档+裁剪+VACUUM）/ snapshot_dbs.py（库一致快照）/ memory_view.ps1
 └── docs/           # ADR + 设计宪法副本 + 仓库独有文档（操作手册 / P2·P3 规划与工作日志 / 人设）
 ```
 
@@ -51,6 +52,10 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 启动
 powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop          # 停止两者（stop-body 只停身体）
 powershell -ExecutionPolicy Bypass -File scripts\memory_view.ps1        # 记忆浏览器（只读观测）
 powershell -ExecutionPolicy Bypass -File scripts\backup.ps1             # 备份到 D:\ElysiaBackup\elysia
+powershell -ExecutionPolicy Bypass -File scripts\backup.ps1 -Register   # 注册每日备份计划任务（-Unregister 取消）
+powershell -ExecutionPolicy Bypass -File scripts\watchdog.ps1           # 进程级看门狗：崩了就拉回
+powershell -ExecutionPolicy Bypass -File scripts\watchdog.ps1 -Register # 每 5 分钟自动检查（-Unregister 取消）
+uv run python scripts\retention.py --keep-days 90                       # 保留策略（干跑；--apply 真做，须先停她）
 ```
 
 > 出声需先手动启动 GPT-SoVITS 服务（端口 9880）；未启动时她只出文本气泡。记忆浏览器为只读 SELECT，可与运行中的灵魂并存。

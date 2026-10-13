@@ -59,11 +59,12 @@ powershell -ExecutionPolicy Bypass -File scripts\backup.ps1             # 备份
 
 | 文档 | 位置 |
 |------|------|
+| **路线图 v2（P4 及以后，生效）** | [docs/ROADMAP_V2.md](docs/ROADMAP_V2.md) |
 | 架构决策记录 | [docs/ADR/](docs/ADR/) |
 | 技术架构设计（数据库/协议/模块/技术栈/运行时视图） | [docs/TECHNICAL_DESIGN.md](docs/TECHNICAL_DESIGN.md)（**唯一副本**，工作区已不再保留镜像） |
-| 状态矩阵（能力 × 状态 × 测试口径） | [docs/STATUS_MATRIX.md](docs/STATUS_MATRIX.md) |
+| 状态矩阵（能力 × 状态 × 测试口径 ＋ 失效引用 / 待补清单 / 缺陷登记） | [docs/STATUS_MATRIX.md](docs/STATUS_MATRIX.md) |
 | 使用说明书（怎么操作） | [docs/OPERATION_GUIDE.md](docs/OPERATION_GUIDE.md) |
-| 设计宪法（路线图 / 工程标准 / 开发纪律） | [docs/](docs/)（**唯一副本**；工作区 `设计规划/`、`工程标准/` 镜像目录已删除） |
+| 设计宪法（v1.1 路线图 / 工程标准 / 开发纪律） | [docs/](docs/)（**唯一副本**；`IMPLEMENTATION_ROADMAP.md` 的 P4–P6 前瞻部分已由 ROADMAP_V2 取代，其余继续生效） |
 
 ## 开发纪律（摘要）
 

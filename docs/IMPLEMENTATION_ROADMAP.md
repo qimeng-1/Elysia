@@ -3,6 +3,11 @@
 > **Version**: 1.1
 > **Date**: 2026-08-17（v1.1 评审吸收：2026-08-19）
 > **Status**: 设计定稿；**P0–P3 已实施**；**P4 身份核心已落地大半**（`kind=self` + `IDENTITY_SEEDS` 幂等种入 + 5 个工具，见 `P3_MEMORY.md` §九-7）；P4 其余（四级拒绝 / 工具化检测）与 P5–P6 待实施
+>
+> ⚠️ **P4–P6 的前瞻部分已由 [ROADMAP_V2.md](./ROADMAP_V2.md)（2026-10-14）取代**。
+> 本文继续作为**设计宪法**生效——**哲学 / 术语词典 / 三条铁律 / P0–P3 设计记录仍然权威**，
+> 但**排期、阶段划分与"完成"的口径以 v2 为准**（v2 引入"回路闭合"横切维度，并把 P4 拆成
+> 身份（已落地）与边界（与 P5 同期））。本文的**技术选型表与工期估算已知失真**，见 `STATUS_MATRIX.md` §11。
 > **基于**: ELECTRONIC_LIFE_BLUEPRINT.md v2.0 + OPENCLAW_RESEARCH.md v1.0 + 多轮人类视角设计讨论
 > （两份源文档**不在本仓库**，现位于旧工程 `Elysia_Project/docs/planning/`；见 `STATUS_MATRIX.md` §10）
 

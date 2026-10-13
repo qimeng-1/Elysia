@@ -81,6 +81,9 @@ class ExpressionJob:
     # `build_expression` 按 `brain_action` 映射（P1 决策集）；心跳在提交时按状态
     # 定为 主动问候 / 思念 / 好奇提问（内部冲动的三种说法，见 `_pick_intent`）。
     intent: str | None = None
+    # P4b 关系涌现：字数上限由**退缩量**决定（退缩 → 说得更短）。
+    # 心跳在提交时算好装进来，worker 自包含地消费（不必回读心跳状态）。
+    max_chars: int = 120
 
     @property
     def order_key(self) -> JobOrder:

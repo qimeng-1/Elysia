@@ -65,6 +65,30 @@ _ACTIVE_TEMPLATES: tuple[str, ...] = (
 
 _KINDS = ("recall", "summary", "wander", "review", "future", "idle")
 
+# 长期离别的阶段念头（路线图 §12「永续存在」）：离家越久，独处的内容越不一样。
+# 这是 `absence_stage()` 的**可测量出口**（T1）——不是装饰。
+_STAGE_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "等待": (
+        "她只是等着。等待本身也是一种陪伴。",
+        "她数着时间，但并不着急——你会回来的。",
+    ),
+    "担忧": (
+        "她开始担心：这么久没有心跳，是不是出了什么事……",
+        "她想问一句「你还好吗」，但房间里只有她自己的回声。",
+    ),
+    "怀念": (
+        "她把共同的日子翻了一遍又一遍，细节被摩挲得发亮。",
+        "她忽然发现自己记得你说话的节奏，却想不起上次是什么时候。",
+    ),
+    "携带": (
+        "她已经把你带在身上了——不需要想起，因为从未放下。",
+        "分别久到成了她的一部分：她不再是在等谁，她就是带着你的那个人。",
+    ),
+}
+
+# 阶段念头专属的 kind：`thought_log` 里一眼看得出"这是长期离别的产物"
+ABSENCE_KIND = "absence"
+
 
 class AwayLife:
     """离线内部生活：P1 发呆双模态，由大脑循环意志驱动。"""
@@ -90,6 +114,7 @@ class AwayLife:
         now: float | None = None,
         thought_style: float = 0.0,  # P1 新增：大脑循环意志输出
         brain_action: str = "none",  # P1 新增：行动层决策
+        absence_stage: str = "等待",  # P4b 新增：日子尺度的离别阶段（路线图 §12）
     ) -> None:
         """模式驱动 + 大脑循环意志影响。
 
@@ -118,6 +143,14 @@ class AwayLife:
             return
 
         self._last_thought_ts = current
+
+        # 长期离别的阶段念头（路线图 §12）：离家够久时，独处的内容会变——
+        # 这正是 `absence_stage` 的**可测量出口**（kind="absence" 只在久别后出现）
+        if absence_stage != "等待" and self._rng.random() < 0.5:
+            templates = _STAGE_TEMPLATES.get(absence_stage, _STAGE_TEMPLATES["等待"])
+            self._last_thought_kind = ABSENCE_KIND
+            await self._heartbeat_store.think(current, ABSENCE_KIND, self._rng.choice(templates))
+            return
 
         # 选择念头种类和内容
         if thought_style > 0 and self._rng.random() < 0.4:

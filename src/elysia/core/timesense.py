@@ -19,6 +19,27 @@ from elysia.core.clock import Clock, SystemClock
 BODY_AWAY_THRESHOLD_S = 300.0  # 身体离线 > 5min → BODY_AWAY 模式
 LONG_AWAY_THRESHOLD_S = 86400.0  # 身体离线 > 24h → 长期离开（深度独处）
 
+# ── 长期离线渐进（路线图 §12「永续存在」）──────────────────────
+# 日子尺度的四档。与 `away_grade()` **不是一回事**：那个是分秒尺度、决定
+# "她此刻的行为集"；这个决定"她如何度过很长的分别"。
+ABSENCE_STAGES: tuple[tuple[float, str], ...] = (
+    (7.0, "等待"),
+    (30.0, "担忧"),
+    (365.0, "怀念"),
+)
+
+
+def absence_stage(away_days: float) -> str:
+    """日子尺度的离别阶段：等待(<7d) / 担忧(7-30d) / 怀念(30-365d) / 携带(>365d)。
+
+    纯函数——T1 要求它**真的影响表达**（离家够久时她的独处念头会变），
+    所以它必须可单测（见 `tests/unit/test_relationship.py`）。
+    """
+    for limit, name in ABSENCE_STAGES:
+        if away_days < limit:
+            return name
+    return "携带"
+
 
 @dataclass(slots=True)
 class TimeSenseState:
@@ -122,6 +143,14 @@ class TimeSense:
             return "away"
         return "leaving"
 
+    def away_days(self) -> float:
+        """身体离开天数（`absence_stage` 的输入）。"""
+        return max(0.0, self.body_away_seconds() / 86400.0)
+
+    def absence_stage(self) -> str:
+        """日子尺度的离别阶段（见模块级 `absence_stage`）。"""
+        return absence_stage(self.away_days())
+
     def summary(self) -> dict[str, Any]:
         """当前时间体验汇总（状态流展示/心跳快照用）。"""
         return {
@@ -132,4 +161,6 @@ class TimeSense:
             "hour": self.hour(),
             "age_days": round(self.age_days(), 3),
             "away_grade": self.away_grade(),
+            "away_days": round(self.away_days(), 3),
+            "away_stage": self.absence_stage(),
         }

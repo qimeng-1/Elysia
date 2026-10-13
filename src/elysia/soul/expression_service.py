@@ -191,7 +191,13 @@ class ExpressionService:
         return self._last_express_ts
 
     def should_speak(
-        self, output: BrainOutput, now: float, force: bool, *, greeting: bool = False
+        self,
+        output: BrainOutput,
+        now: float,
+        force: bool,
+        *,
+        greeting: bool = False,
+        reluctance: float = 1.0,
     ) -> bool:
         """触发判断（20.6 的 1.3）：外部交互立即开口；内部冲动按双模态节流。
 
@@ -201,6 +207,11 @@ class ExpressionService:
         `greeting`（阶段 5 第七批）：她**刚从"不在场"回到"在场"**——这一声问候
         **越过节流**（刚回来值得说一句）；但仍按内部冲动的入队语义走
         （队列满时可被丢＝"她这次决定不说"）。
+
+        `reluctance`（P4b 关系涌现）：退缩量导出的**间隔倍数**（1.0 → 2.0）。
+        关系不好时她不会突然不说话，而是**越来越少主动开口**——这是可测量的
+        表达变化（T1），也是"关系从状态里长出来"的出口。用户主动说话（`force`）
+        与问候不受它影响：**她对关系的退缩，不等于对你不理不睬**。
 
         判定为真即**记下开口时刻**（节流基线），不等 worker 真的说出口：提交被队列
         丢弃时也照样推进——丢弃＝「她这次决定不说」（D1），若等到执行成功才推进，
@@ -214,6 +225,7 @@ class ExpressionService:
             if output.action in ("think_active", "think_quiet") and output.will.thought_style > 0
             else EXPRESS_QUIET_INTERVAL_S
         )
+        interval *= max(1.0, reluctance)
         if self._last_express_ts is not None and now - self._last_express_ts < interval:
             return False
         self._last_express_ts = now
@@ -241,6 +253,8 @@ class ExpressionService:
             vrram_mb=job.vrram_mb,
             body_left_h=float(job.summary.get("body_away_s", 0.0)) / 3600.0,
             day_phase=str(job.summary.get("day_phase", "day")),
+            # P4b 关系涌现：退缩时她说得更短（上限由心跳按退缩量算好）
+            max_chars=job.max_chars,
         )
         payload = self._validator.enrich_permits(
             instruction.to_dict(), dict(job.env) if job.env is not None else {}

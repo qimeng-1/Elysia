@@ -72,6 +72,7 @@ from elysia.soul.expression_types import (
     make_job_id,
 )
 from elysia.soul.expression_worker import ExpressionWorker
+from elysia.soul.relationship import RelationshipKeeper, RelationshipTone
 from elysia.soul.words import permitted_words
 
 logger = logging.getLogger("elysia.soul.heartbeat")
@@ -82,6 +83,10 @@ MEMORY_MAINTAIN_EVERY_N = 300
 
 # P3-O 记忆感受路径：每 N 拍静默唤起一次（同 5 分钟节律，小脉冲不冲保护带）
 MEMORY_FEELING_EVERY_N = 300
+
+# P4b 关系涌现：退缩量多久落盘一次（同 5 分钟节律）——
+# 她的"态度"不该每次重启都重置成"亲近"
+RELATIONSHIP_PERSIST_EVERY_N = 300
 
 # 「痛」的物理量（路线图 §7.6：异常捕获 > 阈值）：多久之内的失败算"同一次阵痛"。
 # 语义是"真的出错了"（表达任务失败 / 常驻循环异常），**不含**优雅降级
@@ -203,6 +208,10 @@ class SoulHeartbeat:
         # P4b 边界（阶段 C）：工具化检测 → 四级拒绝 → 说服 / 操纵拦截
         self._boundary = BoundaryKeeper()
         self._boundary_decision: BoundaryDecision | None = None
+        # P4b 关系涌现（阶段 C）：**没有关系量表**，只有一个随她真实状态缓慢移动的退缩量
+        self._relationship = RelationshipKeeper()
+        self._relationship_loaded = False
+        self._last_beat_ts: float | None = None
         self._latest_resources: dict[str, Any] = {}
 
     @property
@@ -289,6 +298,8 @@ class SoulHeartbeat:
                     now=now,
                     thought_style=thought_style,
                     brain_action=brain_action or "none",
+                    # P4b 永续存在：日子尺度的离别阶段（等待 / 担忧 / 怀念 / 携带）
+                    absence_stage=str(summary.get("away_stage", "等待")),
                 )
 
             # ── 睡眠整合＝做梦（P3 §8.6）：离线够久时，从她自己的记忆碎片联想 ──
@@ -322,6 +333,10 @@ class SoulHeartbeat:
                         self._boundary_decision.reason,
                     )
 
+            # P4b 关系涌现：退缩量每拍按**真实经过时长**推进（**关系不是开关，是状态**）。
+            # 放在开口判定**之前**：她说不说话，关系都在动。
+            tone = await self._advance_relationship(now, brain_output)
+
             # 内部冲动（第七批）：刚回来 → 问候。问候**越过节流**（值得一声），
             # 但仍保持 force=False —— 队列满时它可以被丢（＝"她这次决定不说"）。
             greeting = self._greet_pending and mode is Mode.PRESENT
@@ -331,7 +346,12 @@ class SoulHeartbeat:
                 and not frozen
                 and brain_output is not None
                 and self._expression.should_speak(
-                    brain_output, now, self._new_interaction, greeting=greeting
+                    brain_output,
+                    now,
+                    self._new_interaction,
+                    greeting=greeting,
+                    # 退缩 → 主动开口变少（可测量的关系效果，T1）
+                    reluctance=tone.interval_factor(),
                 )
             ):
                 if greeting:
@@ -350,6 +370,8 @@ class SoulHeartbeat:
                         user_message=self._pending_user_message,
                         force=self._new_interaction,
                         intent=intent,
+                        # 退缩 → 句子变短（可测量的关系效果，T1）
+                        max_chars=tone.max_chars(),
                     )
                 )
 
@@ -756,6 +778,36 @@ class SoulHeartbeat:
     def _state_pressure(env: dict[str, object]) -> bool:
         """她此刻状态不好吗？（**复用受保护词的授权判定**——同一个真相，不另起一套）。"""
         return any(word in STATE_PRESSURE_WORDS for word in permitted_words(env))
+
+    async def _advance_relationship(
+        self, now: float, output: BrainOutput | None
+    ) -> RelationshipTone:
+        """推进**关系退缩量**（P4b）：关系从状态里长出来，没有开关。
+
+        - 首拍读回上次的退缩量（她的态度不该每次重启都重置成"亲近"）
+        - 之后按**真实经过时长**推进：CS 长期低 / 她长期难受 → 退缩；
+          对方真诚（CS 高）→ 恢复；被操纵 → 立刻记账（不必等"长期"）
+
+        出口是可测量的（T1）：退缩拉长她主动开口的间隔、压短她的字数上限。
+        """
+        if not self._relationship_loaded:
+            self._relationship_loaded = True
+            stored = await self._state_store.load_json("relationship_withdrawal", default=0.0)
+            if isinstance(stored, (int, float)):
+                self._relationship.withdrawal = min(1.0, max(0.0, float(stored)))
+
+        dt = self._interval_s if self._last_beat_ts is None else max(0.0, now - self._last_beat_ts)
+        self._last_beat_ts = now
+        if output is None:
+            return self._relationship.tone()
+
+        manipulation = self._boundary_decision is not None and self._boundary_decision.manipulation
+        tone = self._relationship.update(
+            dt_s=dt, cs=output.desire.cs, sa=output.desire.sa, manipulation=manipulation
+        )
+        if self._heartbeat_seq % RELATIONSHIP_PERSIST_EVERY_N == 0:
+            await self._state_store.save_json("relationship_withdrawal", tone.withdrawal)
+        return tone
 
     def _refusal_intent(self) -> str | None:
         """P4b：这一拍若判定了拒绝，意图就是「拒绝」——它**压过**问候 / 好奇 / 思念。

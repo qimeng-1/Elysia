@@ -445,6 +445,20 @@ def test_every_intent_has_a_producer(tmp_path: Path) -> None:
     assert not missing, f"这些意图没有任何产生者（永远不会被选中）：{sorted(missing)}"
 
 
+def test_brevity_reaches_the_expression_instruction() -> None:
+    """**T1 出口闭环**：关系退缩算出的字数上限必须真的进到表达指令里。
+
+    链：`RelationshipTone.max_chars()` → `ExpressionJob.max_chars` →
+    `build_expression(max_chars=...)` → `constraints["max_chars"]`。
+    这里验证最后一跳（纯函数那端），前两跳由 `_advance_relationship` 的接线保证。
+    """
+    brief = build_expression(_output(_feelings()), max_chars=60)
+    normal = build_expression(_output(_feelings()))
+    assert brief.constraints["max_chars"] == 60
+    assert normal.constraints["max_chars"] == 120
+    assert brief.constraints["max_chars"] < normal.constraints["max_chars"]
+
+
 # ── 6. 记忆：detail_level 与"越旧越难想起"都必须真的有效果 ─────────
 
 

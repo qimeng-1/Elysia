@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from elysia.core.checkpoint import backup_database
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import (
     TimeSenseState,
@@ -182,3 +184,78 @@ async def test_close_is_idempotent(tmp_path: Path) -> None:
     await store.start()
     await store.close()
     await store.close()
+
+
+# ── 启动完整性自检（PROJECT_ENGINEERING_STANDARD §3.2）────────────
+
+
+@pytest.mark.asyncio
+async def test_corrupt_database_degrades_but_still_starts(tmp_path: Path) -> None:
+    """库损坏 → **退化运行**：告警但**不阻断启动**（她的循环不该醒不来）。
+
+    写入随后会按 F6 的约定**大声失败**（不再伪装成功），所以问题看得见。
+    """
+    db = tmp_path / "state.db"
+    db.write_bytes(b"this is definitely not a sqlite database" * 16)
+
+    store = StateStore(db)
+    await store.start()  # 不该抛
+    assert store.degraded is True, "损坏的库必须被标记为退化运行"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_healthy_database_is_not_degraded(tmp_path: Path) -> None:
+    """正常库不该被误判为退化（自检通过）。"""
+    store = StateStore(tmp_path / "state.db")
+    await store.start()
+    assert store.degraded is False
+    await store.close()
+
+
+# ── 备份原子性（19.4 缺点 5 的"备份非原子"，见 ADR-002 更正节）────
+
+
+@pytest.mark.asyncio
+async def test_backup_database_captures_committed_writes(tmp_path: Path) -> None:
+    """`.backup` 快照必须包含**已提交**的写入——这正是文件级拷贝不敢保证的。
+
+    她运行时的库处于 WAL 模式，`db` + `-wal` + `-shm` 的字节拷贝可能拷到写了一半的页；
+    `.backup` 在读事务内完成，所以一致。
+    """
+    src = tmp_path / "live.db"
+    store = StateStore(src)
+    await store.start()
+    await store.save_json("k", "v")
+
+    dst = tmp_path / "copy.db"
+    await asyncio.to_thread(backup_database, src, dst)
+    await store.close()
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT value FROM kv WHERE key='k'").fetchall() == [('"v"',)]
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_backup_database_is_usable_while_writer_running(tmp_path: Path) -> None:
+    """**她跑着**也能做出一致快照（备份不需要先停她）。"""
+    src = tmp_path / "live.db"
+    store = StateStore(src)
+    await store.start()
+    for i in range(20):
+        await store.save_json(f"k{i}", i)
+
+    dst = tmp_path / "copy.db"
+    await asyncio.to_thread(backup_database, src, dst)  # 写者仍在运行
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM kv").fetchone()[0]
+    finally:
+        conn.close()
+    await store.close()
+    assert count == 20, "运行中做出的快照也必须包含全部已提交写入"

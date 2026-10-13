@@ -108,13 +108,45 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_key ON memory_index (path_key);
 """
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
+def _connect(db_path: Path) -> tuple[sqlite3.Connection, bool]:
+    """打开连接并做**启动自检**；返回 `(连接, 是否退化)`。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.DatabaseError as exc:
+        logger.error("状态库无法打开（可能已损坏，或不是 SQLite 文件）：%s ｜ %s", db_path, exc)
+        return conn, True
+    return conn, not _verify_integrity(conn, db_path)
+
+
+def _verify_integrity(conn: sqlite3.Connection, db_path: Path) -> bool:
+    """启动时完整性校验（`PROJECT_ENGINEERING_STANDARD.md` §3.2 的要求）；通过返回 True。
+
+    **告警但不阻断启动，也不自动恢复**——两条都是刻意的：
+
+    - 不阻断：她的生命循环不该因为一次校验失败就彻底醒不来。启动后写操作会按
+      F6 的约定**大声失败**（不再伪装成功），所以问题看得见。
+    - 不自动恢复：用陈旧备份覆盖当前数据是**不可逆**的动作，机器不该替人做这个决定。
+      正确动作是人工恢复：`soul.ps1 stop` 后从 `data/checkpoints/` 或备份取回。
+    """
+    try:
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+    except sqlite3.DatabaseError as exc:
+        logger.error("状态库完整性校验无法执行：%s ｜ %s", db_path, exc)
+        return False
+    result = str(row[0]) if row else "unknown"
+    if result != "ok":
+        logger.error(
+            "状态库完整性校验**未通过**：%s（%s）｜ 请先 stop 进程，"
+            "再从 data/checkpoints 或备份恢复",
+            result,
+            db_path,
+        )
+        return False
+    return True
 
 
 def _run_migration(conn: sqlite3.Connection, stmt: str) -> None:
@@ -152,6 +184,15 @@ class _AsyncSQLite:
         self._queue: asyncio.Queue[_QUEUE_ITEM] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
         self._closed = False
+        self._degraded = False  # True = 库坏了/初始化失败，但进程仍醒着（见 `start`）
+
+    @property
+    def degraded(self) -> bool:
+        """是否处于**退化运行**（库损坏或初始化失败）。
+
+        给观测用：健康时恒 False；True 意味着写操作会大声失败、需要人工恢复。
+        """
+        return self._degraded
 
     def _ensure_open(self) -> None:
         """关停后拒绝新写：**说真话**，不静默丢弃（与 F6 同一原则）。"""
@@ -160,12 +201,19 @@ class _AsyncSQLite:
 
     async def start(self) -> None:
         self._closed = False
-        self._conn = await asyncio.to_thread(_connect, self._db_path)
-        if self._schema is not None:
-            # executescript 支持多语句 schema（建表 + 索引），自带 commit
-            await asyncio.to_thread(self._conn.executescript, self._schema)
-        for stmt in self._migrations:
-            await asyncio.to_thread(_run_migration, self._conn, stmt)
+        conn, degraded = await asyncio.to_thread(_connect, self._db_path)
+        self._conn = conn
+        self._degraded = degraded
+        try:
+            if self._schema is not None:
+                # executescript 支持多语句 schema（建表 + 索引），自带 commit
+                await asyncio.to_thread(self._conn.executescript, self._schema)
+            for stmt in self._migrations:
+                await asyncio.to_thread(_run_migration, self._conn, stmt)
+        except sqlite3.DatabaseError as exc:
+            # 退化运行：库坏了也让她醒着（写会按 F6 大声失败），而不是彻底起不来
+            self._degraded = True
+            logger.error("状态库初始化失败，进入**退化运行**：%s ｜ %s", self._db_path, exc)
         self._writer = asyncio.create_task(self._write_loop(), name=f"writer-{self._db_path.stem}")
 
     async def _write_loop(self) -> None:

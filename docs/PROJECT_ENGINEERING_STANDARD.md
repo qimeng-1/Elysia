@@ -138,8 +138,8 @@ elysia/
 |----|------|
 | 存储 | SQLite（WAL 模式）。**SQLite-vec 未采用**——记忆相关性走字符二元组（见 `P3_MEMORY.md` §九） |
 | 目录 | `data/` 与代码完全分离 |
-| 备份 | `scripts/backup.ps1` **手动**备份到 D 盘，保留 30 份。**⚠️ 未实现定时器 / 计划任务**（原文"每日自动"不成立）；且 robocopy 复制运行中的 SQLite **非原子**——见 `STATUS_MATRIX.md` §11 |
-| 完整性 | **⚠️ 未实现**：启动时没有 `PRAGMA integrity_check`。原 `verify_integrity.py` 位于工作区外，已随目录移出（见 `STATUS_MATRIX.md` §10 / §11） |
+| 备份 | `scripts/backup.ps1`：**robocopy 全量 + SQLite `.backup` 一致快照**（她运行中也能拿到事务一致的两个库），保留 30 份（`-Keep`）。**定时器已实现**：`-Register` 注册每日计划任务、`-Unregister` 取消 |
+| 完整性 | **已实现**：启动时跑 `PRAGMA integrity_check`。不通过则**大声告警 + 进入退化运行**（`store.degraded`）——**故意不阻断启动、也不自动恢复**：自动用陈旧备份覆盖是不可逆动作，恢复由人工执行 |
 
 ### 3.3 进程守护与恢复
 

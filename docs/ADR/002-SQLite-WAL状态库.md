@@ -50,3 +50,13 @@
    而 `heartbeats` 按 1 Hz 线性增长（约 8.6 万行/天）且无保留策略。
 
 另：原文"每日备份"与实际不符——`scripts/backup.ps1` 是**手动**脚本，没有定时器 / 计划任务。
+
+**后续（2026-10-14，阶段 B2 已闭合上面两条）**：
+
+1. 备份**改为 SQLite `.backup` 一致快照**（`core.checkpoint.backup_database`，由
+   `scripts/snapshot_dbs.py` 调用）：robocopy 负责全量文件，两个**运行中的库**随后被
+   事务一致快照覆盖；备份里的陈旧 `-wal`/`-shm` 也会被清掉（否则将来打开备份会把旧 WAL
+   重放到新快照上）。实测：运行中做出的快照 `PRAGMA integrity_check = ok`，表结构完整。
+2. 备份**有了定时器**：`backup.ps1 -Register` / `-Unregister` 管理每日计划任务
+   （本机已注册 `Elysia-DailyBackup`，每天 03:30）。
+3. `VACUUM` 与流水表保留策略**仍未落地**——它触碰"数据永不删除"铁律，须先拍板口径。

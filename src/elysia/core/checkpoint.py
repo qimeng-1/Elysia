@@ -20,8 +20,17 @@ CHECKPOINT_KEEP = 10  # 保留最近 10 份快照
 FREEZE_MARKER_NAME = "freeze"  # 紧急冻结标记文件
 
 
-def _backup_file(src: Path, dst: Path) -> None:
-    """SQLite 在线备份（.backup API，线程安全）。"""
+def backup_database(src: Path, dst: Path) -> None:
+    """SQLite **在线**备份（`.backup` 协议，线程安全、事务一致）。
+
+    **为什么不能用文件拷贝**：她运行时的 SQLite 处于 WAL 模式，
+    `db` + `-wal` + `-shm` 的**字节级拷贝不等于事务一致的快照**（可能拷到写了一半的页）。
+    `.backup` 走 SQLite 自己的备份协议、在读事务内完成，故**她照常跑也能拿到一致快照**。
+    `scripts/backup.ps1` → `scripts/snapshot_dbs.py` 复用的就是本函数
+    （19.4 缺点 5 记的"备份原子性"由此闭合；ADR-002 里"robocopy 天然覆盖 WAL"的
+    旧断言已在更正节里纠正）。
+    """
+    dst.unlink(missing_ok=True)  # 目标须是干净文件（页大小可能与源不同）
     src_conn = sqlite3.connect(str(src))
     dst_conn = sqlite3.connect(str(dst))
     try:
@@ -51,8 +60,8 @@ class CheckpointManager:
             target = self.checkpoint_dir / f"{self._version}-{stamp}-{suffix}"
             suffix += 1
         target.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(_backup_file, state_db, target / "state.db")
-        await asyncio.to_thread(_backup_file, heartbeat_db, target / "heartbeat.db")
+        await asyncio.to_thread(backup_database, state_db, target / "state.db")
+        await asyncio.to_thread(backup_database, heartbeat_db, target / "heartbeat.db")
         self._prune()
         return target
 

@@ -134,13 +134,13 @@
 
 | # | 项 | 文档出处 | 实测现状 | 影响 | 建议落点 |
 |---|---|---|---|---|---|
-| 1 | 启动时 `PRAGMA integrity_check` + 损坏告警 | `PROJECT_ENGINEERING_STANDARD.md` §3.2 | **全代码库无此调用** | 库损坏无法尽早发现 | 阶段 4 |
-| 2 | 定期 `VACUUM` | `ADR/002` §后果 | **从未落地** | `heartbeats` 按 1 Hz 线性增长且无保留策略（约 8.6 万行/天） | 阶段 4（需先拍板"数据永不删除"口径） |
-| 3 | 备份**定时器**（文档原写"每日自动"） | `STANDARD` §3.2 ／ `ADR/002` ／ README | `backup.ps1` 是**纯手动**脚本 | 实际不会自动备份 | 阶段 4 |
-| 4 | 备份**原子性** | `ADR/002` §后果（断言 robocopy"天然覆盖"WAL） | 非原子；已实测日志会漏进备份 | 备份可能不一致 | 阶段 4（先停她再备，或改用 `.backup` / `VACUUM INTO`） |
-| 5 | 进程监督 / 崩溃自动重启 | `STANDARD` §3.3 | **协程级已做**（`core/supervisor.py`，阶段 5 第四批）；进程级看门狗 / 计划任务仍无 | 崩了不会自愈（19.4 缺点 1）——**该缺点现已解决一半**：心跳协程意外退出会被拉起，但**整个进程**被杀仍需人工 | 进程级部分仍待做 |
-| 6 | CI（`.github/workflows`） | `STANDARD` §2.4「CI/本地脚本」 | `.github` 不存在 | 门禁仅在本地 | 阶段 4 |
-| 7 | `verify_integrity.py` 重建 | worklog **10 处**引用 | 文件不存在、从未入库 | 那些「完整性 PASS」不可复核 | 待定（见 §10） |
+| 1 | 启动时 `PRAGMA integrity_check` + 损坏告警 | `PROJECT_ENGINEERING_STANDARD.md` §3.2 | ✅ **已实现**（阶段 B2）：`state_store._verify_integrity` 启动即校验；不通过则大声告警并标记**退化运行**（`store.degraded`） | — | 已完成 |
+| 2 | 定期 `VACUUM` | `ADR/002` §后果 | **从未落地** | `heartbeats` 按 1 Hz 线性增长且无保留策略（约 8.6 万行/天） | 阶段 B3（需先拍板"数据永不删除"口径） |
+| 3 | 备份**定时器**（文档原写"每日自动"） | `STANDARD` §3.2 ／ `ADR/002` ／ README | ✅ **已实现**（阶段 B2）：`backup.ps1 -Register` 注册每日计划任务（本机已注册 `Elysia-DailyBackup`，每天 03:30），`-Unregister` 取消 | — | 已完成 |
+| 4 | 备份**原子性** | `ADR/002` §后果（断言 robocopy"天然覆盖"WAL） | ✅ **已实现**（阶段 B2）：robocopy 之后再用 SQLite `.backup` 覆盖两个运行中的库为**事务一致快照**（`scripts/snapshot_dbs.py` → `core.checkpoint.backup_database`）；并清掉备份里的陈旧 `-wal`/`-shm`（否则将来打开备份会把旧 WAL 重放到新快照上） | — | 已完成 |
+| 5 | 进程监督 / 崩溃自动重启 | `STANDARD` §3.3 | **协程级已做**（`core/supervisor.py`，阶段 5 第四批）；进程级看门狗 / 计划任务仍无 | 崩了不会自愈（19.4 缺点 1）——**该缺点现已解决一半**：心跳协程意外退出会被拉起，但**整个进程**被杀仍需人工 | 阶段 B3 |
+| 6 | CI（`.github/workflows`） | `STANDARD` §2.4「CI/本地脚本」 | ✅ **已实现**（清理审计阶段 4）：`.github/workflows/ci.yml`，windows-latest + offscreen，与本地 pre-commit 同源 | — | 已完成 |
+| 7 | `verify_integrity.py` 重建 | worklog **10 处**引用 | 文件不存在、从未入库；但其**职责已被 §11 #1 覆盖**（启动自检 + 备份快照） | 那些「完整性 PASS」不可复核 | 待定（见 §10） |
 
 > **未接线模块进度**：`decay.retrieve_latency_ms` 与 `levels.detail_level` **已接线**（第六批）；
 > `memory/sleep.py`（做梦）**已接线**（第七批）；见 `P3_MEMORY.md` §六。

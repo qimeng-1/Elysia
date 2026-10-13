@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 
 from elysia.core.log import get_logger
@@ -31,12 +32,16 @@ async def supervise(
     name: str,
     *,
     restart_delay_s: float = RESTART_DELAY_S,
+    on_error: Callable[[], None] | None = None,
 ) -> None:
     """跑一个常驻协程；抛异常则记日志并重启，直到它**正常返回**或被取消。
 
     - 正常返回（如心跳 `stop()` 后退出）→ 监督结束，不重启；
     - `CancelledError` → 原样抛出（关闭序要靠它收干净）；
-    - 其它异常 → 记 exception 日志，等 `restart_delay_s` 再拉起。
+    - 其它异常 → 记 exception 日志，调用 `on_error`（供「痛」等观测计数），
+      等 `restart_delay_s` 再拉起。
+
+    `on_error` 是**观测回调**：它自己失败不得影响重启（已兜住）。
     """
     while True:
         try:
@@ -46,4 +51,7 @@ async def supervise(
             raise
         except Exception:
             log.exception("常驻协程异常退出，%.1fs 后重启", restart_delay_s, task=name)
+            if on_error is not None:
+                with contextlib.suppress(Exception):
+                    on_error()
             await asyncio.sleep(restart_delay_s)

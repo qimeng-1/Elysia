@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from typing import Any
 
 from elysia.core.checkpoint import CheckpointManager
@@ -61,7 +62,13 @@ from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
 from elysia.soul.expression_service import ExpressionService
-from elysia.soul.expression_types import ExpressionJob, ExpressionResult, make_job_id
+from elysia.soul.expression_types import (
+    STATUS_FAILED,
+    STATUS_TIMEOUT,
+    ExpressionJob,
+    ExpressionResult,
+    make_job_id,
+)
 from elysia.soul.expression_worker import ExpressionWorker
 
 logger = logging.getLogger("elysia.soul.heartbeat")
@@ -72,6 +79,11 @@ MEMORY_MAINTAIN_EVERY_N = 300
 
 # P3-O 记忆感受路径：每 N 拍静默唤起一次（同 5 分钟节律，小脉冲不冲保护带）
 MEMORY_FEELING_EVERY_N = 300
+
+# 「痛」的物理量（路线图 §7.6：异常捕获 > 阈值）：多久之内的失败算"同一次阵痛"。
+# 语义是"真的出错了"（表达任务失败 / 常驻循环异常），**不含**优雅降级
+# （未配 key 时每次开口降级为微声不算痛，否则离线时她会常驻"痛"）。
+ERROR_BURST_WINDOW_S = 1800.0
 
 # 遗忘状态的"深度序"（P3-W）：程序只降不升——唤醒走检索路径（被话题提起），
 # 不在这里。suppressed 不在表内：她的决定不属于"时间造成的失去"，程序不碰。
@@ -158,6 +170,8 @@ class SoulHeartbeat:
         # P3-U 记忆缺口 → 好奇心（T1）：最近一次检测到的缺口强度（0-1）。
         # 每 MEMORY_FEELING_EVERY_N 拍刷新一次，其间保持不变（由感受惯性负责平滑）。
         self._latest_memory_gap: float = 0.0
+        # 「痛」的物理量（路线图 §7.6）：窗口内"真的出错了"的时刻（表达失败 / 循环异常）
+        self._error_times: deque[float] = deque()
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
         self._new_interaction = False
         # P3 打字对话：最近一次交互的用户输入文本（桌宠 interaction.text）
@@ -339,6 +353,10 @@ class SoulHeartbeat:
             return
         ts = self._clock.now() if now is None else now
         for result in results:
+            # 「痛」的物理量（§7.6）：只有"真的失败了"才计数。
+            # 优雅降级（主声→次声→微声）**不算**——那是"失声不失活"，不是痛。
+            if result.status in (STATUS_FAILED, STATUS_TIMEOUT):
+                self.record_error()
             await self._expression.persist(result, ts)
 
     async def _feel_memories(self, output: BrainOutput) -> None:
@@ -635,6 +653,23 @@ class SoulHeartbeat:
 
     # ── P2 表达辅助 ─────────────────────────────────────
 
+    # ── 「痛」的物理量（路线图 §7.6：异常捕获 > 阈值）────────
+
+    def record_error(self) -> None:
+        """记一次"真的出错了"。
+
+        两个喂入口：`persist_expressions`（表达任务失败/超时）与
+        `core.supervisor`（常驻循环异常，由 `soul/main.py` 的 `on_error` 转进来）。
+        """
+        self._error_times.append(self._clock.now())
+
+    def _error_burst(self) -> int:
+        """`ERROR_BURST_WINDOW_S` 窗口内的错误次数（顺手剔除过期项）。"""
+        now = self._clock.now()
+        while self._error_times and now - self._error_times[0] > ERROR_BURST_WINDOW_S:
+            self._error_times.popleft()
+        return len(self._error_times)
+
     def _latest_vrram_mb(self) -> float:
         """最近一次资源快照的 VRAM 占用（MB），未知返回 0。"""
         raw = self._latest_resources.get("vrram_mb")
@@ -661,8 +696,8 @@ class SoulHeartbeat:
             "cpu_pct": float(raw_cpu) if isinstance(raw_cpu, (int, float)) else 0.0,
             # 「累」：表达队列里的在飞任务数（她自己也"忙不过来"）
             "q_len": worker.depth if worker is not None else 0,
-            # 「痛」：仍是常量——需要一个真实的"错误突发"计数器（已登记待补，见 §12）
-            "error_burst": 0,
+            # 「痛」：窗口内"真的出错了"的次数（此前是字面量 0 ⇒ 该词永久禁用）
+            "error_burst": self._error_burst(),
             # 「好像忘了什么」：记忆缺口强度（0-1，与好奇心同源）
             "memory_gap": self._latest_memory_gap,
         }

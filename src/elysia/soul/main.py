@@ -151,8 +151,10 @@ async def _run(settings: Settings) -> int:
             break
 
     # F6 的对偶件：写库失败不再伪装成功（会向上抛），而抛出不得让她僵死 ⇒ 上监督器。
+    # `on_error` 把"循环真的崩过"喂给「痛」的计数（路线图 §7.6：异常捕获 > 阈值）。
     beat_task = asyncio.create_task(
-        supervise(heartbeat.run, "soul-heartbeat"), name="soul-heartbeat"
+        supervise(heartbeat.run, "soul-heartbeat", on_error=heartbeat.record_error),
+        name="soul-heartbeat",
     )
     try:
         await stop.wait()

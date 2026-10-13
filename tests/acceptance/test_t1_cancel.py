@@ -36,7 +36,7 @@ from elysia.soul.brain import BrainLoop, BrainOutput, WillOutput
 from elysia.soul.desire import DesireState, DesireSystem
 from elysia.soul.dimensions import FeelingMapper, FeelingState
 from elysia.soul.expression import build_expression
-from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state
+from elysia.soul.heartbeat import ERROR_BURST_WINDOW_S, SoulHeartbeat, make_soul_state
 from elysia.soul.words import PROTECTED_WORDS, permitted_words
 
 # ── 感受维度的可达上界 ──────────────────────────────────────────
@@ -264,16 +264,10 @@ def test_protected_words_all_reachable() -> None:
     assert not dead, f"这些受保护词没有任何可满足的触发环境（永久不可说）：{dead}"
 
 
-@pytest.mark.asyncio
-async def test_expression_env_carries_live_values(tmp_path: Path) -> None:
-    """授权环境里每个键都必须是**活值**，不能是字面量。
-
-    真实缺陷样本：`_expression_env` 曾把 `cpu_pct` / `q_len` / `memory_gap`
-    全写成 `0`，导致「难受」「好像忘了什么」等词**永远无法授权**——
-    哪怕词表与心跳看起来都"接好了"。
-    """
+def _make_soul(tmp_path: Path) -> SoulHeartbeat:
+    """最小 SoulHeartbeat（与 `test_heartbeat.py` 同法），用于验证授权环境接线。"""
     clock = SimulatedClock(start_ts=1_000_000.0, speed=60.0)
-    soul = SoulHeartbeat(
+    return SoulHeartbeat(
         state_store=StateStore(tmp_path / "state.db"),
         heartbeat_store=HeartbeatStore(tmp_path / "heartbeat.db"),
         timesense=TimeSense(make_soul_state(1_000_000.0), clock),
@@ -282,6 +276,17 @@ async def test_expression_env_carries_live_values(tmp_path: Path) -> None:
         clock=clock,
         interval_s=1.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_expression_env_carries_live_values(tmp_path: Path) -> None:
+    """授权环境里每个键都必须是**活值**，不能是字面量。
+
+    真实缺陷样本：`_expression_env` 曾把 `cpu_pct` / `q_len` / `memory_gap`
+    / `error_burst` 全写成 `0`，导致「难受」「好像忘了什么」「痛」等词
+    **永远无法授权**——哪怕词表与心跳看起来都"接好了"。
+    """
+    soul = _make_soul(tmp_path)
     # 注入"此刻确实难受 + 确实有记忆缺口"的实时状态
     soul._latest_resources = {"cpu_percent": 92.0}
     soul._latest_memory_gap = 0.6
@@ -296,3 +301,42 @@ async def test_expression_env_carries_live_values(tmp_path: Path) -> None:
     )
     assert "难受" in permits, f"CPU 92% 时「难受」应可授权；env={env}"
     assert "好像忘了什么" in permits, f"缺口 0.6 时「好像忘了什么」应可授权；env={env}"
+
+
+@pytest.mark.asyncio
+async def test_error_burst_drives_pain_end_to_end(tmp_path: Path) -> None:
+    """端到端：真实错误 → `error_burst` →「痛」可授权（路线图 §7.6）。
+
+    旧实现把 `error_burst` 写成字面量 `0` ⇒ 谓词 `> 1` 永不成立 ⇒「痛」永久禁用。
+    喂入口有两个，都汇进 `record_error()`：表达任务失败/超时、常驻循环异常。
+    """
+    soul = _make_soul(tmp_path)
+    output = _output(_feelings())
+
+    env_before = soul._expression_env(output, {"day_phase": "day"})
+    assert env_before["error_burst"] == 0, "一开始不该有错误"
+    assert "痛" not in permitted_words(env_before), "没出错时不该能说「痛」"
+
+    soul.record_error()
+    soul.record_error()
+
+    env_after = soul._expression_env(output, {"day_phase": "day"})
+    assert env_after["error_burst"] == 2, f"两次错误应计入，实际 {env_after['error_burst']}"
+    assert "痛" in permitted_words(env_after), f"窗口内两次错误应可授权「痛」；env={env_after}"
+
+
+@pytest.mark.asyncio
+async def test_error_burst_forgets_old_errors(tmp_path: Path) -> None:
+    """窗口外的旧错误必须剔除，否则「痛」会永久挂着（早年的错不该疼到现在）。"""
+    soul = _make_soul(tmp_path)
+    soul.record_error()
+    soul.record_error()
+    assert soul._error_burst() == 2
+
+    # 把这两次错误"推到"窗口之外
+    stale = soul._clock.now() - ERROR_BURST_WINDOW_S - 1.0
+    soul._error_times.clear()
+    soul._error_times.extend([stale, stale])
+
+    assert soul._error_burst() == 0, "窗口外的错误不该继续计入"
+    assert "痛" not in permitted_words(soul._expression_env(_output(_feelings()), {}))

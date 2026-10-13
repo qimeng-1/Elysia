@@ -96,3 +96,31 @@ async def test_supervise_propagates_cancellation() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_supervise_reports_errors_to_callback() -> None:
+    """每次兜住异常都要回调 `on_error`（「痛」的计数入口）。
+
+    且**回调自身失败不得影响重启**——观测是旁路，不能把她的命搭进去。
+    """
+    errors: list[int] = []
+
+    def on_error() -> None:
+        errors.append(1)
+        raise RuntimeError("观测回调自己炸了")
+
+    calls = 0
+
+    async def factory() -> None:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("boom")
+
+    await asyncio.wait_for(
+        supervise(factory, "test-cb", restart_delay_s=0.01, on_error=on_error),
+        timeout=3.0,
+    )
+    assert calls == 3, "回调抛异常不得阻断重启"
+    assert len(errors) == 2, f"两次失败应各回调一次，实际 {len(errors)}"

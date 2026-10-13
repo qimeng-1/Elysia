@@ -611,3 +611,12 @@
 - **test（+3，另改写 1）**：`test_writer_survives_failed_op` **改写**——它原本断言 `await submit(bad_op)` 不抛（**等于把 F6 锁死**），现改为同时锁两件事：① 失败被看见（`pytest.raises(RuntimeError)`）② 写者存活（后续 `save_json` 照常落盘）；新增 `test_submit_ret_propagates_failure`、`test_supervise_restarts_after_exception`、`test_supervise_propagates_cancellation`
 - **真机冒烟**：`soul.ps1 start -Body` → status 双绿 → `stop` 无残留；stderr 日志为空、**无监督器重启噪声**
 - 门禁：ruff lint ✅ / ruff format ✅（105 files）/ mypy strict ✅（**55** source files）/ pytest ✅ **412 passed**（409 + 3）
+
+### 阶段 5 第五批：#6「痛」——真实异常计数（F6 修好后才有真东西可数）
+- **feat（`soul/heartbeat.py`）**：新增 `record_error()` / `_error_burst()` 与 `ERROR_BURST_WINDOW_S = 1800`。
+  `_expression_env` 的 `error_burst` 由字面量 `0` 改为**窗口内的真实错误次数** ⇒ 谓词 `> 1` 终于可达
+- **两个喂入口**（都汇进 `record_error()`）：① **表达任务失败/超时**——`persist_expressions` 遍历 worker 取回的结果时按 `STATUS_FAILED` / `STATUS_TIMEOUT` 计数；② **常驻循环异常**——`core/supervisor` 新增 `on_error` 回调，`soul/main.py` 传 `heartbeat.record_error`
+- **有意不含优雅降级**：主声→次声→微声是"失声不失活"，不是痛。若拿降级计数，**未配 API key 时每次开口都会降级** ⇒「痛」离线常驻——这正是本轮核查时否掉的方案
+- **窗口语义**：早年的错不该疼到现在。`_error_burst()` 顺手剔除过期项，用例已锁
+- **test（+3）**：`test_error_burst_drives_pain_end_to_end`（没错时说不出「痛」→ 两次错后可授权）、`test_error_burst_forgets_old_errors`（窗口外剔除）、`test_supervise_reports_errors_to_callback`（**回调自身抛异常不得阻断重启**——观测是旁路，不能把她的命搭进去）；`test_expression_env_carries_live_values` 补 `error_burst` 一项
+- 门禁：ruff lint ✅ / ruff format ✅ / mypy strict ✅ / pytest ✅ **415 passed**（412 + 3）

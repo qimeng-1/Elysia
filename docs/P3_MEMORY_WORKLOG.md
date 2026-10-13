@@ -1733,7 +1733,7 @@ if len(existing) + 1 - len(retired) > MAX_IDENTITY_LINES:   # 替换不计入新
 | 3 | **她的 5 个工具零使用** | `adopt`/`forget`/`restore`/`recall`/`disclaim` 全库出现 **0** 次，`llm_text` 含工具调用 **0** | 高（未知）：能力已递到她手上，但**从未被真实验证** |
 | 4 | **追问门槛副作用** | `_PROBE_MARKERS` 含「吗 / 呢 / ？」，任何"？"结尾问句门槛降到"重合 ≥1 二元组" ⇒ 无关提问也带出 3 条 hooks（18.4 第三问即此） | 中：**P3-P"每句都强调"有回潮风险**（既有设计，非 A1/A2 回归） |
 | 5 | **外部边界无测试** | **18 个源文件无同名测试**：`llm/deepseek.py`、`tts/backend｜breaker｜cache`、`llm/micro.py`、`llm/validator.py`、`core/config.py`、`body/main.py`、`body/resource.py`、`memory/hooks｜levels｜scorer`、`protocol/snapshots.py`、`soul/main｜dimensions｜words` 等 | 中：出错最贵的边界（HTTP / GPU / 进程入口）恰是测最少的 |
-| 6 | **一处异步纪律破口** | `VramBreaker.can_speak()` 内部 `subprocess.run(..., timeout=5)` 同步阻塞，`tts/chain.py` 在 `async speak()` 里直接调用（[chain.py](file:///a:/WorkPlace/Elysia/elysia/src/elysia/tts/chain.py#L59) ／ [breaker.py](file:///a:/WorkPlace/Elysia/elysia/src/elysia/tts/breaker.py#L25-L35)） | 中：最坏每次开口阻塞事件循环最长 **5s** |
+| 6 | **一处异步纪律破口** | `VramBreaker.can_speak()` 内部 `subprocess.run(..., timeout=5)` 同步阻塞，`tts/chain.py` 在 `async speak()` 里直接调用（[chain.py](../src/elysia/tts/chain.py#L59) ／ [breaker.py](../src/elysia/tts/breaker.py#L25-L35)） | 中：最坏每次开口阻塞事件循环最长 **5s** |
 | 7 | **调参常量散落** | 阈值/系数分居 `retrieve.py`、`similarity.py`、`supersede.py`、`sediment.py`、`expression_service.py`（如 0.35 / 0.4 / 0.7 / 0.5 / 2.0），无集中调参面 | 低：回退杠杆（`CLUSTER_COEF` 置 0 等）需逐处找 |
 | 8 | **单文件偏大 + 文档失衡** | 6 个文件 >500 行（最大 `pet.py` 695）；`P3_MEMORY_WORKLOG.md` **1693 行**，同一件事在 worklog / `P3_MEMORY.md` / `CHANGELOG.md` / 开发日志写三到四遍 | 低：维护成本与"读哪份为准"的困惑 |
 

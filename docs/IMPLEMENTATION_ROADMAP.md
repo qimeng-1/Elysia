@@ -4,6 +4,7 @@
 > **Date**: 2026-08-17（v1.1 评审吸收：2026-08-19）
 > **Status**: 设计定稿；P0–P3 已实施，P4–P6 待实施
 > **基于**: ELECTRONIC_LIFE_BLUEPRINT.md v2.0 + OPENCLAW_RESEARCH.md v1.0 + 多轮人类视角设计讨论
+> （两份源文档**不在本仓库**，现位于旧工程 `Elysia_Project/docs/planning/`；见 `STATUS_MATRIX.md` §10）
 
 ---
 

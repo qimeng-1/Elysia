@@ -1,9 +1,10 @@
 # Elysia memory browser launcher (read-only; safe to run while soul is alive)
-# Usage (any working directory; paths are absolute):
-#   powershell -ExecutionPolicy Bypass -File "A:\WorkPlace\Elysia\elysia\scripts\memory_view.ps1"
+# Usage (any working directory; project root is derived from this script):
+#   powershell -ExecutionPolicy Bypass -File "<project>\scripts\memory_view.ps1"
 # NOTE: kept ASCII-only on purpose -- Windows PowerShell 5.1 decodes BOM-less
 # .ps1 as ANSI, which corrupts non-ASCII characters and breaks parsing.
-$ProjectRoot = "A:\WorkPlace\Elysia\elysia"
+# Project root = parent of this script's folder (script lives in <root>\scripts\).
+$ProjectRoot = Split-Path $PSScriptRoot -Parent
 $venvPy = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $LogDir = Join-Path $ProjectRoot "data\logs"
 $Out = Join-Path $LogDir "memory_view.out.log"

@@ -107,3 +107,21 @@
 2. **新增模块即补行**：新文件加入 `src/elysia/` 时，按上表口径补一行（测试列必须核到具体文件）。
 3. **超时数字变了就同步**：`core/config.py` 的 `*_timeout_s` / 轮数常量变更时，同步 §4 / §5 的「最长 N s」。
 4. **本表不重复设计理由**：设计在 `P3_MEMORY_WORKLOG.md` 第二十节，落地证据在第二十一节。
+
+## 10. 失效引用与仓库外依赖登记
+
+> 建立于 2026-10-14（清理审计）。原则：**只登记，不重写历史**——
+> `CHANGELOG.md` 与 `P3_MEMORY_WORKLOG.md` 是**历史记录**，其中引用的下列路径保持原样；
+> 读到那些引用时，**以本表为准**。活文档（README / 本文档 / `TECHNICAL_DESIGN.md`）里的引用已直接修正。
+
+| 被引用物 | 原位置 | 现状（2026-10-14 实测） | 处置 |
+|---|---|---|---|
+| `verify_integrity.py` | 工作区外 `工具脚本/scripts/` | **本仓库不存在，且从未进过 git**；worklog 中 10 处「完整性 PASS」据此不可复核 | **待重建**（本轮不动；重建后回填本行） |
+| `IDEAS.md` | 工作区外 `灵感管理/` | 该目录已移出 ⇒ 铁律一失去落地处 | **已重建**为仓库根 `IDEAS.md` |
+| `项目元信息/开发日志.md` | 工作区外 `项目元信息/` | 已移出（`CHANGELOG.md` 头部已说明） | 保持引用；`CHANGELOG.md` 为代码库唯一变更日志 |
+| `项目元信息/PROJECT_MANIFEST.md` | 同上 | 已移出 | 不再维护；文件清单以 `git ls-files` 为准 |
+| `ELECTRONIC_LIFE_BLUEPRINT.md`、`OPENCLAW_RESEARCH.md` | `IMPLEMENTATION_ROADMAP.md` 头部「基于」 | 不在本仓库；实位于旧工程 `Elysia_Project/docs/planning/` | 已在路线图头部加位置注 |
+| `建议.docx` | 外部素材（用户上传） | 不在仓库 | 历史叙述，无需处置 |
+
+**审计口径**（可复核）：`docs/` 内 markdown 相对链接全量扫描 + 活文档反引号路径全量比对文件系统。
+本轮唯一修好的断链 = `P3_MEMORY_WORKLOG.md` §19.4 缺点 6 的两条 `file:///a:/WorkPlace/...` 绝对链接。

@@ -11,7 +11,8 @@ param(
     [switch]$Body
 )
 
-$ProjectRoot = "A:\WorkPlace\Elysia\elysia"
+# 项目根 = 本脚本所在目录的上一级（脚本位于 <root>\scripts\，故换机/换盘零改动）
+$ProjectRoot = Split-Path $PSScriptRoot -Parent
 $RunDir   = Join-Path $ProjectRoot "data\run"
 $LogDir   = Join-Path $ProjectRoot "data\logs"
 $PidFile  = Join-Path $RunDir "soul.pid"

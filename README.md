@@ -16,6 +16,11 @@ uv run pre-commit run --all-files   # 提交门禁四件套
 
 提交时 pre-commit 钩子自动执行：ruff lint → ruff format → mypy strict → pytest 回归，任一失败拦截提交。
 
+> **钩子需要能调用到 `pre-commit`**：先激活虚拟环境（`.\.venv\Scripts\Activate.ps1`）或把 `.venv\Scripts` 加进 `PATH`，
+> 否则 `git commit` 会报 `` `pre-commit` not found ``。不想折腾时，用上面那条 `uv run pre-commit run --all-files` 手动跑同一套门禁。
+>
+> **CI**：`.github/workflows/ci.yml` 在 push / PR 时跑同一套四件套（与本地 pre-commit 同源）。
+
 ## 目录结构
 
 ```
@@ -32,7 +37,7 @@ elysia/
 │   └── utils/      # 通用工具
 ├── tests/          # unit（单元）+ acceptance（验收门）
 ├── assets/pet/     # 桌宠素材（character.png）
-├── data/           # 运行时数据（进 git 做记忆快照版本化；logs/cache/tmp 除外）
+├── data/           # 运行时数据；*.db 与 logs/cache/tmp **不入库**，仅 checkpoints/ 快照入库（版本化）
 ├── scripts/        # soul.ps1（进程控制）/ memory_view.ps1（记忆浏览器）/ backup.ps1（**手动**备份 D 盘，保留 30 份；未实现定时器）
 └── docs/           # ADR + 设计宪法副本 + 仓库独有文档（操作手册 / P2·P3 规划与工作日志 / 人设）
 ```

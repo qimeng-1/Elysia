@@ -1,0 +1,49 @@
+# Elysia 门禁 CI —— 与本地 pre-commit 四件套同源
+#
+# 只做校验，不做部署。四件套：ruff lint → ruff format → mypy strict → pytest。
+# 本地钩子见 .pre-commit-config.yaml；运行器是 Windows（与目标平台一致：
+# 桌宠是 PySide6 GUI、进程控制是 PowerShell 脚本）。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送，取消上一次尚未跑完的任务
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: 门禁四件套
+    runs-on: windows-latest
+    env:
+      # Qt 测试不需要真实显示器（test_pet.py / test_memory_view.py）
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: 安装依赖（严格按 uv.lock，不更新锁文件）
+        run: uv sync --group dev --frozen
+
+      - name: ruff lint
+        run: uv run ruff check
+
+      - name: ruff format check
+        run: uv run ruff format --check
+
+      - name: mypy strict
+        run: uv run mypy src
+
+      - name: pytest 回归
+        run: uv run pytest

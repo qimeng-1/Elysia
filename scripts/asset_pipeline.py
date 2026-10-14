@@ -509,6 +509,14 @@ def matte_clip(
     webp_dir = out_dir / "webp"
     frames_dir.mkdir(parents=True, exist_ok=True)
     webp_dir.mkdir(parents=True, exist_ok=True)
+    # **先清空旧帧**：重跑一个更短的片段时，残留的旧帧会与 manifest 不符。
+    # 实测：把 notice 从 97 帧裁到 42 帧后，frames/ 里还留着 0042.png~0096.png，
+    # 于是"帧数"读出来仍是 97，播放器会把动作演到一段早就该删掉的尾巴上
+    # （而且首尾差、时长、内存全都跟着错）。
+    for stale_dir in (frames_dir, webp_dir):
+        for stale in stale_dir.iterdir():
+            if stale.is_file():
+                stale.unlink()
     for i, im in enumerate(cut):
         tile = im.crop(box)
         if canvas is not None:

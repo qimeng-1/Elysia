@@ -68,9 +68,21 @@ LAND_STRENGTH = 0.10
 # （对应 dsh-pet 的 `animations.drag` 池——它的 drag 池也是"被无形抓起悬空"的姿势）。
 # 按住时一直播、松手就结束；`land` 在松手瞬间播一次作为落地缓冲。
 DRAG_CLIP = "grab"
+# 拖拽状态片段候选：**优先 `float`（漂浮）**，兼容旧的 `grab`（被拎起悬空）。
+# 用户要求把它换成"漂浮起来"——生成新素材放进 `float/` 即自动生效。
+DRAG_CLIP_CANDIDATES = ("float", "grab")
 LAND_CLIP = "land"
 # 鼠标移入时的"预备"片段：抬头注意到你（动作之前的过渡）
 NOTICE_CLIP = "notice"
+# `notice` 的冷却：鼠标在桌面上来回移动会**反复进出**窗口，
+# 没有冷却就会不停重播"注意到你"、把待机轮换和整体节奏全打乱（用户实测反馈）。
+NOTICE_COOLDOWN_S = 25.0
+# 拖拽时的"漂浮"手感：被按住时轻轻上下浮沉并轻微摆动。
+# 用户要求："拎起来的视频可以替换为漂浮起来"——素材替换前，先用这一层把观感从
+# "被无形的手拎着"改成"浮在空中"。
+DRAG_FLOAT_AMP_PX = 7.0
+DRAG_FLOAT_HZ = 0.55
+DRAG_SWAY_DEG = 2.2
 
 # ── 动画编排（借鉴 dsh-pet 的 animations / animationWeights 设计）──────────
 # 待机池**带权重**（对应 dsh-pet 的 `animationWeights`）。
@@ -184,6 +196,9 @@ class _CharacterWidget(QWidget):
         # 物理待机层的**主增益**：静态立绘要它（1.0），真动画不要它（0.0）。
         # 用增益而不是删代码，并且跟着 lerp 平滑过渡——切换时不会"跳"一下。
         self._idle_gain = 1.0
+        # 拖拽"漂浮"层：被按住时浮沉，松手淡出
+        self._drag_float_gain = 0.0
+        self._drag_phase = 0.0
 
         # fallback 状态变量
         self._beat_phase = 0.0
@@ -288,11 +303,19 @@ class _CharacterWidget(QWidget):
             dt = ANIM_INTERVAL_MS / 1000.0
         # 物理参数按"每 1/30 秒"标定，这里按真实 dt 换算
         dt_ratio = dt / ANIM_REFERENCE_DT_S
+        k = 1.0 - (1.0 - 0.06) ** dt_ratio
 
         # 序列帧推进：**与物理动画叠加**——素材给"她在演什么"，物理给"她怎么晃"。
         # 放在最前，且不受 dragging 分支影响：拖拽时素材也在走（手感更连续）。
         if self._player is not None:
             self._player.advance(dt)
+
+        # 拖拽"漂浮"层：按住时增益升到 1、松手淡回 0；相位只在增益非零时推进。
+        # 这是**输入反应**，不受 `_idle_gain`（那个只管待机晃动）影响。
+        drag_target = 1.0 if self._dragging else 0.0
+        self._drag_float_gain += (drag_target - self._drag_float_gain) * k
+        if self._drag_float_gain > 0.002:
+            self._drag_phase += 2.0 * math.pi * DRAG_FLOAT_HZ * dt
 
         if not self._valid:
             self.update()
@@ -304,9 +327,6 @@ class _CharacterWidget(QWidget):
                 self._bounce = 0.0
             self.update()
             return
-
-        # 参数平滑逼近目标（lerp）——按真实 dt 换算，否则提高帧率会让它变快
-        k = 1.0 - (1.0 - 0.06) ** dt_ratio
 
         # 物理待机层增益：素材本身有真实动画 ⇒ 目标 0（不叠加晃动）；
         # 只有一张静态立绘 ⇒ 目标 1（物理层就是让静止画面活起来的东西）。
@@ -358,6 +378,12 @@ class _CharacterWidget(QWidget):
         scale *= self._scale
         rot = self._cur["sway_amp"] * self._idle_gain * math.sin(self._phase_sway)
         float_y = self._cur["float_amp"] * self._idle_gain * math.sin(self._float_phase)
+        # 拖拽"漂浮"：被按住时轻轻上下浮沉 + 轻微摆动。
+        # 让观感从"被无形的手拎着"变成"浮在空中"（用户要求把拎起换成漂浮）。
+        drag_g = self._drag_float_gain
+        if drag_g > 0.002:
+            float_y += DRAG_FLOAT_AMP_PX * drag_g * math.sin(self._drag_phase)
+            rot += DRAG_SWAY_DEG * drag_g * math.sin(self._drag_phase * 0.63)
 
         frame, prev, alpha = (
             self._player.current_blend() if self._player is not None else (None, None, 1.0)
@@ -450,6 +476,7 @@ class PetWindow(QMainWindow):
         self._idle_next_switch = 0.0
         self._last_state_clip = ""
         self._drag_clip_active = False
+        self._notice_last_s = 0.0  # 上次播「注意到你」的时刻（冷却用）
 
         # ── 角色素材：优先序列帧（服装包），其次旧单张立绘 ──
         pixmap = QPixmap(str(_CHAR_PATH))
@@ -586,12 +613,14 @@ class PetWindow(QMainWindow):
         正在被拖拽时也不打断。
         """
         player = self._clip_player
-        if player is not None and not self._drag_clip_active:
+        recently = time.time() - self._notice_last_s < NOTICE_COOLDOWN_S
+        if player is not None and not self._drag_clip_active and not recently:
             interrupting_response = player.is_playing_once() and (
                 player.current_clip_id() not in IDLE_WEIGHTS
             )
             if not interrupting_response:
                 player.play_once(NOTICE_CLIP)
+                self._notice_last_s = time.time()
         event.accept()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -785,8 +814,10 @@ class PetWindow(QMainWindow):
         """
         if self._clip_player is None:
             return
-        if self._clip_player.has_clip(DRAG_CLIP):
-            self._drag_clip_active = self._clip_player.set_clip(DRAG_CLIP)
+        for cid in DRAG_CLIP_CANDIDATES:
+            if self._clip_player.has_clip(cid):
+                self._drag_clip_active = self._clip_player.set_clip(cid)
+                break
         if self._drag_clip_active:
             # 拖拽期间别被待机轮换打断
             self._idle_next_switch = time.time() + 30.0

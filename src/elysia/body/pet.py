@@ -66,6 +66,8 @@ LAND_STRENGTH = 0.10
 # 按住时一直播、松手就结束；`land` 在松手瞬间播一次作为落地缓冲。
 DRAG_CLIP = "grab"
 LAND_CLIP = "land"
+# 鼠标移入时的"预备"片段：抬头注意到你（动作之前的过渡）
+NOTICE_CLIP = "notice"
 
 # ── 动画编排（借鉴 dsh-pet 的 animations / animationWeights 设计）──────────
 # 待机池**带权重**（对应 dsh-pet 的 `animationWeights`）。
@@ -522,6 +524,25 @@ class PetWindow(QMainWindow):
             else:
                 self._on_character_click()
             event.accept()
+
+    def enterEvent(self, event: Any) -> None:
+        """鼠标移入窗口 → 她「注意到你」（抬头看过来）。
+
+        `notice` 这条素材的正确用途就是这个：**动作之前的预备**。
+        先抬头看你、再回应点击，比"待机→回应"的直切自然得多。
+
+        打断规则：待机池里的片段（含 `settle` 这类过渡）**可以**被打断——
+        你走过来了她就该抬头；但**点按回应演到一半不打断**（那是她对你的回答）。
+        正在被拖拽时也不打断。
+        """
+        player = self._clip_player
+        if player is not None and not self._drag_clip_active:
+            interrupting_response = player.is_playing_once() and (
+                player.current_clip_id() not in IDLE_WEIGHTS
+            )
+            if not interrupting_response:
+                player.play_once(NOTICE_CLIP)
+        event.accept()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if event.angleDelta().y() > 0:

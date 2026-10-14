@@ -51,6 +51,8 @@ from PIL import Image, ImageChops, ImageFilter, ImageStat
 # 与背景色差在此之内判为背景。
 # 35 = 豆包水印与背景的最大通道差（33）+ 安全余量，实测能吸收水印且只损失 0.2% 角色像素。
 DEFAULT_TOLERANCE = 35
+# 读不到真实帧率时的兜底值
+DEFAULT_FPS_FALLBACK = 24.0
 # 软边高斯半径（像素）：太大糊边，太小留锯齿
 EDGE_FEATHER = 0.9
 # 统一包围盒的外扩像素（给物理动画的位移留余量）
@@ -355,6 +357,36 @@ def cutout(
     return rgba
 
 
+def fit_to_canvas(tile: Image.Image, canvas: tuple[int, int]) -> Image.Image:
+    """把抠好的图**等比缩放进固定画布**（底边居中）。
+
+    **为什么必须做**：实测同一套服装，各片段里角色在源画面中的大小并不一致——
+    `被拎起悬空` 被 AI 画大了约 25%（源内高度 695px vs 待机的 554px）。
+    若逐片段各自裁切，换动作时她会**突然变大变小，甚至超出窗口被裁掉**。
+    统一缩放进同一画布后，各片段的显示尺寸与锚点就一致了。
+    """
+    cw, ch = canvas
+    scale = min(cw / tile.width, ch / tile.height)
+    w, h = max(1, round(tile.width * scale)), max(1, round(tile.height * scale))
+    resized = tile.resize((w, h), Image.LANCZOS)
+    out = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+    out.paste(resized, ((cw - w) // 2, ch - h), resized)
+    return out
+
+
+def video_fps(path: Path) -> float:
+    """读视频的真实帧率。
+
+    **不要硬编码 24**：实测用户生成的素材里混有 30fps 的（`被拎起悬空.mp4`），
+    写死会让播放速度错 25%。
+    """
+    container = av.open(str(path))
+    stream = container.streams.video[0]
+    fps = float(stream.average_rate) if stream.average_rate else DEFAULT_FPS_FALLBACK
+    container.close()
+    return fps or DEFAULT_FPS_FALLBACK
+
+
 def read_video_frames(path: Path) -> list[Image.Image]:
     """解码整段视频为 RGB 帧（PyAV 默认解码器足够——这里只要颜色，alpha 是自己算的）。"""
     container = av.open(str(path))
@@ -411,14 +443,25 @@ def matte_clip(
     tol: int,
     make_webm: bool,
     exclude: Sequence[tuple[int, int, int, int]] = (),
+    canvas: tuple[int, int] | None = None,
+    frames_range: tuple[int, int] | None = None,
+    fps_override: float | None = None,
 ) -> int:
     """抠图整段视频 → 统一裁切的 PNG 母版 + WebP 运行时序列 + manifest。"""
     frames = read_video_frames(src)
     if not frames:
         print(f"  {src.name}: 解不出帧", file=sys.stderr)
         return 1
+    if frames_range is not None:
+        start, end = frames_range
+        frames = frames[start:end]
+        if not frames:
+            print(f"  {src.name}: --frames {start}:{end} 裁完是空的", file=sys.stderr)
+            return 1
+        print(f"  裁剪帧区间 {start}:{end} → 剩 {len(frames)} 帧")
     bg = background_color(frames[0])
-    print(f"  背景色 = {bg} | 容差 = {tol} | 帧数 = {len(frames)}")
+    fps = fps_override if fps_override is not None else video_fps(src)
+    print(f"  背景色 = {bg} | 容差 = {tol} | 帧数 = {len(frames)} | 播放 {fps:g}fps")
 
     cut = [cutout(f, bg, tol, exclude=exclude) for f in frames]
     union = None
@@ -457,8 +500,11 @@ def matte_clip(
     webp_dir.mkdir(parents=True, exist_ok=True)
     for i, im in enumerate(cut):
         tile = im.crop(box)
+        if canvas is not None:
+            tile = fit_to_canvas(tile, canvas)
         tile.save(frames_dir / f"{i:04d}.png", optimize=True)
         tile.save(webp_dir / f"{i:04d}.webp", "WEBP", quality=WEBP_QUALITY, method=4)
+    out_size = [tile.width, tile.height]
 
     loop_alpha = _mean_diff(cut[0].getchannel("A"), cut[-1].getchannel("A"))
     loop_rgb = _mean_diff(frames[0], frames[-1])
@@ -468,8 +514,8 @@ def matte_clip(
         "source": str(src),
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "frame_count": len(cut),
-        "fps": 24,
-        "size": [box[2] - box[0], box[3] - box[1]],
+        "fps": fps,
+        "size": out_size,
         "crop_box": list(box),
         "source_size": [w, h],
         "background": list(bg),
@@ -477,6 +523,10 @@ def matte_clip(
         "loop_alpha_diff": round(loop_alpha, 3),
         "loop_rgb_diff": round(loop_rgb, 3),
         "loops_seamlessly": loops,
+        # 循环不干净时给播放器的建议：**正放 + 倒放**天然无缝（乒乓）。
+        # 只对"循环类"片段有意义；单次片段（notice/settle/wave）不需要。
+        "suggest_ping_pong": not loops,
+        "canvas": list(canvas) if canvas is not None else None,
         "master_frames": "frames/*.png（无损母版）",
         "runtime_frames": f"webp/*.webp（q{WEBP_QUALITY}，Qt 原生可读）",
         "min_blob_px": MIN_BLOB_PX,
@@ -569,6 +619,51 @@ def _encode_alpha_webm(
     container.close()
 
 
+def parse_fps(spec: str) -> float | None:
+    """解析 `--fps`（**播放帧率**，与源帧率解耦）；空串返回 None。
+
+    为什么要解耦：裁剪出来的短片段按原速播放会过快——实测 `idle-open` 裁出 29 帧，
+    按 24fps 播是 1.2 秒一轮呼吸（≈50 次/分钟，像喘气）。改成 10fps 就是 2.9 秒一轮 ✓
+    """
+    if not spec.strip():
+        return None
+    try:
+        value = float(spec)
+    except ValueError as exc:
+        raise SystemExit(f"--fps 需要数字，收到：{spec!r}") from exc
+    if value <= 0:
+        raise SystemExit(f"--fps 必须为正数，收到：{spec!r}")
+    return value
+
+
+def parse_frames(spec: str) -> tuple[int, int] | None:
+    """解析 `--frames START:END`（左闭右开）；空串返回 None。
+
+    用途：素材里常有"只有一段能用"的情况——实测 `睁眼呼吸.mp4` 全程 241 帧，
+    但只有 f212–f240 是睁眼的（f20–f204 她闭着眼）。裁到那一段再乒乓播放，
+    就能拿到"睁眼待机"而**不必重新生成**。
+    """
+    if not spec.strip():
+        return None
+    parts = spec.replace(" ", "").split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise SystemExit(f"--frames 需要 START:END（如 212:241），收到：{spec!r}")
+    start, end = int(parts[0]), int(parts[1])
+    if end <= start:
+        raise SystemExit(f"--frames 的 END 必须大于 START，收到：{spec!r}")
+    return start, end
+
+
+def parse_canvas(spec: str) -> tuple[int, int] | None:
+    """解析 `--canvas WxH`；空串返回 None，格式错直接退出（不静默忽略）。"""
+    if not spec.strip():
+        return None
+    parts = spec.lower().replace(" ", "").split("x")
+    if len(parts) != 2 or not all(p.isdigit() and int(p) > 0 for p in parts):
+        raise SystemExit(f"--canvas 需要 WxH（如 480x660），收到：{spec!r}")
+    return int(parts[0]), int(parts[1])
+
+
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_console()
     parser = argparse.ArgumentParser(description="Elysia 桌宠素材流水线（体检 / 抠图 / 编码）")
@@ -582,6 +677,25 @@ def main(argv: list[str] | None = None) -> int:
     p_mat.add_argument("--out", required=True, type=Path)
     p_mat.add_argument("--tol", type=int, default=DEFAULT_TOLERANCE)
     p_mat.add_argument("--webm", action="store_true", help="额外尝试编码 alpha WebM（会自验）")
+    p_mat.add_argument(
+        "--canvas",
+        default="",
+        metavar="WxH",
+        help="统一画布尺寸（如 480x660）：各片段等比缩放进同一画布、底边居中。"
+        "同一服装的所有片段**必须用同一个**，否则换动作时她会突然变大变小",
+    )
+    p_mat.add_argument(
+        "--fps",
+        default="",
+        metavar="N",
+        help="**播放帧率**覆盖（与源帧率解耦）：裁出的短片段按原速会过快，用它调慢",
+    )
+    p_mat.add_argument(
+        "--frames",
+        default="",
+        metavar="START:END",
+        help="只取这个帧区间（左闭右开，如 212:241）。素材里只有一段能用时用",
+    )
     p_mat.add_argument(
         "--exclude",
         action="append",
@@ -622,7 +736,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  --exclude 需要 x0,y0,x1,y1 四个整数，收到：{spec!r}", file=sys.stderr)
             return 2
         exclude.append((parts[0], parts[1], parts[2], parts[3]))
-    return matte_clip(args.src, args.out, args.tol, args.webm, tuple(exclude))
+    return matte_clip(
+        args.src,
+        args.out,
+        args.tol,
+        args.webm,
+        tuple(exclude),
+        parse_canvas(args.canvas),
+        parse_frames(args.frames),
+        parse_fps(args.fps),
+    )
 
 
 if __name__ == "__main__":

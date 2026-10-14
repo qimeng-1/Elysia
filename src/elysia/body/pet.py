@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import sqlite3
 import time
 from pathlib import Path
@@ -58,6 +59,33 @@ ZOOM_MAX = 3.0
 ZOOM_STEP = 1.1
 WINDOW_PADDING = 30  # 窗口边距（防浮动裁剪）
 CLICK_DRAG_THRESHOLD_PX = 5  # 鼠标移动量超过此值视为拖拽而非点击
+
+# ── 动画编排（借鉴 dsh-pet 的 animations / animationWeights 设计）──────────
+# 待机池**带权重**（对应 dsh-pet 的 `animationWeights`）。
+# 权重不是平摊的：`idle-open` 是绝对主力——睁眼待机占待机绝大部分时间；
+# 若平摊，闭眼的 `idle` 会占 1/5，把"睁眼"的改进抵消掉。
+IDLE_WEIGHTS: dict[str, int] = {
+    "idle-open": 8,  # 睁眼待机呼吸：主力
+    "idle": 2,  # 闭眼呼吸：偶尔打个盹
+    "look-around": 2,  # 东张西望
+    "think": 2,  # 发呆思考
+    "settle": 1,  # 归位站定
+}
+# 待机轮换的间隔区间（秒）；有随机性才不会像节拍器
+IDLE_SWITCH_MIN_S = 18.0
+IDLE_SWITCH_MAX_S = 45.0
+# 点按时的回应池（随机抽一个）
+CLICK_POOL = ("cheer", "wave", "shy", "surprise", "pout")
+# **气息状态 → 片段池**。这一层与 dsh-pet 的根本区别：它接的是 DSH 的工作状态/余额，
+# 我们接的是**她自己的灵魂状态**（`_map_state_to_animation` 的输出）。
+# 素材不全时自动降级：池里找不到的片段会被跳过，全都没有就保持现状。
+STATE_CLIPS: dict[str, tuple[str, ...]] = {
+    "away": ("sleep", "miss", "idle-open"),
+    "unhappy": ("sad", "tired", "idle-open"),
+    "tired": ("tired", "settle", "idle-open"),
+    "happy": ("cheer", "wave", "idle-open"),
+    "idle": tuple(IDLE_WEIGHTS),
+}
 
 # ── 情绪参数预设（由灵魂状态映射）────────────────────
 # breath_speed: 呼吸频率  |  sway_speed: 摇摆频率
@@ -293,7 +321,9 @@ class _CharacterWidget(QWidget):
         rot = self._cur["sway_amp"] * math.sin(self._phase_sway)
         float_y = self._cur["float_amp"] * math.sin(self._float_phase)
 
-        frame = self._player.current() if self._player is not None else None
+        frame, prev, alpha = (
+            self._player.current_blend() if self._player is not None else (None, None, 1.0)
+        )
         pixmap = frame if frame is not None else self._pixmap
         if pixmap.isNull():
             return
@@ -306,7 +336,17 @@ class _CharacterWidget(QWidget):
         t.translate(-pw / 2, -ph / 2)
 
         painter.setTransform(t)
+        # 交叉淡入淡出：旧帧先以 1-alpha 淡出，新帧再以 alpha 淡入。
+        # 素材越少，这一步对"过渡自然度"的提升越明显。
+        if prev is not None and not prev.isNull() and alpha < 1.0:
+            painter.setOpacity(1.0 - alpha)
+            if prev.size() == pixmap.size():
+                painter.drawPixmap(0, 0, prev)
+            else:  # 尺寸不同（例如换服装）：按中心对齐叠画
+                painter.drawPixmap((pw - prev.width()) // 2, (ph - prev.height()) // 2, prev)
+        painter.setOpacity(alpha)
         painter.drawPixmap(0, 0, pixmap)
+        painter.setOpacity(1.0)
 
     def _paint_fallback(self, painter: QPainter) -> None:
         """无角色图时的降级心跳光效。"""
@@ -347,6 +387,9 @@ class PetWindow(QMainWindow):
         self._drag_global_pos = QPoint()
         self._happy_until = 0.0
         self._last_soul_payload: dict[str, Any] | None = None
+        # 动画编排状态（待机轮换 + 状态驱动）
+        self._idle_next_switch = 0.0
+        self._last_state_clip = ""
 
         # ── 角色素材：优先序列帧（服装包），其次旧单张立绘 ──
         pixmap = QPixmap(str(_CHAR_PATH))
@@ -613,8 +656,10 @@ class PetWindow(QMainWindow):
     # ── 每帧（灵魂状态轮询） ────────────────────────
 
     def _tick(self) -> None:
-        # 纯桌宠模式：不读灵魂状态（也就不需要数据库连接）
+        # 纯桌宠模式：不读灵魂状态（也就不需要数据库连接）。
+        # 但**待机轮换是纯本地行为**，照常跑——她一个人的时候也会换姿势。
         if self._standalone:
+            self._maybe_rotate_clip("idle")
             return
         try:
             payload = self._latest_soul_payload()
@@ -630,6 +675,8 @@ class PetWindow(QMainWindow):
             if time.time() < self._happy_until:
                 anim_state = "happy"
 
+            self._maybe_rotate_clip(anim_state)
+
             self._canvas.update_state(
                 anim_state=anim_state,
                 distress=payload.get("distress", False),
@@ -644,6 +691,43 @@ class PetWindow(QMainWindow):
                 self._bubble.hide()
         except Exception:
             pass
+
+    def _maybe_rotate_clip(self, anim_state: str) -> None:
+        """**状态驱动选片段 + 待机池轮换**（借鉴 dsh-pet 的动画池设计）。
+
+        两条规则：
+
+        1. **状态变了** → 切到该状态对应的片段池里的一个（池里没有的片段自动跳过，
+           全都没有就保持现状——素材不全时**优雅降级**，不会白屏也不会报错）
+        2. **状态没变但待机够久** → 在待机池里换个片段，让她不那么单调
+
+        与 dsh-pet 的根本区别：它接的是 DSH 的工作状态/余额，我们接的是**她自己的灵魂状态**。
+        """
+        player = self._clip_player
+        if player is None:
+            return
+        now = time.time()
+
+        if anim_state != self._last_state_clip:
+            pool = [c for c in STATE_CLIPS.get(anim_state, ()) if player.has_clip(c)]
+            self._last_state_clip = anim_state
+            if pool:
+                player.set_clip(random.choice(pool))
+            self._idle_next_switch = now + random.uniform(IDLE_SWITCH_MIN_S, IDLE_SWITCH_MAX_S)
+            return
+
+        if now < self._idle_next_switch:
+            return
+        current = player.current_clip_id()
+        idle_pool = {c: w for c, w in IDLE_WEIGHTS.items() if player.has_clip(c)}
+        if current not in idle_pool:
+            # 她正在播非待机片段（点击回应等），等它自然结束再轮换
+            self._idle_next_switch = now + 3.0
+            return
+        picks = {c: w for c, w in idle_pool.items() if c != current}
+        if picks:
+            player.set_clip(random.choices(list(picks), weights=list(picks.values()), k=1)[0])
+        self._idle_next_switch = now + random.uniform(IDLE_SWITCH_MIN_S, IDLE_SWITCH_MAX_S)
 
     def _map_state_to_animation(self, payload: dict[str, Any]) -> str:
         if payload.get("distress"):
@@ -735,10 +819,12 @@ class PetWindow(QMainWindow):
     # ── 交互 ──────────────────────────────────────────
 
     def _on_character_click(self) -> None:
-        """点击角色 → 播"点击回应"动画 + 物理弹跳 + 交互事件。"""
-        # 序列帧优先：有 cheer 片段就演她自己的反应（物理弹跳作为叠加层继续生效）
+        """点击角色 → 从**回应池**里随机播一个 + 物理弹跳 + 交互事件。"""
+        # 回应池随机抽（素材越全越丰富；池里没有的自动跳过）
         if self._clip_player is not None:
-            self._clip_player.play_once("cheer")
+            available = [c for c in CLICK_POOL if self._clip_player.has_clip(c)]
+            if available:
+                self._clip_player.play_once(random.choice(available))
         self._write_interaction("（点击）")
         self._happy_until = time.time() + CLICK_HAPPY_S
         self._canvas.poke()

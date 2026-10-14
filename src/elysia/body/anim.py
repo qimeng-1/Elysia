@@ -22,10 +22,26 @@ from pathlib import Path
 from PySide6.QtGui import QPixmap
 
 DEFAULT_FPS = 24.0
+# 交叉淡入淡出的时长（秒）。
+# **为什么需要**：素材越少，硬切的"啪"越明显。实测待机→点击回应是硬切时观感很跳；
+# 在切换时把旧片段淡出、新片段淡入，即使只有两段动画，过渡也会顺很多。
+# 用**秒**而不是"帧数"：按帧数会让淡出时长随渲染 tick 频率变化（脆弱）。
+FADE_SECONDS = 0.3
 # 片段命名约定：这些前缀是"播一次就回待机"，其余默认循环
-ONCE_CLIP_PREFIXES = ("cheer", "wave", "shy", "drag", "land", "poke", "surprise")
-# 优先当待机用的片段名
-IDLE_CLIP_PREFIXES = ("idle", "wait", "breathe")
+ONCE_CLIP_PREFIXES = (
+    "notice",
+    "settle",
+    "land",
+    "wave",
+    "cheer",
+    "shy",
+    "surprise",
+    "pout",
+    "poke",
+    "click",
+)
+# 优先当待机用的片段名（**睁眼待机排最前**：它占待机 90% 的时间）
+IDLE_CLIP_PREFIXES = ("idle-open", "idle", "wait", "breathe")
 
 
 @dataclass
@@ -36,6 +52,7 @@ class Clip:
     clip_id: str
     fps: float
     frames: list[QPixmap] = field(default_factory=list)
+    suggest_ping_pong: bool = False
 
     @property
     def frame_count(self) -> int:
@@ -45,6 +62,15 @@ class Clip:
     def is_once(self) -> bool:
         """单次片段（播完回待机）还是循环片段。"""
         return self.clip_id.startswith(ONCE_CLIP_PREFIXES)
+
+    @property
+    def ping_pong(self) -> bool:
+        """是否用**乒乓**（正放 + 倒放）播放。
+
+        对"循环不干净"的循环类片段，乒乓**天然无缝**：实测 `被拎起悬空` 的
+        首末剪影差 26.74（正常要求 < 3），正放到底再倒放回来就没有接缝。
+        """
+        return self.suggest_ping_pong and not self.is_once
 
     @property
     def frame_interval_s(self) -> float:
@@ -107,11 +133,13 @@ class ClipLibrary:
             return None
 
         fps = DEFAULT_FPS
+        ping_pong = False
         manifest_path = clip_dir / "manifest.json"
         if manifest_path.is_file():
             try:
                 data = json.loads(manifest_path.read_text(encoding="utf-8"))
                 fps = float(data.get("fps", DEFAULT_FPS) or DEFAULT_FPS)
+                ping_pong = bool(data.get("suggest_ping_pong", False))
             except (OSError, ValueError):
                 pass  # manifest 坏了不影响播放，用默认帧率
 
@@ -119,7 +147,13 @@ class ClipLibrary:
         frames = [f for f in frames if not f.isNull()]
         if not frames:
             return None
-        return Clip(costume=costume, clip_id=clip_id, fps=fps, frames=frames)
+        return Clip(
+            costume=costume,
+            clip_id=clip_id,
+            fps=fps,
+            frames=frames,
+            suggest_ping_pong=ping_pong,
+        )
 
 
 class ClipPlayer:
@@ -137,6 +171,11 @@ class ClipPlayer:
         self._current: Clip | None = None
         self._index = 0
         self._acc = 0.0
+        self._dir = 1  # 乒乓播放方向（+1 正放 / -1 倒放）
+        # 交叉淡入淡出：切换片段时保留旧片段与剩余淡出**秒数**
+        self._prev: Clip | None = None
+        self._prev_index = 0
+        self._fade_left_s = 0.0
 
         costumes = library.costumes()
         self._costume = costume if costume in costumes else (costumes[0] if costumes else "")
@@ -169,10 +208,30 @@ class ClipPlayer:
     def current_clip_id(self) -> str:
         return self._current.clip_id if self._current is not None else ""
 
+    def has_clip(self, clip_id: str) -> bool:
+        """这套服装里有没有这个片段（素材不全时用于**优雅降级**）。"""
+        return bool(self._costume) and clip_id in self._library.clips(self._costume)
+
+    def clip_ids(self) -> list[str]:
+        return self._library.clips(self._costume) if self._costume else []
+
     def current(self) -> QPixmap | None:
         if self._current is None or not self._current.frames:
             return None
         return self._current.frames[self._index % self._current.frame_count]
+
+    def current_blend(self) -> tuple[QPixmap | None, QPixmap | None, float]:
+        """返回 `(新帧, 旧帧, 新帧权重)`，供绘制层做交叉淡入淡出。
+
+        `alpha == 1.0`（或旧帧为 None）时直接画新帧即可；
+        否则先以 `1-alpha` 的不透明度画旧帧、再以 `alpha` 画新帧。
+        """
+        cur = self.current()
+        if self._prev is None or self._fade_left_s <= 0 or not self._prev.frames:
+            return cur, None, 1.0
+        prev = self._prev.frames[self._prev_index % self._prev.frame_count]
+        alpha = 1.0 - self._fade_left_s / FADE_SECONDS
+        return cur, prev, min(1.0, max(0.0, alpha))
 
     def frame_size(self) -> tuple[int, int]:
         """当前片段单帧尺寸（供窗口定尺寸用）；没有则 (0, 0)。"""
@@ -188,16 +247,33 @@ class ClipPlayer:
             return False
         self._acc += dt_s
         moved = False
+        # 淡出期间让旧片段继续走帧，过渡更"活"（而不是冻在某一帧上淡出）
+        if self._fade_left_s > 0:
+            self._fade_left_s = max(0.0, self._fade_left_s - dt_s)
+            if self._prev is not None and self._prev.frame_count > 1:
+                self._prev_index = (self._prev_index + 1) % self._prev.frame_count
         while self._acc >= clip.frame_interval_s:
             self._acc -= clip.frame_interval_s
-            self._index += 1
             moved = True
+            if clip.ping_pong:
+                # 乒乓：正放到尾再倒放回头，接缝天然消失（端点不重复播）
+                nxt = self._index + self._dir
+                if nxt >= clip.frame_count:
+                    self._dir = -1
+                    nxt = max(0, clip.frame_count - 2)
+                elif nxt < 0:
+                    self._dir = 1
+                    nxt = min(1, clip.frame_count - 1)
+                self._index = nxt
+                continue
+            self._index += 1
             if self._index >= clip.frame_count:
                 if clip.is_once and self._fallback is not None:
                     # 单次片段播完 → 回待机（不循环）
                     self._current = self._fallback
                     self._index = 0
                     self._acc = 0.0
+                    self._dir = 1
                     break
                 self._index %= clip.frame_count
         return moved
@@ -209,9 +285,11 @@ class ClipPlayer:
         clip = self._get(self._costume, clip_id)
         if clip is None:
             return False
+        self._start_fade(clip)
         self._current = clip
         self._index = 0
         self._acc = 0.0
+        self._dir = 1
         return True
 
     def play_once(self, clip_id_prefix: str) -> bool:
@@ -233,12 +311,21 @@ class ClipPlayer:
         if fallback is None:
             return False
         self._fallback = fallback
+        self._start_fade(fallback)
         self._current = fallback
         self._index = 0
         self._acc = 0.0
+        self._dir = 1
         return True
 
     # ── 内部 ──────────────────────────────────────────
+
+    def _start_fade(self, incoming: Clip) -> None:
+        """切片段时启动交叉淡入淡出（同一个片段则不动）。"""
+        if self._current is not None and self._current is not incoming:
+            self._prev = self._current
+            self._prev_index = self._index
+            self._fade_left_s = FADE_SECONDS
 
     def _get(self, costume: str, clip_id: str) -> Clip | None:
         key = (costume, clip_id)

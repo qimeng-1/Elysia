@@ -98,7 +98,13 @@ def test_timesense_no_negative_after_body_offline() -> None:
 
     # 身体在线时 body_away_s = 0
     assert ts.body_away_seconds() == 0.0
-    assert ts.presence_seconds() == 0.0  # 刚上线，在场时长为 0 而非负
+    # 刚上线，在场时长为 0 **而非负**。
+    # 注意：`SimulatedClock.now()` 会按 `speed` 跟随真实耗时（它与 `sleep()` 是一对，
+    # 见 clock.py 文档），所以从构造到这里真实过去的时间会体现为 presence。
+    # 实测：真实延迟 20ms ⇒ presence=0.016，断言 `== 0.0` 会**整套跑时随机失败**
+    # （单独跑则通过）。故断言"约等于 0 且非负"，容差取 1 秒（远超正常抖动）。
+    presence = ts.presence_seconds()
+    assert 0.0 <= presence < 1.0, f"presence={presence} 应为 ~0 且非负"
 
     # 触发离开（body_away_start_ts 由心跳循环设置）
     state.body_away_start_ts = T0

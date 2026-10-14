@@ -34,11 +34,21 @@ class SystemClock:
 
 
 class SimulatedClock:
-    """模拟时钟：虚拟时间推进，支持变速与跳时。
+    """模拟时钟：虚拟时间以 `speed` 倍速跟随真实时间，另支持跳时。
 
-    - speed：虚拟时间相对真实时间的流速（如 60.0 = 60 倍速）
-    - jump(seconds)：直接推进虚拟时间（模拟离线/时钟延迟）
-    - sleep(seconds)：按速度折算为真实等待，虚拟时间同步推进
+    **语义（自洽的一对）**：
+      - `now()`    ：`virtual += (距上次调用真实耗时) × speed`——"时间在流逝"
+      - `sleep(s)` ：真实等待 `s / speed`，虚拟推进 `s`
+      两者正好吻合：`(s / speed) × speed = s`，所以等待与读时不会互相矛盾。
+      - `jump(s)`  ：立即推进 `s`（模拟离线/时钟延迟）
+
+    ⚠️ **写测试要注意**：因为 `now()` 会跟着真实耗时走，同一个时钟上
+    "构造后隔了多久才读"会影响读数。所以**不要断言精确相等**——
+    实测 `test_timesense_no_negative_after_body_offline` 里的
+    `assert ts.presence_seconds() == 0.0` 单独跑通过、整套跑（机器有负载、
+    真实耗时变长）就失败。要断言"约等于 0"请用容差（见该测试的修法）。
+
+    本类只用于测试（生产走 `SystemClock`）。
     """
 
     def __init__(self, start_ts: float | None = None, *, speed: float = 1.0) -> None:

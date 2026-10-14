@@ -222,6 +222,15 @@ class ClipPlayer:
         """
         return self._current is not None and self._current.is_once
 
+    def is_static(self) -> bool:
+        """当前画面是不是"只有一张图"（静态立绘服装包就是单帧 `idle`）。
+
+        绘制层用它决定**要不要叠加物理呼吸/摇摆/浮动**：那些物理效果的本质是
+        "给静态立绘注入生命"，只有一张图时才有意义；素材本身已是真实动画时，
+        两层运动叠加会显得突兀（用户实测反馈）。
+        """
+        return self._current is None or self._current.frame_count <= 1
+
     def current(self) -> QPixmap | None:
         if self._current is None or not self._current.frames:
             return None

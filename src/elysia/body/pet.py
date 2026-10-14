@@ -181,6 +181,9 @@ class _CharacterWidget(QWidget):
         self._emotion = "idle"
         self._dragging = False
         self._last_tick_s = 0.0  # 上一次动画 tick 的墙钟时刻（算真实 dt）
+        # 物理待机层的**主增益**：静态立绘要它（1.0），真动画不要它（0.0）。
+        # 用增益而不是删代码，并且跟着 lerp 平滑过渡——切换时不会"跳"一下。
+        self._idle_gain = 1.0
 
         # fallback 状态变量
         self._beat_phase = 0.0
@@ -304,6 +307,12 @@ class _CharacterWidget(QWidget):
 
         # 参数平滑逼近目标（lerp）——按真实 dt 换算，否则提高帧率会让它变快
         k = 1.0 - (1.0 - 0.06) ** dt_ratio
+
+        # 物理待机层增益：素材本身有真实动画 ⇒ 目标 0（不叠加晃动）；
+        # 只有一张静态立绘 ⇒ 目标 1（物理层就是让静止画面活起来的东西）。
+        idle_gain_target = 1.0 if self._idle_physics_wanted() else 0.0
+        self._idle_gain += (idle_gain_target - self._idle_gain) * k
+
         for key in self._cur:
             self._cur[key] += (self._target[key] - self._cur[key]) * k
 
@@ -341,10 +350,14 @@ class _CharacterWidget(QWidget):
         """绘制角色（序列帧或单张立绘）+ 连续物理动画（呼吸缩放 + 摇摆 + 浮动 + 弹跳）。"""
         cw, ch = self.width(), self.height()
 
-        scale = self._cur["base_scale"] + 0.022 * math.sin(self._phase_breath) + self._bounce
+        scale = (
+            self._cur["base_scale"]
+            + 0.022 * self._idle_gain * math.sin(self._phase_breath)
+            + self._bounce
+        )
         scale *= self._scale
-        rot = self._cur["sway_amp"] * math.sin(self._phase_sway)
-        float_y = self._cur["float_amp"] * math.sin(self._float_phase)
+        rot = self._cur["sway_amp"] * self._idle_gain * math.sin(self._phase_sway)
+        float_y = self._cur["float_amp"] * self._idle_gain * math.sin(self._float_phase)
 
         frame, prev, alpha = (
             self._player.current_blend() if self._player is not None else (None, None, 1.0)
@@ -372,6 +385,18 @@ class _CharacterWidget(QWidget):
         painter.setOpacity(alpha)
         painter.drawPixmap(0, 0, pixmap)
         painter.setOpacity(1.0)
+
+    def _idle_physics_wanted(self) -> bool:
+        """还要不要叠加物理呼吸/摇摆/浮动。
+
+        **判据：画面是不是"只有一张图"。**
+        这层物理效果原本是给静态立绘注入生命的——只有一张图时它让画面活起来；
+        素材本身已经有真实的呼吸与身体运动时，两层运动叠加会显得突兀
+        （用户实测："呼吸晃动特别突兀"）。所以：真动画 ⇒ 关掉，静态立绘 ⇒ 保留。
+        """
+        if self._player is None:
+            return True  # 没有播放器（退回单张立绘）⇒ 需要物理层
+        return self._player.is_static()
 
     def _paint_fallback(self, painter: QPainter) -> None:
         """无角色图时的降级心跳光效。"""

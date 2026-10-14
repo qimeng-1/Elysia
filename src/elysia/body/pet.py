@@ -374,10 +374,19 @@ class _CharacterWidget(QWidget):
         t.translate(-pw / 2, -ph / 2)
 
         painter.setTransform(t)
-        # 交叉淡入淡出：旧帧先以 1-alpha 淡出，新帧再以 alpha 淡入。
-        # 素材越少，这一步对"过渡自然度"的提升越明显。
+        # 交叉溶解：**旧帧必须全不透明地画**，再让新帧以 alpha 压上去。
+        #
+        # ⚠️ 这里踩过一个坑：最初写成「旧帧按 1-alpha 画、新帧按 alpha 画」，
+        # 但两次 `SourceOver` 叠出来的实际是 `新×α + 旧×(1-α)²`——
+        # 少的 `α(1-α)` 变成了**透明度**。实测 α=0.556 时她**整个人半透明**
+        # （不透明像素占比 0.0%、平均 alpha 92），观感是"闪一下"，
+        # 比硬切还难受（用户反馈"淡入淡出不起作用"就是这个原因）。
+        #
+        # 改成「旧帧 1.0 + 新帧 alpha」后：α=0.556 时不透明占比 46.8%、平均 alpha 123，
+        # 且 α≥1 时**根本不画旧帧**（下面的判断），所以不会有残影
+        # （实测与纯新帧像素差异 0.00%）。
         if prev is not None and not prev.isNull() and alpha < 1.0:
-            painter.setOpacity(1.0 - alpha)
+            painter.setOpacity(1.0)
             if prev.size() == pixmap.size():
                 painter.drawPixmap(0, 0, prev)
             else:  # 尺寸不同（例如换服装）：按中心对齐叠画

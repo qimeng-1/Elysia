@@ -285,7 +285,11 @@ class ClipPlayer:
             self._index += 1
             if self._index >= clip.frame_count:
                 if clip.is_once and self._fallback is not None:
-                    # 单次片段播完 → 回待机（不循环）
+                    # 单次片段播完 → 回待机（不循环）。
+                    # **这里必须走交叉溶解**：早先直接改 `_current` 绕过了 `_start_fade`，
+                    # 于是"每次点击回应结束后回待机"都是**硬切**——而这是最常见的过渡，
+                    # 用户反馈的"衔接不流畅"很大一部分来自这里。
+                    self._start_fade(self._fallback)
                     self._current = self._fallback
                     self._index = 0
                     self._acc = 0.0

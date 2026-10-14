@@ -446,6 +446,7 @@ def matte_clip(
     canvas: tuple[int, int] | None = None,
     frames_range: tuple[int, int] | None = None,
     fps_override: float | None = None,
+    do_align_tail: bool = False,
 ) -> int:
     """抠图整段视频 → 统一裁切的 PNG 母版 + WebP 运行时序列 + manifest。"""
     frames = read_video_frames(src)
@@ -464,6 +465,16 @@ def matte_clip(
     print(f"  背景色 = {bg} | 容差 = {tol} | 帧数 = {len(frames)} | 播放 {fps:g}fps")
 
     cut = [cutout(f, bg, tol, exclude=exclude) for f in frames]
+    if do_align_tail:
+        keep = align_tail(frames, cut)
+        if keep < len(frames):
+            tail_a = _mean_diff(cut[0].getchannel("A"), cut[-1].getchannel("A"))
+            tail_b = _mean_diff(cut[0].getchannel("A"), cut[keep - 1].getchannel("A"))
+            print(
+                f"  收尾对齐：{len(frames)} → {keep} 帧"
+                f"（首尾剪影差 {tail_a:.2f} → {tail_b:.2f}，越小越容易无缝衔接）"
+            )
+            frames, cut = frames[:keep], cut[:keep]
     union = None
     for im in cut:
         # ⚠️ 必须只看 **alpha 通道**：RGBA 的 getbbox() 会连 RGB 一起算，
@@ -654,6 +665,40 @@ def parse_frames(spec: str) -> tuple[int, int] | None:
     return start, end
 
 
+def align_tail(
+    frames: Sequence[Image.Image],
+    cut: Sequence[Image.Image],
+    search_ratio: float = 0.5,
+) -> int:
+    """把**收尾裁到"最接近首帧姿势"的那一帧**，返回裁剪后的帧数。
+
+    **为什么这才是"衔接自然"的关键**：dsh-pet 的无缝衔接**不是靠交叉淡入淡出**，
+    而是因为它的 97 段素材是同一个画师按同一套角色规范画的——
+    **每段都从同一个中立姿势开始、也回到那里结束**，所以在片段边界上硬切也看不出接缝。
+
+    我们的素材全是**从同一张首帧生成**的，所以"起点姿势"天然一致
+    （frame 0 = 中立姿势）；但每段的**收尾姿势各不相同**（AI 停在哪就是哪）。
+    把尾巴裁到最像首帧的那一帧，就把这套素材变成"首尾同姿势"，
+    片段之间的硬切也就自然顺了——这比任何混合都更接近 dsh-pet 的效果。
+
+    只在片段后半段搜索（`search_ratio`），避免把动作本身裁掉。
+    """
+    n = len(cut)
+    if n < 4:
+        return n
+    ref_a = cut[0].getchannel("A")
+    ref_rgb = frames[0].convert("RGB")
+    start = max(1, int(n * (1.0 - search_ratio)))
+    best_i, best_d = n - 1, float("inf")
+    for i in range(start, n):
+        d = _mean_diff(ref_a, cut[i].getchannel("A")) + _mean_diff(
+            ref_rgb, frames[i].convert("RGB")
+        )
+        if d < best_d:
+            best_d, best_i = d, i
+    return best_i + 1
+
+
 def parse_canvas(spec: str) -> tuple[int, int] | None:
     """解析 `--canvas WxH`；空串返回 None，格式错直接退出（不静默忽略）。"""
     if not spec.strip():
@@ -689,6 +734,12 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         metavar="N",
         help="**播放帧率**覆盖（与源帧率解耦）：裁出的短片段按原速会过快，用它调慢",
+    )
+    p_mat.add_argument(
+        "--align-tail",
+        action="store_true",
+        help="把收尾裁到最接近首帧姿势的一帧（**单次片段必用**）：dsh-pet 式的无缝衔接"
+        "靠的是「每段首尾同姿势」，不是靠混合",
     )
     p_mat.add_argument(
         "--frames",
@@ -745,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         parse_canvas(args.canvas),
         parse_frames(args.frames),
         parse_fps(args.fps),
+        args.align_tail,
     )
 
 

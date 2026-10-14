@@ -38,3 +38,12 @@ api_keys.*
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# ── 角色素材（P4b 之后新增）────────────────────────────────────
+# 桌宠的服装包（抠好的序列帧）**不入库**，两条理由：
+#   1. 版权：形象素材来自游戏官方美术与同人图，提交进仓库（尤其是公开仓库）风险明确
+#   2. 体积：一段 4 秒动画的母版 PNG 序列就有 ~18 MB，10 段就上百 MB
+# 约定与生成方式见 assets/pet/README.md；用 scripts/asset_pipeline.py 从视频生成。
+assets/pet/costumes/
+# 素材流水线的中间产物
+assets/pet/_work/

@@ -41,8 +41,12 @@ from PySide6.QtWidgets import (
 )
 
 # ── 路径 ──────────────────────────────────────────────
+from elysia.body.anim import ClipLibrary, ClipPlayer
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent  # elysia/
 _CHAR_PATH = _PROJECT_ROOT / "assets" / "pet" / "character.png"
+# 服装包目录（不入库；由 scripts/asset_pipeline.py 生成，见 assets/pet/README.md）
+_COSTUMES_DIR = _PROJECT_ROOT / "assets" / "pet" / "costumes"
 
 # ── 常量 ──────────────────────────────────────────────
 POLL_INTERVAL_MS = 200  # 5Hz 灵魂状态轮询
@@ -107,11 +111,18 @@ class _CharacterWidget(QWidget):
     有角色图 → 连续物理动画；无角色图 → fallback 心跳光效。
     """
 
-    def __init__(self, parent: QWidget, pixmap: QPixmap) -> None:
+    def __init__(
+        self,
+        parent: QWidget,
+        pixmap: QPixmap,
+        player: ClipPlayer | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._pixmap = pixmap
-        self._valid = not pixmap.isNull()
+        # 序列帧播放器（P4b）：有它就用素材动画，没有就退回单张立绘 + 物理动画
+        self._player = player
+        self._valid = not pixmap.isNull() or (player is not None and player.available)
         self._scale = 1.0
 
         # 当前动画参数
@@ -220,11 +231,16 @@ class _CharacterWidget(QWidget):
     # ── 内部动画 ──────────────────────────────────────
 
     def _anim_tick(self) -> None:
+        dt = ANIM_INTERVAL_MS / 1000.0
+
+        # 序列帧推进：**与物理动画叠加**——素材给"她在演什么"，物理给"她怎么晃"。
+        # 放在最前，且不受 dragging 分支影响：拖拽时素材也在走（手感更连续）。
+        if self._player is not None:
+            self._player.advance(dt)
+
         if not self._valid:
             self.update()
             return
-
-        dt = ANIM_INTERVAL_MS / 1000.0
 
         if self._dragging:
             self._bounce *= 0.88
@@ -269,7 +285,7 @@ class _CharacterWidget(QWidget):
         painter.end()
 
     def _paint_character(self, painter: QPainter) -> None:
-        """绘制角色（连续物理动画：呼吸缩放 + 摇摆 + 浮动 + 弹跳）。"""
+        """绘制角色（序列帧或单张立绘）+ 连续物理动画（呼吸缩放 + 摇摆 + 浮动 + 弹跳）。"""
         cw, ch = self.width(), self.height()
 
         scale = self._cur["base_scale"] + 0.022 * math.sin(self._phase_breath) + self._bounce
@@ -277,7 +293,11 @@ class _CharacterWidget(QWidget):
         rot = self._cur["sway_amp"] * math.sin(self._phase_sway)
         float_y = self._cur["float_amp"] * math.sin(self._float_phase)
 
-        pw, ph = self._pixmap.width(), self._pixmap.height()
+        frame = self._player.current() if self._player is not None else None
+        pixmap = frame if frame is not None else self._pixmap
+        if pixmap.isNull():
+            return
+        pw, ph = pixmap.width(), pixmap.height()
 
         t = QTransform()
         t.translate(cw / 2, ch / 2 + float_y)
@@ -286,7 +306,7 @@ class _CharacterWidget(QWidget):
         t.translate(-pw / 2, -ph / 2)
 
         painter.setTransform(t)
-        painter.drawPixmap(0, 0, self._pixmap)
+        painter.drawPixmap(0, 0, pixmap)
 
     def _paint_fallback(self, painter: QPainter) -> None:
         """无角色图时的降级心跳光效。"""
@@ -304,8 +324,17 @@ class _CharacterWidget(QWidget):
 class PetWindow(QMainWindow):
     """无边框透明置顶桌宠窗口（仅角色可见，右键菜单控制）。"""
 
-    def __init__(self, state_db_path: Path, heartbeat_db_path: Path) -> None:
+    def __init__(
+        self,
+        state_db_path: Path,
+        heartbeat_db_path: Path,
+        *,
+        standalone: bool = False,
+    ) -> None:
         super().__init__()
+        # standalone（"纯桌宠"模式）：**不打开任何数据库、不写任何交互记录**。
+        # 用于"只想看看桌宠长什么样"的场景——灵魂在不在都不影响她动。
+        self._standalone = standalone
         self._state_db_path = state_db_path
         self._heartbeat_db_path = heartbeat_db_path
         self._conn_state: sqlite3.Connection | None = None
@@ -319,9 +348,13 @@ class PetWindow(QMainWindow):
         self._happy_until = 0.0
         self._last_soul_payload: dict[str, Any] | None = None
 
-        # ── 加载角色图 ──
+        # ── 角色素材：优先序列帧（服装包），其次旧单张立绘 ──
         pixmap = QPixmap(str(_CHAR_PATH))
-        self._has_character = not pixmap.isNull()
+        library = ClipLibrary(_COSTUMES_DIR)
+        self._clip_player: ClipPlayer | None = ClipPlayer(library) if library.costumes() else None
+        self._has_character = not pixmap.isNull() or (
+            self._clip_player is not None and self._clip_player.available
+        )
 
         # ── 窗口设置 ──
         self.setWindowTitle("Elysia")
@@ -329,7 +362,14 @@ class PetWindow(QMainWindow):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
-        if self._has_character:
+        # 窗口尺寸按**素材实际尺寸**定：优先当前动画帧，其次旧立绘
+        frame_w, frame_h = (0, 0)
+        if self._clip_player is not None:
+            frame_w, frame_h = self._clip_player.frame_size()
+        if frame_w and frame_h:
+            pw = frame_w + WINDOW_PADDING * 2
+            ph = frame_h + WINDOW_PADDING * 2
+        elif self._has_character:
             pw = pixmap.width() + WINDOW_PADDING * 2
             ph = pixmap.height() + WINDOW_PADDING * 2
         else:
@@ -337,7 +377,7 @@ class PetWindow(QMainWindow):
         self.setFixedSize(pw, ph)
 
         # ── 角色画布 ──
-        self._canvas = _CharacterWidget(self, pixmap)
+        self._canvas = _CharacterWidget(self, pixmap, self._clip_player)
         self.setCentralWidget(self._canvas)
 
         # ── 表达气泡（P2：LLM 开口的文本显示） ──
@@ -543,6 +583,9 @@ class PetWindow(QMainWindow):
     # ── 每帧（灵魂状态轮询） ────────────────────────
 
     def _tick(self) -> None:
+        # 纯桌宠模式：不读灵魂状态（也就不需要数据库连接）
+        if self._standalone:
+            return
         try:
             payload = self._latest_soul_payload()
             if payload is None:
@@ -662,7 +705,10 @@ class PetWindow(QMainWindow):
     # ── 交互 ──────────────────────────────────────────
 
     def _on_character_click(self) -> None:
-        """点击角色 → 触发交互事件 + 即时 happy 反馈。"""
+        """点击角色 → 播"点击回应"动画 + 物理弹跳 + 交互事件。"""
+        # 序列帧优先：有 cheer 片段就演她自己的反应（物理弹跳作为叠加层继续生效）
+        if self._clip_player is not None:
+            self._clip_player.play_once("cheer")
         self._write_interaction("（点击）")
         self._happy_until = time.time() + CLICK_HAPPY_S
         self._canvas.poke()
@@ -679,6 +725,10 @@ class PetWindow(QMainWindow):
         self._canvas.set_emotion("happy")
 
     def _write_interaction(self, text: str) -> None:
+        # 纯桌宠模式：**不写库**。交互记录是"给灵魂的输入通道"，
+        # 只看桌宠时不该在她的状态库里留下痕迹。
+        if self._standalone:
+            return
         payload = json.dumps({"ts": time.time(), "text": text})
         self.conn.execute(
             "INSERT OR REPLACE INTO kv (key, value) VALUES ('interaction', ?)",
@@ -687,9 +737,38 @@ class PetWindow(QMainWindow):
         self.conn.commit()
 
 
-def run_pet(state_db_path: Path, heartbeat_db_path: Path) -> None:
-    """启动桌宠（独立进程入口）。"""
+def run_pet(
+    state_db_path: Path,
+    heartbeat_db_path: Path,
+    *,
+    standalone: bool = False,
+) -> None:
+    """启动桌宠（独立进程入口）。
+
+    `standalone=True` = **纯桌宠**：不打开数据库、不读写她的状态，
+    只把服装包里的序列帧演出来。用于"只想看看桌宠长什么样"。
+    """
     app = QApplication([])
-    window = PetWindow(state_db_path, heartbeat_db_path)
+    window = PetWindow(state_db_path, heartbeat_db_path, standalone=standalone)
     window.show()
     app.exec()
+
+
+def _main() -> None:
+    """`python -m elysia.body.pet` —— 默认就是**纯桌宠**（不涉及灵魂）。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Elysia 桌宠窗口（默认纯桌宠，不涉及灵魂）")
+    parser.add_argument("--state-db", type=Path, default=Path("data/state.db"))
+    parser.add_argument("--heartbeat-db", type=Path, default=Path("data/heartbeat.db"))
+    parser.add_argument(
+        "--with-soul-data",
+        action="store_true",
+        help="同时读取灵魂状态（气泡/表情随她真实状态变化）；默认不读",
+    )
+    args = parser.parse_args()
+    run_pet(args.state_db, args.heartbeat_db, standalone=not args.with_soul_data)
+
+
+if __name__ == "__main__":
+    _main()

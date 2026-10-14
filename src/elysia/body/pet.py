@@ -59,6 +59,13 @@ ZOOM_MAX = 3.0
 ZOOM_STEP = 1.1
 WINDOW_PADDING = 30  # 窗口边距（防浮动裁剪）
 CLICK_DRAG_THRESHOLD_PX = 5  # 鼠标移动量超过此值视为拖拽而非点击
+# 松手落地时的压缩力度（比点击轻：落地是"顿一下"，点击是"Q 弹"）
+LAND_STRENGTH = 0.10
+# **拖拽状态片段**：不是"动作"，而是按住拖动期间的物理反应
+# （对应 dsh-pet 的 `animations.drag` 池——它的 drag 池也是"被无形抓起悬空"的姿势）。
+# 按住时一直播、松手就结束；`land` 在松手瞬间播一次作为落地缓冲。
+DRAG_CLIP = "grab"
+LAND_CLIP = "land"
 
 # ── 动画编排（借鉴 dsh-pet 的 animations / animationWeights 设计）──────────
 # 待机池**带权重**（对应 dsh-pet 的 `animationWeights`）。
@@ -387,9 +394,10 @@ class PetWindow(QMainWindow):
         self._drag_global_pos = QPoint()
         self._happy_until = 0.0
         self._last_soul_payload: dict[str, Any] | None = None
-        # 动画编排状态（待机轮换 + 状态驱动）
+        # 动画编排状态（待机轮换 + 状态驱动 + 拖拽状态片段）
         self._idle_next_switch = 0.0
         self._last_state_clip = ""
+        self._drag_clip_active = False
 
         # ── 角色素材：优先序列帧（服装包），其次旧单张立绘 ──
         pixmap = QPixmap(str(_CHAR_PATH))
@@ -497,6 +505,9 @@ class PetWindow(QMainWindow):
         if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
             delta = event.globalPosition().toPoint() - self._drag_global_pos
             if delta.manhattanLength() > CLICK_DRAG_THRESHOLD_PX:
+                if not self._moved:
+                    # 移动量越过阈值 ⇒ 判定为真拖拽，切到"被拎起悬空"
+                    self._begin_drag_clip()
                 self._moved = True
             new_pos = event.globalPosition().toPoint() - self._drag_offset
             self.move(new_pos)
@@ -506,7 +517,9 @@ class PetWindow(QMainWindow):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
             self._canvas.set_emotion("idle")
-            if not self._moved:
+            if self._moved:
+                self._end_drag_clip()
+            else:
                 self._on_character_click()
             event.accept()
 
@@ -692,6 +705,42 @@ class PetWindow(QMainWindow):
         except Exception:
             pass
 
+    def _begin_drag_clip(self) -> None:
+        """拖拽开始 → 播「被拎起悬空」。
+
+        **`grab` 不是动作，是拖拽状态下的物理反应**（对应 dsh-pet 的 `animations.drag`）：
+        按住拖动期间一直播、松手就结束，所以它**不该出现在待机池/回应池里**。
+        它的循环不干净（首末剪影差 26.74），播放器会自动改用**乒乓**播放，接缝天然消失。
+        """
+        if self._clip_player is None:
+            return
+        if self._clip_player.has_clip(DRAG_CLIP):
+            self._drag_clip_active = self._clip_player.set_clip(DRAG_CLIP)
+        if self._drag_clip_active:
+            # 拖拽期间别被待机轮换打断
+            self._idle_next_switch = time.time() + 30.0
+
+    def _end_drag_clip(self) -> None:
+        """松手 → 有落地片段就播一次落地缓冲，否则直接回待机。"""
+        if self._clip_player is None or not self._drag_clip_active:
+            return
+        self._drag_clip_active = False
+        if not self._clip_player.play_once(LAND_CLIP):
+            idle = self._idle_clip()
+            if idle:
+                self._clip_player.set_clip(idle)
+        self._canvas.poke(LAND_STRENGTH)  # 落地"顿一下"
+        self._idle_next_switch = time.time() + random.uniform(IDLE_SWITCH_MIN_S, IDLE_SWITCH_MAX_S)
+
+    def _idle_clip(self) -> str:
+        """挑一个待机片段（按 `IDLE_WEIGHTS` 的顺序取第一个可用的）。"""
+        if self._clip_player is None:
+            return ""
+        for cid in IDLE_WEIGHTS:
+            if self._clip_player.has_clip(cid):
+                return cid
+        return ""
+
     def _maybe_rotate_clip(self, anim_state: str) -> None:
         """**状态驱动选片段 + 待机池轮换**（借鉴 dsh-pet 的动画池设计）。
 
@@ -705,6 +754,13 @@ class PetWindow(QMainWindow):
         """
         player = self._clip_player
         if player is None:
+            return
+        # **拖拽状态片段优先**：按住拖动期间不能被待机轮换或状态映射顶掉。
+        # （状态变更分支原来绕过了这个保护，实测确实会把 `grab` 顶回待机。）
+        if self._drag_clip_active:
+            return
+        # 回应演到一半也不打断——等它自然结束（播放器会自动回待机）再轮换
+        if player.is_playing_once():
             return
         now = time.time()
 

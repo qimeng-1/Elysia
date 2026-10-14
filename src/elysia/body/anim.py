@@ -215,6 +215,13 @@ class ClipPlayer:
     def clip_ids(self) -> list[str]:
         return self._library.clips(self._costume) if self._costume else []
 
+    def is_playing_once(self) -> bool:
+        """当前是否正在播"单次"片段（点按回应等）——播完会自动回到待机。
+
+        编排器用它**避免把演到一半的回应打断**。
+        """
+        return self._current is not None and self._current.is_once
+
     def current(self) -> QPixmap | None:
         if self._current is None or not self._current.frames:
             return None

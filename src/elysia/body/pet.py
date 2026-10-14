@@ -51,7 +51,10 @@ _COSTUMES_DIR = _PROJECT_ROOT / "assets" / "pet" / "costumes"
 
 # ── 常量 ──────────────────────────────────────────────
 POLL_INTERVAL_MS = 200  # 5Hz 灵魂状态轮询
-ANIM_INTERVAL_MS = 33  # ~30fps 动画渲染
+ANIM_INTERVAL_MS = 16  # ~60fps 动画渲染
+# 物理参数（lerp 系数、弹跳衰减）原本是按"每 1/30 秒一跳"标定的。
+# 提高渲染帧率时必须按比例换算，否则呼吸/摇摆/弹跳会跟着**变快一倍**。
+ANIM_REFERENCE_DT_S = 1.0 / 30.0
 CLICK_HAPPY_S = 2.0  # 点击后 happy 覆盖持续时长
 BUBBLE_SHOW_S = 6.0  # 表达气泡显示时长
 ZOOM_MIN = 0.3
@@ -177,16 +180,20 @@ class _CharacterWidget(QWidget):
         self._bounce = 0.0
         self._emotion = "idle"
         self._dragging = False
+        self._last_tick_s = 0.0  # 上一次动画 tick 的墙钟时刻（算真实 dt）
 
         # fallback 状态变量
         self._beat_phase = 0.0
         self._mode = "present"
         self._distress = False
 
-        # 动画定时器 30fps
+        # 动画定时器（~60fps）。
+        # **必须用 PreciseTimer**：Qt 默认是 CoarseTimer，实测有 ±5% 的间隔偏差。
         self._anim_timer = QTimer(self)
+        self._anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._anim_timer.timeout.connect(self._anim_tick)
         self._anim_timer.start(ANIM_INTERVAL_MS)
+        self._last_tick_s = time.perf_counter()
 
         if self._valid:
             self.setMinimumSize(200, 200)
@@ -268,7 +275,16 @@ class _CharacterWidget(QWidget):
     # ── 内部动画 ──────────────────────────────────────
 
     def _anim_tick(self) -> None:
-        dt = ANIM_INTERVAL_MS / 1000.0
+        # **用真实流逝时间**，而不是固定间隔。
+        # 固定 dt 会让定时器的偏差直接变成播放速度误差（实测 CoarseTimer 偏差 5%
+        # ⇒ 动画快 5%）。dsh-pet 用 `<video>`，时间基准是墙钟，所以永不越播越偏。
+        now = time.perf_counter()
+        dt = now - self._last_tick_s
+        self._last_tick_s = now
+        if dt <= 0.0 or dt > 0.5:  # 首帧 / 长时间挂起后回归：夹一下，别一次性跳一大段
+            dt = ANIM_INTERVAL_MS / 1000.0
+        # 物理参数按"每 1/30 秒"标定，这里按真实 dt 换算
+        dt_ratio = dt / ANIM_REFERENCE_DT_S
 
         # 序列帧推进：**与物理动画叠加**——素材给"她在演什么"，物理给"她怎么晃"。
         # 放在最前，且不受 dragging 分支影响：拖拽时素材也在走（手感更连续）。
@@ -280,14 +296,14 @@ class _CharacterWidget(QWidget):
             return
 
         if self._dragging:
-            self._bounce *= 0.88
+            self._bounce *= 0.88**dt_ratio
             if self._bounce < 0.0005:
                 self._bounce = 0.0
             self.update()
             return
 
-        # 参数平滑逼近目标（lerp）
-        k = 0.06
+        # 参数平滑逼近目标（lerp）——按真实 dt 换算，否则提高帧率会让它变快
+        k = 1.0 - (1.0 - 0.06) ** dt_ratio
         for key in self._cur:
             self._cur[key] += (self._target[key] - self._cur[key]) * k
 
@@ -297,7 +313,7 @@ class _CharacterWidget(QWidget):
         self._float_phase += 0.7 * dt
 
         # 弹跳衰减
-        self._bounce *= 0.88
+        self._bounce *= 0.88**dt_ratio
         if self._bounce < 0.0005:
             self._bounce = 0.0
 

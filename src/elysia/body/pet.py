@@ -18,11 +18,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QBrush,
     QColor,
+    QGuiApplication,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -74,6 +75,16 @@ DRAG_CLIP_CANDIDATES = ("float", "grab")
 LAND_CLIP = "land"
 # 鼠标移入时的"预备"片段：抬头注意到你（动作之前的过渡）
 NOTICE_CLIP = "notice"
+
+# ── 漫游（对应 dsh-pet 的 `moves` 槽位）──────────────────────────────
+# 每隔一段时间，她在桌面上小跑一段。**独立于灵魂状态**：纯桌宠模式下也会漫游。
+WANDER_CLIP = "run"
+WANDER_TICK_MS = 33  # 位移刷新 ~30fps（灵魂轮询是 5Hz，用来移动窗口会一顿一顿）
+WANDER_MIN_S = 70.0  # 两次漫游的最小间隔
+WANDER_MAX_S = 200.0
+WANDER_MIN_PX = 90  # 单次移动距离
+WANDER_MAX_PX = 260
+WANDER_SPEED_PX_S = 110.0  # 移动速度（要和她跑步的步频大致相称，否则会"滑步"）
 # `notice` 的冷却：鼠标在桌面上来回移动会**反复进出**窗口，
 # 没有冷却就会不停重播"注意到你"、把待机轮换和整体节奏全打乱（用户实测反馈）。
 NOTICE_COOLDOWN_S = 25.0
@@ -199,6 +210,8 @@ class _CharacterWidget(QWidget):
         # 拖拽"漂浮"层：被按住时浮沉，松手淡出
         self._drag_float_gain = 0.0
         self._drag_phase = 0.0
+        # 朝向：+1 朝右（素材原本方向）、-1 朝左（水平镜像）
+        self._facing = 1
 
         # fallback 状态变量
         self._beat_phase = 0.0
@@ -219,6 +232,11 @@ class _CharacterWidget(QWidget):
             self.setMinimumHeight(120)
 
     # ── 公共接口 ──────────────────────────────────────
+
+    def set_facing(self, facing: int) -> None:
+        """设置朝向（+1 朝右 / -1 朝左）。只影响绘制，不需要额外素材。"""
+        self._facing = -1 if facing < 0 else 1
+        self.update()
 
     def set_emotion(self, key: str) -> None:
         if key == "dragging":
@@ -396,7 +414,8 @@ class _CharacterWidget(QWidget):
         t = QTransform()
         t.translate(cw / 2, ch / 2 + float_y)
         t.rotate(rot)
-        t.scale(scale, scale)
+        # `_facing` 为 -1 时水平镜像（漫游向左时用）——她只有朝右的素材，靠镜像出朝左
+        t.scale(scale * self._facing, scale)
         t.translate(-pw / 2, -ph / 2)
 
         painter.setTransform(t)
@@ -477,6 +496,10 @@ class PetWindow(QMainWindow):
         self._last_state_clip = ""
         self._drag_clip_active = False
         self._notice_last_s = 0.0  # 上次播「注意到你」的时刻（冷却用）
+        # 漫游状态
+        self._wander_next_s = 0.0
+        self._wander_remaining_px = 0.0
+        self._wander_dir = 1
 
         # ── 角色素材：优先序列帧（服装包），其次旧单张立绘 ──
         pixmap = QPixmap(str(_CHAR_PATH))
@@ -540,9 +563,15 @@ class PetWindow(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(POLL_INTERVAL_MS)
 
-        # ── 初始位置：屏幕右下角 ──
-        from PySide6.QtGui import QGuiApplication
+        # 漫游定时器：**独立于灵魂轮询**——5Hz 用来移动窗口会一顿一顿，
+        # 而且纯桌宠模式（standalone）下 `_tick` 直接 return，就更不该挂在它上面。
+        self._wander_timer = QTimer(self)
+        self._wander_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._wander_timer.timeout.connect(self._wander_tick)
+        self._wander_timer.start(WANDER_TICK_MS)
+        self._wander_next_s = time.time() + random.uniform(WANDER_MIN_S, WANDER_MAX_S)
 
+        # ── 初始位置：屏幕右下角 ──
         ag = QGuiApplication.primaryScreen().availableGeometry()
         self.move(ag.right() - pw - 20, ag.bottom() - ph - 20)
 
@@ -805,6 +834,80 @@ class PetWindow(QMainWindow):
         except Exception:
             pass
 
+    def _available_geometry(self) -> QRect:
+        """当前窗口所在屏幕的可用区域（避开任务栏）；拿不到就退回窗口自身几何。"""
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else self.geometry()
+
+    def _wander_tick(self) -> None:
+        """漫游：偶尔在桌面上小跑一段（对应 dsh-pet 的 `moves` 槽位）。
+
+        **不依赖灵魂状态**——纯桌宠（standalone）模式下也会漫游，
+        所以它挂在独立的 33ms 定时器上，而不是灵魂轮询（5Hz）上。
+        碰到屏幕边缘、被拖拽、或开始播回应时都会中止。
+        """
+        player = self._clip_player
+        if player is None or not player.has_clip(WANDER_CLIP):
+            return
+        now = time.time()
+
+        if self._wander_remaining_px <= 0.0:
+            if (
+                now < self._wander_next_s
+                or self._dragging
+                or self._drag_clip_active
+                or player.is_playing_once()
+            ):
+                return
+            if player.current_clip_id() not in IDLE_WEIGHTS:
+                # 她正在做别的事，等会儿再考虑
+                self._wander_next_s = now + 5.0
+                return
+            self._start_wander()
+            return
+
+        geo = self.geometry()
+        avail = self._available_geometry()
+        step = min(WANDER_SPEED_PX_S * (WANDER_TICK_MS / 1000.0), self._wander_remaining_px)
+        new_x = geo.x() + round(step) * self._wander_dir
+        if new_x < avail.left() or new_x + geo.width() > avail.right():
+            self._end_wander()  # 贴边就停，绝不跑出屏幕
+            return
+        self.move(new_x, geo.y())
+        self._wander_remaining_px -= step
+        if self._wander_remaining_px <= 0.0:
+            self._end_wander()
+
+    def _start_wander(self) -> None:
+        """挑一个方向与距离开始漫游；左右由**水平镜像**实现（无需额外素材）。"""
+        player = self._clip_player
+        geo = self.geometry()
+        avail = self._available_geometry()
+        room = {1: avail.right() - (geo.x() + geo.width()), -1: geo.x() - avail.left()}
+        choices = [d for d, r in room.items() if r > WANDER_MIN_PX]
+        if not choices:
+            self._wander_next_s = time.time() + 60.0
+            return
+        self._wander_dir = random.choice(choices)
+        self._wander_remaining_px = float(
+            min(random.randint(WANDER_MIN_PX, WANDER_MAX_PX), room[self._wander_dir])
+        )
+        self._canvas.set_facing(self._wander_dir)
+        if player is not None:
+            player.set_clip(WANDER_CLIP)
+        self._idle_next_switch = time.time() + 60.0  # 别让待机轮换打断她跑步
+
+    def _end_wander(self) -> None:
+        """漫游结束：回待机 + 朝向复位 + 安排下一次。"""
+        self._wander_remaining_px = 0.0
+        self._wander_next_s = time.time() + random.uniform(WANDER_MIN_S, WANDER_MAX_S)
+        self._canvas.set_facing(1)
+        player = self._clip_player
+        if player is not None and not player.is_playing_once():
+            idle = self._idle_clip()
+            if idle:
+                player.set_clip(idle)
+
     def _begin_drag_clip(self) -> None:
         """拖拽开始 → 播「被拎起悬空」。
 
@@ -814,6 +917,10 @@ class PetWindow(QMainWindow):
         """
         if self._clip_player is None:
             return
+        # 被拖起来就中止漫游（否则松手后她会接着把剩下的距离跑完）
+        self._wander_remaining_px = 0.0
+        self._wander_next_s = time.time() + random.uniform(WANDER_MIN_S, WANDER_MAX_S)
+        self._canvas.set_facing(1)
         for cid in DRAG_CLIP_CANDIDATES:
             if self._clip_player.has_clip(cid):
                 self._drag_clip_active = self._clip_player.set_clip(cid)

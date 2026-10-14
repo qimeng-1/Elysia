@@ -231,6 +231,83 @@ def clean_mask(mask: Image.Image, min_blob: int = MIN_BLOB_PX) -> Image.Image:
     return keep
 
 
+def cutout_adaptive(im: Image.Image, tol: int = DEFAULT_TOLERANCE) -> Image.Image:
+    """抠图，并自动处理**"卡片式"源图**（外面一层底色 + 里面另一种底色）。
+
+    实测样例：某几张官方立绘是"白色页面 + 粉色圆角卡片"两层底——四角近白
+    `(251,247,244)`，卡片是粉 `(252,199,219)`。单色泛洪只能吃掉外层白页，
+    于是**整张粉色卡片被当成前景**，抠出来带一圈"光晕"。
+
+    做法：先按外层色泛洪；若剩下的"前景"占了画面绝大部分（说明外层只是薄边、
+    里面还有另一层底），就裁到内层包围盒，用**内层角落的颜色**重跑一次。
+    """
+    w, h = im.size
+    bg = background_color(im)
+    page = background_mask(im, bg, tol)
+    inner = page.point(lambda v: 255 - v).getbbox()
+    if inner is not None:
+        area_ratio = ((inner[2] - inner[0]) * (inner[3] - inner[1])) / float(w * h)
+        if area_ratio > 0.75:  # 整张图几乎都算"前景" ⇒ 里面还有第二层底
+            crop = im.crop(inner)
+            bg2 = background_color(crop)
+            if sum(abs(a - b) for a, b in zip(bg2, bg, strict=False)) > 40:  # 内层底确实不同
+                im, bg = crop, bg2
+    return cutout(im, bg, tol)
+
+
+def portrait_clip(src: Path, out_dir: Path, name: str, tol: int) -> bool:
+    """把一张立绘做成**单帧片段**的服装包（`<out>/idle/{frames,webp}/0000.*`）。
+
+    为什么做成"单帧片段"而不是新增一种"静态形象"类型：这样**零新代码**——
+    `ClipPlayer` 照常加载它，物理动画（呼吸/摇摆/浮动）继续在上面叠加，
+    换装、窗口自适应尺寸、菜单全部复用同一条路径。
+    """
+    with Image.open(src) as raw:
+        im = raw.convert("RGB")
+    cut = cutout_adaptive(im, tol)
+    bbox = cut.getchannel("A").getbbox()
+    if bbox is None:
+        return False
+    tile = cut.crop(bbox)
+
+    frames_dir = out_dir / "idle" / "frames"
+    webp_dir = out_dir / "idle" / "webp"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    webp_dir.mkdir(parents=True, exist_ok=True)
+    tile.save(frames_dir / "0000.png", optimize=True)
+    tile.save(webp_dir / "0000.webp", "WEBP", quality=WEBP_QUALITY, method=4)
+    (out_dir / "idle" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source": str(src),
+                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "kind": "static-portrait",
+                "frame_count": 1,
+                "fps": 24,
+                "size": [tile.width, tile.height],
+                "background": list(background_color(im)),
+                "tolerance": tol,
+                "note": "静态立绘的单帧片段；物理动画（呼吸/摇摆/浮动）仍在其上叠加",
+                "master_frames": "frames/*.png（无损母版）",
+                "runtime_frames": f"webp/*.webp（q{WEBP_QUALITY}）",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "costume.json").write_text(
+        json.dumps(
+            {"id": out_dir.name, "name": name, "source": src.name},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"  {out_dir.name:<6} {name:<10} 抠出 {tile.width}x{tile.height}  ← {src.name[:26]}")
+    return True
+
+
 def cutout(
     im: Image.Image,
     bg: tuple[int, int, int],
@@ -513,6 +590,14 @@ def main(argv: list[str] | None = None) -> int:
         help="显式排除区（可重复）：用于泛洪填充拦不住的深色水印/游戏 logo",
     )
 
+    p_por = sub.add_parser("portrait", help="把立绘做成单帧片段的服装包（换装用）")
+    p_por.add_argument("--src", required=True, type=Path)
+    p_por.add_argument(
+        "--out", required=True, type=Path, help="服装包目录，如 assets/pet/costumes/c2"
+    )
+    p_por.add_argument("--name", default="", help="给菜单看的服装名，如「女仆装」")
+    p_por.add_argument("--tol", type=int, default=DEFAULT_TOLERANCE)
+
     args = parser.parse_args(argv)
     if args.cmd == "inspect":
         rc = 0
@@ -523,6 +608,13 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             rc |= inspect(p)
         return rc
+    if args.cmd == "portrait":
+        if not args.src.exists():
+            print(f"  不存在: {args.src}", file=sys.stderr)
+            return 1
+        name = args.name or args.out.name
+        ok = portrait_clip(args.src, args.out, name, args.tol)
+        return 0 if ok else 1
     exclude: list[tuple[int, int, int, int]] = []
     for spec in args.exclude:
         parts = [int(v) for v in spec.replace(" ", "").split(",")]

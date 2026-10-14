@@ -71,6 +71,19 @@ class ClipLibrary:
         d = self._root / costume
         return [p.name for p in self._clip_dirs(d)] if d.is_dir() else []
 
+    def costume_name(self, costume: str) -> str:
+        """服装的**显示名**（读 `costume.json` 的 `name`；缺失则退回目录名）。"""
+        cfg = self._root / costume / "costume.json"
+        if cfg.is_file():
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+                name = str(data.get("name", "")).strip()
+                if name:
+                    return name
+            except (OSError, ValueError):
+                pass
+        return costume
+
     def _clip_dirs(self, costume_dir: Path) -> list[Path]:
         return sorted(d for d in costume_dir.iterdir() if d.is_dir() and (d / "webp").is_dir())
 
@@ -143,6 +156,11 @@ class ClipPlayer:
     @property
     def costume(self) -> str:
         return self._costume
+
+    @property
+    def library(self) -> ClipLibrary:
+        """底层素材库（菜单要读服装显示名）。"""
+        return self._library
 
     @property
     def costumes(self) -> list[str]:

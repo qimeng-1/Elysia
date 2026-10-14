@@ -495,6 +495,19 @@ class PetWindow(QMainWindow):
 
         menu.addSeparator()
 
+        # 换装（P4b）：一套服装一个菜单项；只有真有多套时才出现
+        if self._clip_player is not None:
+            costumes = self._clip_player.costumes
+            if len(costumes) > 1:
+                wear = menu.addMenu("换装")
+                lib = self._clip_player.library
+                for cid in costumes:
+                    act = QAction(lib.costume_name(cid), self)
+                    act.setCheckable(True)
+                    act.setChecked(cid == self._clip_player.costume)
+                    act.triggered.connect(lambda _, c=cid: self._switch_costume(c))
+                    wear.addAction(act)
+
         # 窗口置顶
         top_act = QAction("窗口置顶", self)
         top_act.setCheckable(True)
@@ -517,6 +530,23 @@ class PetWindow(QMainWindow):
         menu.addAction(quit_act)
 
         return menu
+
+    def _switch_costume(self, costume: str) -> None:
+        """换装：切到另一套服装，并把窗口重新适配新素材的尺寸。
+
+        位置策略：**保持"脚底"与水平中心不动**——各套立绘尺寸不同（263x354 ~ 380x566），
+        若只 `setFixedSize` 会以左上角为锚点，看起来像"她跳了一下"。
+        """
+        if self._clip_player is None or not self._clip_player.switch_costume(costume):
+            return
+        fw, fh = self._clip_player.frame_size()
+        if fw and fh:
+            pw, ph = fw + WINDOW_PADDING * 2, fh + WINDOW_PADDING * 2
+            geo = self.geometry()
+            self.setFixedSize(pw, ph)
+            self.move(geo.center().x() - pw // 2, geo.bottom() - ph)
+            self._bubble.setFixedWidth(int(pw * 0.5))
+        self._canvas.update()
 
     def _quit(self) -> None:
         app = QApplication.instance()

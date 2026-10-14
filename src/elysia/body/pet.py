@@ -930,15 +930,20 @@ class PetWindow(QMainWindow):
             self._idle_next_switch = time.time() + 30.0
 
     def _end_drag_clip(self) -> None:
-        """松手 → 有落地片段就播一次落地缓冲，否则直接回待机。"""
+        """松手 → 立刻播落地缓冲（**不溶解**），没有落地素材才回待机。
+
+        - `fade=False` 是关键：落地是一瞬间的冲击，拿 0.3 秒去溶解会把冲击抹平，
+          观感变成"松手后先愣一下、然后像起跳"（用户实测反馈）。
+        - 物理压缩 `poke()` 提到切换**之前**，让"顿一下"和落地素材同一帧发生。
+        """
         if self._clip_player is None or not self._drag_clip_active:
             return
         self._drag_clip_active = False
-        if not self._clip_player.play_once(LAND_CLIP):
+        self._canvas.poke(LAND_STRENGTH)  # 先"顿"一下，再立刻切落地
+        if not self._clip_player.play_once(LAND_CLIP, fade=False):
             idle = self._idle_clip()
             if idle:
                 self._clip_player.set_clip(idle)
-        self._canvas.poke(LAND_STRENGTH)  # 落地"顿一下"
         self._idle_next_switch = time.time() + random.uniform(IDLE_SWITCH_MIN_S, IDLE_SWITCH_MAX_S)
 
     def _idle_clip(self) -> str:

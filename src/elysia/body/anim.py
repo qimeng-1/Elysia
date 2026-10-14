@@ -27,6 +27,13 @@ DEFAULT_FPS = 24.0
 # 在切换时把旧片段淡出、新片段淡入，即使只有两段动画，过渡也会顺很多。
 # 用**秒**而不是"帧数"：按帧数会让淡出时长随渲染 tick 频率变化（脆弱）。
 FADE_SECONDS = 0.3
+
+# 单次片段播完后先垫一拍"归位站定"再回待机——这一拍就是**动作之间的过渡缓冲**
+# （用户反馈："动作间没有关联和转换的缓冲空间"）。
+# dsh-pet 靠"每段首尾都是中立姿势 + 专门的过渡动作"做到动作链，这里用同样思路：
+# 动作 → 归位站定 → 待机。`settle-bridge` 是裁短的版本（~1.7 秒），没有就用整段 `settle`。
+BRIDGE_CLIP = "settle-bridge"
+BRIDGE_FALLBACK = "settle"
 # 片段命名约定：这些前缀是"播一次就回待机"，其余默认循环
 ONCE_CLIP_PREFIXES = (
     "notice",
@@ -331,12 +338,13 @@ class ClipPlayer:
             self._index += 1
             if self._index >= clip.frame_count:
                 if clip.is_once and self._fallback is not None:
-                    # 单次片段播完 → 回待机（不循环）。
+                    # 单次片段播完 → 先垫一拍过渡，再回待机（不循环）。
                     # **这里必须走交叉溶解**：早先直接改 `_current` 绕过了 `_start_fade`，
                     # 于是"每次点击回应结束后回待机"都是**硬切**——而这是最常见的过渡，
                     # 用户反馈的"衔接不流畅"很大一部分来自这里。
-                    self._start_fade(self._fallback)
-                    self._current = self._fallback
+                    nxt_clip = self._after_once(clip)
+                    self._start_fade(nxt_clip)
+                    self._current = nxt_clip
                     self._index = 0
                     self._acc = 0.0
                     self._dir = 1
@@ -352,27 +360,35 @@ class ClipPlayer:
                 self._prev.prefetch(self._prev_index, 2)
         return moved
 
-    def set_clip(self, clip_id: str) -> bool:
-        """切到某片段（`self._costume` 内）。"""
+    def set_clip(self, clip_id: str, *, fade: bool = True) -> bool:
+        """切到某片段（`self._costume` 内）。
+
+        `fade=False` 用于**突发事件**：落地就是一瞬间的事，拿 0.3 秒去溶解
+        反而把冲击抹掉了（用户实测："松开鼠标却没有落地动作，反而像起跳"）。
+        """
         if not self._costume:
             return False
         clip = self._get(self._costume, clip_id)
         if clip is None:
             return False
-        self._start_fade(clip)
+        if fade:
+            self._start_fade(clip)
+        else:
+            self._prev = None
+            self._fade_left_s = 0.0
         self._current = clip
         self._index = 0
         self._acc = 0.0
         self._dir = 1
         return True
 
-    def play_once(self, clip_id_prefix: str) -> bool:
+    def play_once(self, clip_id_prefix: str, *, fade: bool = True) -> bool:
         """播放一个"单次"片段（按前缀匹配，如 `cheer`）。"""
         if not self._costume:
             return False
         for name in self._library.clips(self._costume):
             if name.startswith(clip_id_prefix):
-                return self.set_clip(name)
+                return self.set_clip(name, fade=fade)
         return False
 
     def switch_costume(self, costume: str) -> bool:
@@ -391,6 +407,24 @@ class ClipPlayer:
         self._acc = 0.0
         self._dir = 1
         return True
+
+    def _after_once(self, finished: Clip) -> Clip:
+        """单次片段播完后接什么。
+
+        **过渡缓冲**：动作演完直接回待机是"硬收尾"；先垫一拍「归位站定」再回待机，
+        就有了 dsh-pet 那种"动作链"的缓冲感。`settle*` 自身播完不再套一层（避免无限套娃）。
+        """
+        if self._fallback is None:  # pragma: no cover - 调用点已保证非 None
+            return finished
+        if finished.clip_id.startswith("settle"):
+            return self._fallback
+        for name in (BRIDGE_CLIP, BRIDGE_FALLBACK):
+            if name == finished.clip_id:
+                continue
+            bridge = self._get(self._costume, name)
+            if bridge is not None:
+                return bridge
+        return self._fallback
 
     # ── 内部 ──────────────────────────────────────────
 

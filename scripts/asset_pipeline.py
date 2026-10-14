@@ -39,11 +39,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import shutil
 import sys
 import time
 from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import av
 from PIL import Image, ImageChops, ImageFilter, ImageStat
@@ -707,6 +709,340 @@ def align_tail(
     return best_i + 1
 
 
+def _first_frame_bbox(src: Path, tol: int) -> tuple[int, int, int, int] | None:
+    """只解源视频的**第 0 帧**，返回角色 alpha 包围盒。
+
+    用它取"统一缩放基准"：同一套服装的所有片段都是**从同一张首帧生成的**，
+    所以它们的第 0 帧是同一个姿势、同一个大小 ⇒ 这是唯一可靠的"角色真实尺寸"标尺。
+    （不能拿"整段包围盒"当标尺——姿态越舒展的片段框越大，那正是大小不一致的来源。）
+    """
+    container = av.open(str(src))
+    stream = container.streams.video[0]
+    frame = None
+    for f in container.decode(stream):
+        frame = f.to_image().convert("RGB")
+        break
+    container.close()
+    if frame is None:
+        return None
+    bg = background_color(frame)
+    return cutout(frame, bg, tol).getchannel("A").getbbox()
+
+
+def _remap_frames_to_canvas(
+    clip_dir: Path,
+    old: dict[str, Any],
+    size: tuple[int, int],
+    paste: tuple[int, int],
+    dest_size: tuple[int, int],
+) -> int:
+    """源文件不在了：把**上一次构建好的帧**搬到新画布上，返回帧数。
+
+    **为什么可行**：旧帧 = 源图裁剪到 `old["crop_box"]` 后按"缩放进旧画布、底边居中"
+    放置的结果。所以旧帧里的**内容区域**是已知的（旧偏移 + 旧尺寸），
+    把它裁出来直接放进新画布的目标位置即可——不需要源文件。
+
+    **实测场景**：用户精简素材文件夹时可能删掉某个源视频，但已处理好的帧还在。
+    """
+    frames_dir, webp_dir = clip_dir / "frames", clip_dir / "webp"
+    if not frames_dir.is_dir():
+        return 0
+    keep = int(old.get("frame_count") or 0)
+    tmp = clip_dir / "_old_frames"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    frames_dir.rename(tmp)
+    frames_dir.mkdir()
+    for stale in webp_dir.glob("*"):
+        if stale.is_file():
+            stale.unlink()
+
+    src_files = sorted(tmp.glob("*.png"))
+    if keep > 0:
+        src_files = src_files[:keep]
+
+    ob = old["crop_box"]
+    obw, obh = ob[2] - ob[0], ob[3] - ob[1]
+    ow, oh = old["size"]
+    s_old = min(ow / obw, oh / obh)
+    old_w, old_h = max(1, round(obw * s_old)), max(1, round(obh * s_old))
+    old_px, old_py = (ow - old_w) // 2, oh - old_h
+
+    for i, path in enumerate(src_files):
+        with Image.open(path) as raw:
+            im = raw.convert("RGBA")
+        piece = im.crop((old_px, old_py, old_px + old_w, old_py + old_h)).resize(
+            dest_size, Image.LANCZOS
+        )
+        canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+        canvas.paste(piece, paste, piece)
+        canvas.save(frames_dir / f"{i:04d}.png", optimize=True)
+        canvas.save(webp_dir / f"{i:04d}.webp", "WEBP", quality=WEBP_QUALITY, method=4)
+    shutil.rmtree(tmp)
+    return len(src_files)
+
+
+def build_costume(spec_path: Path) -> int:
+    """按 `build.json` 重建整套服装包：**所有片段共用同一个源空间变换**。
+
+    **为什么必须共用（用户实测反馈："不同动作人物大小变化不一致"）**：
+    之前是"逐片段各自裁到自己的包围盒、再缩放进同一画布"。但各片段包围盒大小取决于
+    **姿态有多舒展**（漂浮/奔跑张得开 → 框大 → 缩放系数小 → 角色显得更小），
+    所以角色本身的大小仍然不一致；而且"底边对齐"还把**纵向运动**（跳/漂浮的上移）
+    压回了底边。
+
+    现在：以各段**第 0 帧**的角色高度的中位数为基准，算出**唯一一个缩放系数**；
+    以各段包围盒的并集为**唯一一个源空间窗口**。所有片段、所有帧都过同一个仿射变换
+    ⇒ 大小、位置、纵向运动全部一致。
+    """
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    out_dir = spec_path.parent
+    clips: list[dict[str, Any]] = spec["clips"]
+    tol = int(spec.get("tolerance", DEFAULT_TOLERANCE))
+    pad = int(spec.get("pad", 6))
+    target_h = float(spec.get("reference_height", 560))
+
+    # ⓪ 先读旧的 manifest（它同时用于：共享窗口的包围盒、以及"源文件缺失时重映射"）
+    old_manifests: dict[str, dict[str, Any]] = {}
+    for c in clips:
+        mf = out_dir / c["id"] / "manifest.json"
+        if mf.is_file():
+            old_manifests[c["id"]] = json.loads(mf.read_text(encoding="utf-8"))
+
+    # ① 每段的"首帧基准"：角色高度 + 底部中心。
+    #    ⚠️ 这里必须**每段各算一个缩放**，不能共用一个：
+    #    实测各段源素材里 AI 把角色画成了不同大小（首帧高度 512~537，差 5%），
+    #    共用一个缩放只会**原样保留**这个差异（用户反馈："不同动作人物大小变化不一致"）。
+    #    各段都把自己的首帧角色高归一化到 `reference_height`，大小才真正一致。
+    refs: dict[str, tuple[int, float, int]] = {}
+    remap: list[str] = []
+    for c in clips:
+        src = Path(c["src"])
+        donor = c.get("borrow_transform_from")
+        if donor and donor in refs:
+            # 借用"同机位兄弟片段"的基准：有些源视频**第 0 帧并不是站姿**
+            # （实测 `高处落地或弹跳` 是弹跳循环，f0 就在半空、角色只有 423px 高），
+            # 拿它当基准会把缩放算成 1.324，画布被撑到 696x1044。
+            # 这些素材都来自同一张首帧、同一机位，所以兄弟片段的基准就是对的。
+            refs[c["id"]] = refs[donor]
+            print(f"  {c['id']}: 借用 {donor} 的首帧基准 {refs[donor]}")
+            continue
+        if not src.is_file():
+            remap.append(c["id"])
+            continue
+        bbox = _first_frame_bbox(src, tol)
+        if bbox is None:
+            print(f"  {c['id']}: 读不到首帧", file=sys.stderr)
+            return 1
+        refs[c["id"]] = (bbox[3] - bbox[1], (bbox[0] + bbox[2]) / 2.0, bbox[3])
+    if not refs:
+        print("  没有任何可用源文件", file=sys.stderr)
+        return 1
+    target_h = float(spec.get("reference_height", 560))
+    print("  各段首帧角色高：" + "  ".join(f"{k}={v[0]}" for k, v in refs.items()))
+    print(
+        f"  各自归一化到 {target_h:.0f}px ⇒ 缩放 "
+        + "  ".join(f"{k}={target_h / v[0]:.3f}" for k, v in refs.items())
+    )
+
+    # ② 各片段的全片包围盒（源空间）。老片段读 manifest（免费），新片段抽样估。
+    boxes: dict[str, tuple[int, int, int, int]] = {}
+    for c in clips:
+        cb = old_manifests.get(c["id"], {}).get("crop_box")
+        if cb:
+            boxes[c["id"]] = (cb[0], cb[1], cb[2], cb[3])
+            continue
+        nsrc = Path(c["src"])
+        if not nsrc.is_file():
+            print(f"  {c['id']}: 既无旧构建也无源文件，无法确定包围盒", file=sys.stderr)
+            return 1
+        nframes = read_video_frames(nsrc)
+        nfr = c.get("frames")
+        if nfr:
+            nframes = nframes[nfr[0] : nfr[1]]
+        step = max(1, len(nframes) // 12)
+        sample = nframes[::step]
+        nbg = background_color(sample[0])
+        xs0, ys0, xs1, ys1 = 10**9, 10**9, -1, -1
+        for f in sample:
+            b = cutout(f, nbg, tol).getchannel("A").getbbox()
+            if b:
+                xs0, ys0 = min(xs0, b[0]), min(ys0, b[1])
+                xs1, ys1 = max(xs1, b[2]), max(ys1, b[3])
+        boxes[c["id"]] = (xs0, ys0, xs1, ys1)
+        print(f"  {c['id']}: 新片段，抽样 {len(sample)} 帧估包围盒")
+    src_w, src_h = old_manifests[clips[0]["id"]]["source_size"]
+
+    # ③ 统一锚点相对坐标：把每段按"自己的缩放 + 自己的首帧锚点"映射后，
+    #    取所有片段的并集来定画布大小；锚点（首帧的底部中心）在所有片段里都落在同一点。
+    rel: dict[str, tuple[float, float, float, float]] = {}
+    for c in clips:
+        cid = c["id"]
+        if cid not in refs:
+            continue  # 源缺失的走重映射，沿用 settle 的变换（同源同姿势）
+        h, cx, bottom = refs[cid]
+        s = target_h / h
+        b = boxes[cid]
+        rel[cid] = ((b[0] - cx) * s, (b[1] - bottom) * s, (b[2] - cx) * s, (b[3] - bottom) * s)
+    minx = min(r[0] for r in rel.values()) - pad
+    miny = min(r[1] for r in rel.values()) - pad
+    maxx = max(r[2] for r in rel.values()) + pad
+    maxy = max(r[3] for r in rel.values()) + pad
+    cw, ch = max(1, round(maxx - minx)), max(1, round(maxy - miny))
+    print(f"  统一画布 {cw}x{ch}（锚点=首帧底部中心，画布内位置 {round(-minx)},{round(-miny)}）")
+
+    # ③ 逐片段重建：源文件在就重抠，不在就从上一次构建的帧重映射（同一个窗口 + 同一个缩放）
+    for c in clips:
+        cid = c["id"]
+        src = Path(c["src"])
+        d = out_dir / cid
+        fps = float(c["fps"]) if c.get("fps") else 24.0
+        frame_count = 0
+
+        if not src.is_file():
+            old = old_manifests.get(cid)
+            if old is None:
+                print(f"  {cid}: 源文件缺失且没有旧构建，无法处理", file=sys.stderr)
+                return 1
+            # 借"同源片段"的变换（同源 ⇒ 同一张首帧 ⇒ 锚点/缩放一致）
+            donor = next(
+                (
+                    k
+                    for k, v in ((cc["id"], cc["src"]) for cc in clips)
+                    if v == c["src"] and k in rel
+                ),
+                None,
+            )
+            if donor is None:
+                print(f"  {cid}: 源缺失且没有同源片段可借变换", file=sys.stderr)
+                return 1
+            s = target_h / refs[donor][0]
+            b = boxes[cid]
+            fps = float(c.get("fps") or old.get("fps") or 24.0)
+            frame_count = _remap_frames_to_canvas(
+                d,
+                old,
+                (cw, ch),
+                (
+                    round((b[0] - refs[donor][1]) * s - minx),
+                    round((b[1] - refs[donor][2]) * s - miny),
+                ),
+                (max(1, round((b[2] - b[0]) * s)), max(1, round((b[3] - b[1]) * s))),
+            )
+            loop_a = float(old.get("loop_alpha_diff", 0.0))
+            loop_rgb = float(old.get("loop_rgb_diff", 0.0))
+            loops = bool(old.get("loops_seamlessly", False))
+            print(
+                f"  {cid:<12} {frame_count:>4}帧 {fps:>4g}fps {frame_count / fps:>5.2f}s "
+                f"{'循环OK' if loops else '循环跳'}  （源缺失→借 {donor} 的变换重映射）"
+            )
+            _write_manifest(
+                d,
+                {
+                    "source": f"{src}（源文件已删除，从旧构建重映射）",
+                    "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "frame_count": frame_count,
+                    "fps": fps,
+                    "size": [cw, ch],
+                    "crop_box": list(b),
+                    "source_size": [src_w, src_h],
+                    "per_clip_transform": {"scale": round(s, 6), "from": donor},
+                    "remapped_from_old_build": True,
+                    "loop_alpha_diff": round(loop_a, 3),
+                    "loop_rgb_diff": round(loop_rgb, 3),
+                    "loops_seamlessly": loops,
+                    "suggest_ping_pong": not loops,
+                    "trimmed_frames": old.get("trimmed_frames"),
+                    "fps_override": c.get("fps"),
+                    "master_frames": "frames/*.png（无损母版）",
+                    "runtime_frames": f"webp/*.webp（q{WEBP_QUALITY}）",
+                },
+            )
+            continue
+
+        frames = read_video_frames(src)
+        fr = c.get("frames")
+        if fr:
+            frames = frames[fr[0] : fr[1]]
+        if not frames:
+            print(f"  {cid}: 没有可用帧", file=sys.stderr)
+            return 1
+        fps = float(c["fps"]) if c.get("fps") else video_fps(src)
+        bg = background_color(frames[0])
+        excl = tuple(tuple(int(v) for v in e) for e in c.get("exclude", ()))
+        cut = [cutout(f, bg, tol, exclude=excl) for f in frames]
+        frame_count = len(cut)
+
+        # 本片段自己的变换：**自己的缩放**（把首帧角色高归一化到 target）
+        # + 自己的锚点（首帧的底部中心）落在画布同一位置
+        ref_h_i, cx_i, bottom_i = refs[cid]
+        s = target_h / ref_h_i
+        b = boxes[cid]
+        dest_w = max(1, round((b[2] - b[0]) * s))
+        dest_h = max(1, round((b[3] - b[1]) * s))
+        px = round((b[0] - cx_i) * s - minx)
+        py = round((b[1] - bottom_i) * s - miny)
+
+        frames_dir, webp_dir = d / "frames", d / "webp"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        webp_dir.mkdir(parents=True, exist_ok=True)
+        for stale_dir in (frames_dir, webp_dir):
+            for stale in stale_dir.iterdir():
+                if stale.is_file():
+                    stale.unlink()
+        for i, im in enumerate(cut):
+            tile = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+            piece = im.crop(b).resize((dest_w, dest_h), Image.LANCZOS)
+            tile.paste(piece, (px, py), piece)
+            tile.save(frames_dir / f"{i:04d}.png", optimize=True)
+            tile.save(webp_dir / f"{i:04d}.webp", "WEBP", quality=WEBP_QUALITY, method=4)
+
+        loop_a = _mean_diff(cut[0].getchannel("A"), cut[-1].getchannel("A"))
+        loop_rgb = _mean_diff(frames[0], frames[-1])
+        loops = loop_a < LOOP_ALPHA_OK and loop_rgb < LOOP_RGB_OK
+        _write_manifest(
+            d,
+            {
+                "source": str(src),
+                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "frame_count": len(cut),
+                "fps": fps,
+                "size": [cw, ch],
+                "crop_box": list(b),
+                "source_size": [src_w, src_h],
+                # 每段自己的缩放（把首帧角色高归一化到 target）+ 首帧锚点
+                "per_clip_transform": {
+                    "scale": round(s, 6),
+                    "ref_height": ref_h_i,
+                    "anchor": [round(cx_i, 2), bottom_i],
+                    "paste": [px, py],
+                },
+                "background": list(bg),
+                "tolerance": tol,
+                "loop_alpha_diff": round(loop_a, 3),
+                "loop_rgb_diff": round(loop_rgb, 3),
+                "loops_seamlessly": loops,
+                "suggest_ping_pong": not loops,
+                "trimmed_frames": fr,
+                "fps_override": c.get("fps"),
+                "master_frames": "frames/*.png（无损母版）",
+                "runtime_frames": f"webp/*.webp（q{WEBP_QUALITY}）",
+            },
+        )
+        print(
+            f"  {cid:<12} {len(cut):>4}帧 {fps:>4g}fps {len(cut) / fps:>5.2f}s "
+            f"{'循环OK' if loops else '循环跳'}"
+        )
+    print(f"  完成：{len(clips)} 段，全部 {cw}x{ch}，每段各自缩放对齐首帧角色高 {target_h:.0f}px")
+    return 0
+
+
+def _write_manifest(clip_dir: Path, payload: dict[str, Any]) -> None:
+    (clip_dir / "manifest.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def parse_canvas(spec: str) -> tuple[int, int] | None:
     """解析 `--canvas WxH`；空串返回 None，格式错直接退出（不静默忽略）。"""
     if not spec.strip():
@@ -763,6 +1099,13 @@ def main(argv: list[str] | None = None) -> int:
         help="显式排除区（可重复）：用于泛洪填充拦不住的深色水印/游戏 logo",
     )
 
+    p_cos = sub.add_parser(
+        "costume",
+        help="按 build.json 重建整套服装包（**所有片段共用同一个源空间变换**）",
+    )
+    p_cos.add_argument(
+        "--spec", required=True, type=Path, help="如 assets/pet/costumes/c1/build.json"
+    )
     p_por = sub.add_parser("portrait", help="把立绘做成单帧片段的服装包（换装用）")
     p_por.add_argument("--src", required=True, type=Path)
     p_por.add_argument(
@@ -781,6 +1124,11 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             rc |= inspect(p)
         return rc
+    if args.cmd == "costume":
+        if not args.spec.is_file():
+            print(f"  不存在: {args.spec}", file=sys.stderr)
+            return 1
+        return build_costume(args.spec)
     if args.cmd == "portrait":
         if not args.src.exists():
             print(f"  不存在: {args.src}", file=sys.stderr)

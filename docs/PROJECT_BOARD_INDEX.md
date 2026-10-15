@@ -129,7 +129,7 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 
 > ⚠️ **旧工程 `Elysia_Project` 已于 2026-10-16 00:14–00:28 之间离开本目录**，现位于
 > `C:\Users\123\Desktop\Elysia_Project`（git `master` 84 提交，最新 `86a90fc`「Soul Backup: 2026-03-28」，
-> 同一远程，4.11 GB，含 `client/ core/ data/ logs/ memory/`）。**移动者未核实**（非本会话所为）。
+> 同一远程，4.11 GB，含 `client/ core/ data/ logs/ memory/`）。**用户 2026-10-16 确认：是他本人所移，保留在桌面。**
 > 它是**旧版工程（v1.3 Phase 1）**；`Elysia_two\Elysia` 是它的重写版 —— 依据：
 > `IMPLEMENTATION_ROADMAP.md` 开头注明"源文档在**旧工程** `Elysia_Project/docs/planning/`"；
 > 结构由根级平铺改为 `src/elysia/*`；旧历史止于 2026-03-28，新首提交 `65ab334`(2026-08-22)，**历史独立**。
@@ -174,6 +174,7 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 1. **素材授权**：Spine Runtimes 需 Spine Editor 授权；手上这套归档标注「解包资源，仅供学习使用」⇒ **仅本地使用、绝不外传、绝不入库/公开**。同人立绘同理。
 2. **她的真实数据在另一台机器**：本地 `data/*.db` 是测试数据；**绝不允许 本地 → 他机**（会用测试数据覆盖她真实的一生）；**绝不允许两台机同时跑她**。
 3. **MiniMax API 每次调用都要用户逐次确认**（曾因"试一下"烧掉 ¥10）；key 在 `C:\Users\123\.elysia-minimax.key`，需要轮换。
+   —— ⚠️ 这条**只针对 MiniMax**；DeepSeek 主声已于 2026-10-16 获用户授权**自主调用**（见 §9 #10）。
 4. **数据永不删除**：裁流水表须先拍板口径（归档保底 + 只裁 `heartbeats`，不碰 `memories`）。
 5. **`.env` 绝不入库**（含 API key）。
 6. **破坏性操作先确认**：删/移/覆盖/推送/改远程，一律先问。
@@ -194,8 +195,8 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 | 6 | **她的真实数据在他机**：本地库只是测试数据 | `HANDOVER.md` §8.4 |
 | 7 | **文档口径冲突**：`STATUS_MATRIX` 内部（~185s vs 0s）；`OPERATION_GUIDE` §10 与 `STATUS_MATRIX` §11 #3/#4 相互矛盾 | 两文档 |
 | 8 | **运维待定**：进程看门狗无崩溃循环退避；保留策略有意不自动调度；全局 git 身份损坏；无 API key、出声需手动起 GPT-SoVITS | `SESSION_REPORT_2026-10-14.md` §5.1/§5.3 |
-| 9 | **旧工程位置变动**：`Elysia_Project` 于 2026-10-16 00:14–00:28 从 `D:\重置准备\备份\Elysia\` 移到桌面（**移动者未核实**）⇒ 需确认是否还需要它留在上层目录、以及桌面那份是否就是唯一完整副本 | 现场实测（`PROJECT_BOARD_INDEX.md` §6） |
-| 10 | **`.env` 活跃赋值行 = 0** ⇒ 主声（DeepSeek）**从未真正挂载**，她一直走 micro 降级声；是否配置 key 需裁决（注意调用成本与"每次调用先确认"红线） | 现场实测（§6） |
+| 9 | ~~旧工程位置变动~~ **已裁决（2026-10-16）**：`Elysia_Project` 由**用户本人**从上层目录移到桌面，**保留在桌面**（只读参考，不当草稿） | 用户确认 + §6 |
+| 10 | **主声 key 已裁决（2026-10-16）：配置并允许自主调用**（`ELYSIA_LLM_MAIN_API_KEY`，DeepSeek）。当前 `.env` 活跃赋值行 = 0，**待 key 就位**；护栏与预算口径待定；⚠️ MiniMax 的"逐次确认"红线**不变** | 用户裁决 + §6 |
 
 ---
 

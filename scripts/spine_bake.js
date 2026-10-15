@@ -15,8 +15,35 @@ const DIR = "D:/ElysiaAssets/spine_elysia";
 const OUTFIT = process.argv[2] || "elvisa_1";
 const ANIM = process.argv[3] || "1_idle";
 const FPS = parseInt(process.argv[4] || "24", 10);
-const TARGET_H = parseFloat(process.argv[5] || "560");
+const TARGET_H_OUT = parseFloat(process.argv[5] || "560");
 const MARGIN = 14; // 画布四周留白（防动作出画）
+
+// ── 消除"网格线"────────────────────────────────────────────────
+// spine-canvas 用"逐三角形 clip + transform + drawImage"贴图。每个三角形的
+// clip 路径都带抗锯齿 ⇒ 相邻三角形之间会留下**一条半透明发丝缝**，
+// 整片网格因此显形（实测 cheer 单帧 2017 个 alpha 1~40 的像素，
+// 观感就是"编辑器网格线"）。
+// 修法两条并用：
+//   ① **把每个三角形沿重心向外扩一点**（EDGE_PX），让相邻三角形重叠 ⇒ 缝隙被盖住
+//   ② **2 倍超采样渲染**，收尾时降采样 ⇒ 残余的亚像素缝被平均掉
+const SUPERSAMPLE = 2;
+const TARGET_H = TARGET_H_OUT * SUPERSAMPLE;
+const EDGE_PX = 1.0 * SUPERSAMPLE;
+
+{
+  const proto = spine.SkeletonRenderer.prototype;
+  const orig = proto.drawTriangle;
+  proto.drawTriangle = function (img, x0, y0, u0, v0, x1, y1, u1, v1, x2, y2, u2, v2) {
+    const cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3;
+    const push = (x, y) => {
+      const dx = x - cx, dy = y - cy;
+      const len = Math.hypot(dx, dy) || 1e-6;
+      return [x + (dx / len) * EDGE_PX, y + (dy / len) * EDGE_PX];
+    };
+    const a = push(x0, y0), b = push(x1, y1), c = push(x2, y2);
+    return orig.call(this, img, a[0], a[1], u0, v0, b[0], b[1], u1, v1, c[0], c[1], u2, v2);
+  };
+}
 
 function loadData(name) {
   const atlas = new spine.TextureAtlas(fs.readFileSync(path.join(DIR, name + ".atlas"), "utf8"));
@@ -105,6 +132,8 @@ fs.writeFileSync(
     spine_anim_duration_s: anim.duration,
     spine_scale: scale, costume_source: OUTFIT,
     character_height_px: TARGET_H,
+    supersample: SUPERSAMPLE,
+    edge_expand_px: EDGE_PX,
   }, null, 2)
 );
-console.log(`  输出 ${N} 帧 → ${outDir} | 非透明像素 ${minPx}~${maxPx}`);
+console.log(`  输出 ${N} 帧 → ${outDir} | 非透明像素 ${minPx}~${maxPx} | 超采样 ${SUPERSAMPLE}x`);

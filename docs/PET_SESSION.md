@@ -80,9 +80,10 @@ DSH 内置手动压缩，**入口是命令**（不是 agent 工具，AI 自己�
 | 行为 | **7 类全部有素材**：待机 / 漫游 / 点击回应 / 拖拽漂浮 / 落地 / 动作后缓冲 / 鼠标移入 |
 | 素材体积 | **94.6 MB**（不存冗余 PNG 母版；此前 767 MB） |
 | 内存 | ~88 MB |
-| 门禁 | ruff / format(124) / mypy strict(60) / **pytest 461 passed** |
+| 门禁 | ruff / format(125) / mypy strict(60) / **pytest 461 passed** |
 | 素材验收 | `spine_verify.py` **全部通过**（触边 0、尺寸一致、行为齐全） |
-| 提交 | 本地领先 `origin/main` **44 个**（远程仍是 `91bf19d`） |
+| 提交 | 本地领先 `origin/main` **50 个**（远程仍是 `91bf19d`） |
+| 接入工程评估 | **`docs/PET_INTEGRATION_ASSESSMENT.md`**（3 硬伤 + 3 软肋 + 施工计划） |
 | 已撤下 | 9 套 AI/立绘服装在 `assets/pet/_retired/`（297 MB，可恢复） |
 | 清理出的过期物 | `D:\ElysiaAssets\_obsolete\`（45.6 MB，可删） |
 
@@ -129,9 +130,12 @@ $env:QT_QPA_PLATFORM="offscreen"   # 仅在离屏脚本里设，别影响真机�
 
 1. **`applaud`（鼓掌）用不了**：6 套**全部**是"眉毛/眼睑横穿眼睛"（系统性作者问题，
    已逐帧全分辨率确认）⇒ 点击回应只有"挥手"和"比心"两种。要更多花样只能等作者修或找新素材
-2. **接灵魂状态**：`STATE_CLIPS` 映射已写好，用 `--with-soul-data` 启动才生效
-3. **`WANDER_SPEED_PX_S = 110` 是估的** —— 若看着"滑步"要和走动步频对齐
+2. **接灵魂状态 = 下一阶段主线**：数据通路**实测可用**，但有 3 处硬伤（在场语义断裂 /
+   交互丢消息 / 桌宠不在生命周期管理）+ 3 处软肋。完整评估与施工计划见
+   **`docs/PET_INTEGRATION_ASSESSMENT.md`**；15s 复跑取证：
+   `.venv\Scripts\python.exe D:\ElysiaAssets\_probe\pet_integration_probe.py`
+3. ~~`WANDER_SPEED_PX_S = 110` 是估的~~ → **已实测校准为 76 px/s**（`scripts/measure_walk_speed.py`）
 4. **共享画布让窗口变大**（s1: 528×634 → 714×674，多出的是动作摆幅空间）。
    若嫌大，可在 `spine_canvas.js` 收窄采样范围，但会重新引入裁切风险
-5. **推不推送**：45 个提交待用户决定
+5. **推不推送**：50 个提交待用户决定
 6. 可选：给 DSH 写个 `/pet` 插件命令；或走"运行时实时渲染 Spine"路线（HANDOVER §5）

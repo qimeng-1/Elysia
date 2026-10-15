@@ -240,9 +240,14 @@ uv run python scripts/asset_pipeline.py portrait --src <立绘> --out <服装目
 
 1. **动作种类**：每套 8~9 个片段，7 类行为已全部有素材（含 `float`/`land`/`settle-bridge`/`notice`）✓
    但 **`applaud`（鼓掌）6 套全废**（§3.4 #23），所以"点击回应"实际只有"挥手"和"比心/眨眼"两种
-2. **灵魂状态未接**：`STATE_CLIPS` 的映射（away/unhappy/tired/happy）已写好，
-   但要用 `--with-soul-data` 启动且灵魂在跑才生效
-3. **未推送**：本地领先 `origin/main` **46 个提交**（远程还是 `91bf19d`）；推送与否待用户决定
+2. **接灵魂状态：通路实测可用，但语义没接好**（完整评估见 `docs/PET_INTEGRATION_ASSESSMENT.md`）：
+   `--with-soul-data` 下桌宠确实读得到她的 v2 快照（`desire/feelings/will` 全到手，已实测），
+   但有 3 处硬伤：**在场语义断裂**（桌宠就开在眼前，她却收不到一条 `body_status`
+   ⇒ 不知你在场、独处生活永不触发；反过来一条陈旧的 `body_status` 会让她 `mode=alone`
+   ⇒ 桌宠在你面前演"离开"）、**交互单键覆盖**（0.3s 连打 2 句只活 1 句，实测她只回 1 次）、
+   **桌宠不在生命周期管理里**（`soul.ps1` / `watchdog.ps1` / pid / 日志都不管它）；
+   另有 3 处软肋：GUI 线程裸 SQL、P1 状态白传、出声靠 wav mtime 猜
+3. **未推送**：本地领先 `origin/main` **50 个提交**（远程还是 `91bf19d`）；推送与否待用户决定
 4. **她的真实数据在他机**：本地 `data/*.db` 是测试数据（576 心跳 / 22 记忆）；
    **绝不能把本地库拷到他机**（会用测试数据覆盖她的真实生命）。方向只能是他机 → 这里
 5. ~~`WANDER_SPEED_PX_S` 是估的~~ → **已实测校准为 76 px/s**（原先 110，快了 46% ⇒ 滑步）。

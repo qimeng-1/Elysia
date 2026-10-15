@@ -6,7 +6,8 @@
 > **维护规则**：板块内部变动由该板块窗自己更新它的单一出处文档；**本索引只在"板块边界、归属窗口、开放问题"变化时改**。
 >
 > 建立：2026-10-16（用户裁决：本工程改为**多窗口协作**，新设总领窗）
-> 基线：主线仓库 HEAD `24b1864`，远程 `origin/main` = `91bf19d`，领先 **50** 提交
+> 基线：本文建立时主线 HEAD `d2d85de`，远程 `origin/main` = `91bf19d`，领先 **51** 提交
+> （提交数是动态值，以 `git rev-list --count origin/main..HEAD` 为准）
 
 ---
 
@@ -117,18 +118,40 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 
 ## 6. 目录与资产地图
 
-**上游目录 `D:\重置准备\备份\Elysia\`（总领窗工作目录）**：
+**上游目录 `D:\重置准备\备份\Elysia\`（总领窗工作目录）** —— 2026-10-16 00:14–00:37 实测：
 
-| 条目 | 是什么 | 依据 |
-|---|---|---|
-| `Elysia_two\Elysia` | **代码主线**（git 仓库，远程 `github.com/qimeng-1/Elysia.git`） | `src/elysia` 新架构；领先 origin 50 提交 |
-| `Elysia_Project` | **旧版工程** + 真实数据痕迹（`client/`、`core/`、`memory/`、`data/`、`logs/`、`.trae`） | 无 `src/elysia`；同一远程；最后提交 `86a90fc` "Soul Backup: 2026-03-28" |
-| `GPT-SoVITS-Elysia_Voice_Model` | 语音模型（声音板块） | 目录名 + `tts` 链指向本地 GPT-SoVITS |
-| `语音文档` | 语音相关文档/素材 | — |
+| 条目 | 是什么 | 规模 | 依据 |
+|---|---|---|---|
+| `Elysia_two\Elysia` | **代码主线**（git，分支 `main`，远程 `github.com/qimeng-1/Elysia.git`） | 1.32 GB（`.venv` 938 MB、`assets` 392 MB） | `src/elysia/*` 新架构；130 提交；与旧工程**不共享历史** |
+| `GPT-SoVITS-Elysia_Voice_Model` | 声音板块：**参考音频 4 条**（default/devoted/gentle/playful） | 2 MB | 2025-12-25 |
+| `语音文档` | 声音板块：参考音频 17 条 + **GPT 权重**（`Elysia-e20.ckpt`、`Elysia_e24_s13080.pth`）+ 合成样例 | 235 MB | 2025-12-25 |
+| `00_总纲入口.md` | 本索引的入口指针 | 1.5 KB | 2026-10-16 建 |
 
-**仓库外素材（都不进 git）**：`D:\ElysiaAssets\`（`spine_bake\` 烘焙台、`_retired\` 297 MB 已撤下服装、`_obsolete\` 45.6 MB 过期物、`_probe\` 取证脚本）、`D:\图片\Saved Pictures\`（用户原始素材，**不主动删**）、`D:\ElysiaBackup\elysia`（配置里的默认备份目录）。
+> ⚠️ **旧工程 `Elysia_Project` 已于 2026-10-16 00:14–00:28 之间离开本目录**，现位于
+> `C:\Users\123\Desktop\Elysia_Project`（git `master` 84 提交，最新 `86a90fc`「Soul Backup: 2026-03-28」，
+> 同一远程，4.11 GB，含 `client/ core/ data/ logs/ memory/`）。**移动者未核实**（非本会话所为）。
+> 它是**旧版工程（v1.3 Phase 1）**；`Elysia_two\Elysia` 是它的重写版 —— 依据：
+> `IMPLEMENTATION_ROADMAP.md` 开头注明"源文档在**旧工程** `Elysia_Project/docs/planning/`"；
+> 结构由根级平铺改为 `src/elysia/*`；旧历史止于 2026-03-28，新首提交 `65ab334`(2026-08-22)，**历史独立**。
 
-**`assets/pet/` 只有 2 个文件在 git 里**（`README.md`、`character.png`）——`costumes/`、`_work/`、`_retired/` 全部 **gitignore**。
+**仓库外素材（都不进 git；本次只报告、未改动）**：
+
+| 路径 | 是什么 | 规模 | 判定 |
+|---|---|---|---|
+| `D:\ElysiaAssets\spine_elysia\` | **Spine 解包源素材**（elvisa_1–6 的 `.skel/.atlas/.png` + 封面） | 4.8 MB | **唯一副本 / 绝不能删** |
+| `D:\ElysiaAssets\spine_bake\` | Spine 烘焙工作台（`bake.js`、`canvas.js`、`out/`、`node_modules/`） | 855 MB | 生成物可重建（**脚本是唯一副本**） |
+| `D:\ElysiaAssets\_feas_probe\` | 运行时实时渲染可行性探针 + 实测日志 | 1.6 MB | 生成物（脚本唯一） |
+| `D:\ElysiaAssets\_probe\` | 桌宠接灵魂的取证探针 | <0.1 MB | 脚本唯一 |
+| `D:\ElysiaAssets\_obsolete\` | 已废弃素材（首帧、MiniMax 试片） | 45.6 MB | 可弃 |
+| `D:\图片\Saved Pictures\` | 用户原始素材：**10 个 mp4**（呼吸/东张西望/奔跑/挥手/注意到我/漂浮/落地/雀跃…） | 5.3 MB | **唯一副本 / 不主动删** |
+| `assets\pet\costumes\`（仓内，gitignore） | 6 套 Spine 服装 × 50 片段 | 94.6 MB | 可重建（`scripts\ingest_spine.py`） |
+| `assets\pet\_retired\`（仓内，gitignore） | 9 套已撤下 AI/立绘服装 | 296.8 MB | 可恢复 / 可弃（**用户决定**） |
+| `D:\ElysiaBackup\elysia\` | 备份 2 份：`20261014-033002`(1.9 MB)、`20261015-033003`(316.8 MB) | 318.7 MB | **含 `.env`** ⇒ 见 §8 红线 |
+
+**`assets/pet/` 在 git 里只有 2 个文件**（`README.md`、`character.png`）——`costumes/`、`_retired/` 均被 gitignore。
+
+**`.env` 现状（只读核对，未读任何值）**：文件存在（1.6 KB），**活跃赋值行 = 0**（全部为注释态）
+⇒ 主声/次声**都未挂载**，`.env` 里没有 API key；实跑时她走 **micro 降级声**（与探针实测 `level=micro` 一致）。
 
 ---
 
@@ -154,6 +177,8 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 4. **数据永不删除**：裁流水表须先拍板口径（归档保底 + 只裁 `heartbeats`，不碰 `memories`）。
 5. **`.env` 绝不入库**（含 API key）。
 6. **破坏性操作先确认**：删/移/覆盖/推送/改远程，一律先问。
+7. **备份里含 `.env`**（`D:\ElysiaBackup\elysia\20261015-033003\.env`）⇒ 备份目录**同样不得外传**。
+8. **旧工程含真实数据痕迹**（`C:\Users\123\Desktop\Elysia_Project\data`）⇒ 只读参考，**不当草稿、不覆盖**。
 
 ---
 
@@ -169,6 +194,8 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 | 6 | **她的真实数据在他机**：本地库只是测试数据 | `HANDOVER.md` §8.4 |
 | 7 | **文档口径冲突**：`STATUS_MATRIX` 内部（~185s vs 0s）；`OPERATION_GUIDE` §10 与 `STATUS_MATRIX` §11 #3/#4 相互矛盾 | 两文档 |
 | 8 | **运维待定**：进程看门狗无崩溃循环退避；保留策略有意不自动调度；全局 git 身份损坏；无 API key、出声需手动起 GPT-SoVITS | `SESSION_REPORT_2026-10-14.md` §5.1/§5.3 |
+| 9 | **旧工程位置变动**：`Elysia_Project` 于 2026-10-16 00:14–00:28 从 `D:\重置准备\备份\Elysia\` 移到桌面（**移动者未核实**）⇒ 需确认是否还需要它留在上层目录、以及桌面那份是否就是唯一完整副本 | 现场实测（`PROJECT_BOARD_INDEX.md` §6） |
+| 10 | **`.env` 活跃赋值行 = 0** ⇒ 主声（DeepSeek）**从未真正挂载**，她一直走 micro 降级声；是否配置 key 需裁决（注意调用成本与"每次调用先确认"红线） | 现场实测（§6） |
 
 ---
 

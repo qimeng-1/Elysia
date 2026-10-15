@@ -108,6 +108,15 @@ class Clip:
         for k in range(ahead):
             self.frame((index + k) % n)
 
+    def release(self) -> None:
+        """释放解码窗口（非活动片段不该占着内存）。
+
+        实测：每片段窗口 16 帧 × 1.6 MB（654x614）≈ **26 MB**；一套 8~9 个片段若全部驻留
+        就是 **247 MB**（长跑 3000 帧 + 反复切换 20 轮都稳定 ⇒ 不是泄漏，是这个设计）。
+        释放后切回会重新解码（单帧 5.47 ms，由 `prefetch` 摊到 tick 里）。
+        """
+        self._window.clear()
+
     @property
     def is_once(self) -> bool:
         """单次片段（播完回待机）还是循环片段。"""
@@ -321,6 +330,9 @@ class ClipPlayer:
             self._fade_left_s = max(0.0, self._fade_left_s - dt_s)
             if self._prev is not None and self._prev.frame_count > 1:
                 self._prev_index = (self._prev_index + 1) % self._prev.frame_count
+            if self._fade_left_s <= 0:
+                self._prev = None  # 淡出结束，旧片段不再需要
+                self._trim_windows()
         while self._acc >= clip.frame_interval_s:
             self._acc -= clip.frame_interval_s
             moved = True
@@ -380,6 +392,7 @@ class ClipPlayer:
         self._index = 0
         self._acc = 0.0
         self._dir = 1
+        self._trim_windows()
         return True
 
     def play_once(self, clip_id_prefix: str, *, fade: bool = True) -> bool:
@@ -406,7 +419,20 @@ class ClipPlayer:
         self._index = 0
         self._acc = 0.0
         self._dir = 1
+        self._trim_windows()
         return True
+
+    def _trim_windows(self) -> None:
+        """只保留"当前"与"正在淡出"两个片段的解码窗口。
+
+        内存 = 片段数 × 窗口帧数 × 单帧字节。共享画布让单帧涨到 1.6 MB（654x614），
+        而片段数也从 4~5 增到 8~9 ⇒ 若全部驻留就是 **247 MB**（实测；长跑稳定、非泄漏）。
+        这里把它们释放掉，切回时重新解码（单帧 5.47 ms，prefetch 会摊到 tick 里）。
+        """
+        keep = {id(c) for c in (self._current, self._prev) if c is not None}
+        for clip in self._cache.values():
+            if clip is not None and id(clip) not in keep:
+                clip.release()
 
     def _after_once(self, finished: Clip) -> Clip:
         """单次片段播完后接什么。

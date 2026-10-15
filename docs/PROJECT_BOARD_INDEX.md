@@ -150,8 +150,9 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 
 **`assets/pet/` 在 git 里只有 2 个文件**（`README.md`、`character.png`）——`costumes/`、`_retired/` 均被 gitignore。
 
-**`.env` 现状（只读核对，未读任何值）**：文件存在（1.6 KB），**活跃赋值行 = 0**（全部为注释态）
-⇒ 主声/次声**都未挂载**，`.env` 里没有 API key；实跑时她走 **micro 降级声**（与探针实测 `level=micro` 一致）。
+**`.env` 现状（只读核对，未读任何值）**：文件存在（1.6 KB），2026-10-16 起**活跃赋值行 = 1**
+（`ELYSIA_LLM_MAIN_API_KEY`，DeepSeek 主声；**值不入档**）⇒ 主声已挂载、真机验证 `expression_log.level = main`。
+其余键仍为注释态；TTS 需外部 GPT-SoVITS 服务（未启动时**只出文字**）。
 
 ---
 
@@ -196,7 +197,7 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 | 7 | **文档口径冲突**：`STATUS_MATRIX` 内部（~185s vs 0s）；`OPERATION_GUIDE` §10 与 `STATUS_MATRIX` §11 #3/#4 相互矛盾 | 两文档 |
 | 8 | **运维待定**：进程看门狗无崩溃循环退避；保留策略有意不自动调度；全局 git 身份损坏；无 API key、出声需手动起 GPT-SoVITS | `SESSION_REPORT_2026-10-14.md` §5.1/§5.3 |
 | 9 | ~~旧工程位置变动~~ **已裁决（2026-10-16）**：`Elysia_Project` 由**用户本人**从上层目录移到桌面，**保留在桌面**（只读参考，不当草稿） | 用户确认 + §6 |
-| 10 | **主声 key 已裁决（2026-10-16）：配置并允许自主调用**（`ELYSIA_LLM_MAIN_API_KEY`，DeepSeek）。当前 `.env` 活跃赋值行 = 0，**待 key 就位**；护栏与预算口径待定；⚠️ MiniMax 的"逐次确认"红线**不变** | 用户裁决 + §6 |
+| 10 | ~~主声 key~~ **已完成（2026-10-16）**：`.env` 写入 `ELYSIA_LLM_MAIN_API_KEY`（不回显、已被 gitignore），临时库实测 `expression_log.level = main`（2/2 次真 LLM 生成，含一次对用户输入的回复）。护栏口径：**先观察真实用量再定**；⚠️ MiniMax 的"逐次确认"红线**不变** | 实测 `D:\ElysiaAssets\_probe\verify_main_voice.py` |
 
 ---
 

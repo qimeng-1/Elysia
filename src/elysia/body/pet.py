@@ -100,8 +100,10 @@ DRAG_SWAY_DEG = 2.2
 # 权重不是平摊的：`idle-open` 是绝对主力——睁眼待机占待机绝大部分时间；
 # 若平摊，闭眼的 `idle` 会占 1/5，把"睁眼"的改进抵消掉。
 IDLE_WEIGHTS: dict[str, int] = {
-    "idle-open": 8,  # 睁眼待机呼吸：主力
-    "idle": 2,  # 闭眼呼吸：偶尔打个盹
+    "idle-open": 8,  # 睁眼待机呼吸：主力（豆包素材）
+    "idle": 4,  # 主待机（Spine 素材没有 idle-open，就用它）
+    "idle-hunmi": 1,  # 昏睡待机（仅 elvisa_2 那套服装有）
+    "idle-cry": 1,  # 哭泣待机（仅 elvisa_6 那套服装有）
     "look-around": 2,  # 东张西望
     "think": 2,  # 发呆思考
     "settle": 1,  # 归位站定

@@ -31,18 +31,22 @@
 
 | 服装 | 名字 | 片段 |
 |---|---|---|
-| `s1` | 花冠白裙 | idle / walk / wave / cheer |
-| `s2` | 女仆装 | idle / **idle-hunmi** / walk / wave / cheer |
-| `s3` | 黑白马甲 | idle / walk / wave / cheer |
-| `s4` | 紫黑装 | idle / walk / wave / cheer |
-| `s5` | 白衫深裤 | idle / walk / wave / cheer |
-| `s6` | 紫羽装 | idle / **idle-cry** / walk / wave / cheer |
+| `s1` | 花冠白裙 | idle / walk / wave / cheer / notice / settle-bridge / land / float |
+| `s2` | 女仆装 | idle / **idle-hunmi** / walk / wave / cheer / notice / settle-bridge / land / float |
+| `s3` | 黑白马甲 | idle / walk / wave / cheer / notice / settle-bridge / land / float |
+| `s4` | 紫黑装 | idle / walk / wave / cheer / notice / settle-bridge / land / float |
+| `s5` | 白衫深裤 | idle / walk / wave / cheer / notice / settle-bridge / land / float |
+| `s6` | 紫羽装 | idle / **idle-cry** / walk / wave / cheer / notice / settle-bridge / land / float |
 
-- 全部来自 **Spine 骨骼烘焙**（见 §7.1），**同一套骨骼系统** ⇒ 各片段角色大小与站位天然一致
+- 全部来自 **Spine 骨骼烘焙**（见 §5.1），**同一套骨骼系统** ⇒ 各片段角色大小与站位天然一致
   （角色高统一 560px、脚底同线；这正是 AI 逐段生成做不到的）
-- **全部片段 100% 无缝循环**（首尾剪影差 ≤ 1.2）
-- 目录：`assets/pet/costumes/<id>/{frames/*.png, webp/*.webp, manifest.json, costume.json}`
-  —— **不入 git**（版权 + 体积），但每套都有可复现配方（§7）
+- **循环片段 100% 无缝**（首尾剪影差 ≤ 0.06）；`land`/`notice` 是单次片段、不参与循环
+- 目录：`assets/pet/costumes/<id>/<片段>/{webp/*.webp, manifest.json}` + `costume.json`
+  —— **不入 git**（版权 + 体积）
+- **不存 PNG 母版**：运行时只读 `webp/`，而真母版是 `.skel` + `bake.js` + `canvas.json`
+  （几分钟可重烘）。存一份 PNG 把体积撑到 4.5 倍（实测 605.7 MB vs 161.5 MB），不值得
+- `land` / `float` 是**派生片段**：不新画素材，在骨骼层加位移与压缩（等同动画师 K 根骨骼），
+  用 `node scripts/spine_bake.js <outfit> --derive land|float` 生成
 
 ### 2.2 触发逻辑（`src/elysia/body/pet.py`）
 
@@ -117,6 +121,11 @@ look-around 2  think 2  settle 1
 | 23 | `3_applaud` **作者有问题** | 6 套**全部**都是"眉毛/眼睑横穿眼睛"（逐帧全分辨率确认）。**一律排除**，第二个点击回应改用 `5_special_ani` |
 | 24 | `0_left` / `0_right` 是**空动画** | 时长 0.00s、只有 3 帧完全相同 ⇒ 转向/张望拿不到素材 |
 | 25 | 第 0 帧**不一定是站姿** | `高处落地或弹跳` 是弹跳循环，f0 在半空、角色仅 423px 高；拿它当缩放基准会把该片段放大 32%。用 `borrow_transform_from` 借同机位兄弟片段的基准 |
+| 26 | **画布只按 setup pose 定尺寸 ⇒ 内容被平切** | 动画摆幅比 setup pose 大（头发/裙摆甩出去）。实测已入库片段：`s1/idle` **46/145 帧触底**、`s1/walk` **49/49 帧触左右**、`s2/idle` 57 帧触顶。正解：**按"该套服装所有动画所有帧"的并集算共享画布**（`scripts/spine_canvas.js` → `out/<outfit>/canvas.json`，由 `bake.js` 读取）。修后画布 468×574 → 654×614，**触边 0** |
+| 27 | `MARGIN` **没乘超采样倍数** | 留白写在 2x 画布上等于只有一半（14 → 7px 成品）。同理派生动画的位移量也必须乘 `SUPERSAMPLE`，否则"以为 12px、实际 6px" |
+| 28 | **`argv.indexOf` 找不到时返回 -1** | 我写的 `filter((_, i) => i !== idx && i !== idx+1)` 在无 `--derive` 时会把**第 0 个参数（服装名）吃掉**，于是去打开 `1_idle.atlas` —— **32 个烘焙全挂在这上面**。必须先判 `idx >= 0` |
+| 29 | `const` 的**暂时性死区** | 把派生常量写在 `const SUPERSAMPLE` 之前 ⇒ `ReferenceError: Cannot access 'SUPERSAMPLE' before initialization`。而且我当时只 grep 了"输出"行，**没发现脚本其实崩了**，还在对着旧帧测数据 ⇒ **跑完批量脚本要检查每一步是否真有产出**，别只看摘要 |
+| 30 | **`play_once` 与 `set_clip` 的淡入淡出差异** | 落地这类"瞬间冲击"必须 `play_once(LAND_CLIP, fade=False)`；带淡入会读成"起跳" |
 
 ---
 
@@ -140,21 +149,35 @@ look-around 2  think 2  settle 1
 # 0) 依赖（只需一次）：Node + npm 包，在 D:\ElysiaAssets\spine_bake\
 npm install @esotericsoftware/spine-core@4.1 @esotericsoftware/spine-canvas@4.1 canvas
 
-# 1) 预检（强烈建议先跑）：图集完整性、动画清单与时长、缩略图
-node scripts/spine_precheck.js          # 仓库内版本；按需改里面的 OUTFITS
+# 1) 预检：图集完整性、动画清单与时长、缩略图
+node scripts/spine_precheck.js
 
-# 2) 烘焙（自带缝隙修复：三角形外扩 + 2x 超采样）
+# 2) **算共享画布**（关键，别跳过）：取该套服装所有动画所有帧的并集
+#    ⇒ 任何动作都不会被画布裁掉，且同套所有片段同尺寸
+node scripts/spine_canvas.js            # 写入 out/<outfit>/canvas.json
+
+# 3) 烘焙（自带缝隙修复：三角形外扩 + 2x 超采样；会自动读 canvas.json）
 node scripts/spine_bake.js <outfit> <动画名> 24 560
+node scripts/spine_bake.js <outfit> --derive land  24 560   # 派生：落地压缩
+node scripts/spine_bake.js <outfit> --derive float 24 560   # 派生：失重漂浮
 
-# 3) 入库前**全分辨率复查**（缩略图看不出"眉毛穿眼"这类问题！）
+# 4) 入库前**全分辨率复查**（缩略图看不出"眉毛穿眼"这类问题！）
 python scripts/spine_check_all.py
 
-# 4) 入库（--downscale 2 对应烘焙的 2x 超采样）
+# 5) 入库（--downscale 2 对应烘焙的 2x 超采样；--no-master 不写冗余 PNG 母版）
 uv run python scripts/ingest_spine.py --src <烘焙输出目录> --out assets/pet/costumes/<id> \
-    --name "<菜单显示名>" --downscale 2 \
-    --clip idle=1_idle --clip walk=2_walking_default \
-    --clip wave=4_wavehands --clip cheer=5_special_ani
+    --name "<菜单显示名>" --downscale 2 --no-master \
+    --clip idle=1_idle --clip walk=2_walking_default --clip wave=4_wavehands \
+    --clip cheer=5_special_ani --clip notice=2_walking_left:0:34 \
+    --clip settle-bridge=1_idle:0:42 --clip land=land --clip float=float
+
+# 6) **验收**（把关卡固化下来，防回归）
+uv run python scripts/spine_verify.py
 ```
+
+`spine_verify.py` 会检查：**画布边缘裁切**（触边必须为 0）、同套各片段尺寸一致、
+7 类行为片段齐全（待机/漫游/点击回应/拖拽/落地/动作后缓冲/鼠标移入）、
+循环差、manifest 帧数与实际是否对得上。**加了新素材就跑它。**
 
 > 片段 ID 决定行为（见 §2.2）：`idle*` 循环；`notice/settle/land/wave/cheer/shy/surprise/pout`
 > 是"播一次"；`float` 优先于 `grab` 作拖拽；`run` 优先于 `walk` 作漫游。
@@ -213,15 +236,16 @@ uv run python scripts/asset_pipeline.py portrait --src <立绘> --out <服装目
 
 ## 8. 已知限制与未完成项
 
-1. **动作种类少**：每套只有 4~5 个片段（idle/walk/wave/cheer ±特殊待机）。
-   缺 `float`（拖拽漂浮）、`land`（落地缓冲）、`settle-bridge`（动作后缓冲）、`notice`（鼠标移入）
-   ⇒ 这三种行为目前是降级状态（拖拽只有物理漂浮、松手直接回待机、鼠标移入无反应）
+1. **动作种类**：每套 8~9 个片段，7 类行为已全部有素材（含 `float`/`land`/`settle-bridge`/`notice`）✓
+   但 **`applaud`（鼓掌）6 套全废**（§3.4 #23），所以"点击回应"实际只有"挥手"和"比心/眨眼"两种
 2. **灵魂状态未接**：`STATE_CLIPS` 的映射（away/unhappy/tired/happy）已写好，
    但要用 `--with-soul-data` 启动且灵魂在跑才生效
-3. **未推送**：本地领先 `origin/main` **41 个提交**（远程还是 `91bf19d`）；推送与否待用户决定
+3. **未推送**：本地领先 `origin/main` **44 个提交**（远程还是 `91bf19d`）；推送与否待用户决定
 4. **她的真实数据在他机**：本地 `data/*.db` 是测试数据（576 心跳 / 22 记忆）；
    **绝不能把本地库拷到他机**（会用测试数据覆盖她的真实生命）。方向只能是他机 → 这里
 5. `WANDER_SPEED_PX_S = 110` 是估的，若看着"滑步"需要和走动的步频对齐调整
+6. 共享画布让**窗口变大**（s1: 之前 528×634 → 现在 714×674）：多出来的是动作摆幅空间，
+   不裁切的代价。若嫌窗口大可以调小 `spine_canvas.js` 的采样范围（会重新引入裁切风险）
 
 ---
 

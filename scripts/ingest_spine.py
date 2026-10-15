@@ -39,11 +39,15 @@ def ingest_clip(
     downscale: int = 1,
     start: int = 0,
     end: int = 0,
+    no_master: bool = False,
 ) -> dict[str, object]:
-    """一个动画 → 一个片段目录（frames/webp/manifest）。
+    """一个动画 → 一个片段目录（webp/ + manifest.json）。
 
     `downscale > 1`：烘焙器是**超采样**渲的（为了消掉三角形缝隙），这里降采样回目标尺寸。
     `start/end`：只取这个帧区间（`end=0` 表示到末尾）——用来避开原动画里不好看的相位。
+    `no_master`：不写 `frames/` PNG 母版。**Spine 素材建议开启**：运行时只读 `webp/`
+    （见 `anim.py`），而真母版是 `.skel` + `bake.js` + `canvas.json`（几分钟可重烘），
+    再存一份 PNG 只是把体积撑到 4.5 倍（实测 605.7 MB vs 161.5 MB）。
     """
     files = sorted(p for p in src_dir.glob("*.png"))
     if not files:
@@ -62,7 +66,9 @@ def ingest_clip(
     for d in (frames_dir, webp_dir):
         if d.is_dir():
             shutil.rmtree(d)
-        d.mkdir(parents=True, exist_ok=True)
+    webp_dir.mkdir(parents=True, exist_ok=True)
+    if not no_master:
+        frames_dir.mkdir(parents=True, exist_ok=True)
 
     first = last = None
     size = None
@@ -75,7 +81,8 @@ def ingest_clip(
                 Image.LANCZOS,
             )
         size = list(im.size)
-        im.save(frames_dir / f"{i:04d}.png", optimize=True)
+        if not no_master:
+            im.save(frames_dir / f"{i:04d}.png", optimize=True)
         im.save(webp_dir / f"{i:04d}.webp", "WEBP", quality=WEBP_QUALITY, method=4)
         if i == 0:
             first = im.copy()
@@ -99,8 +106,10 @@ def ingest_clip(
         "loops_seamlessly": loops,
         "suggest_ping_pong": not loops,
         "spine": {k: v for k, v in src_manifest.items() if k.startswith("spine_")},
-        "master_frames": "frames/*.png（无损母版）",
+        "master_frames": None if no_master else "frames/*.png（无损母版）",
         "runtime_frames": f"webp/*.webp（q{WEBP_QUALITY}）",
+        "rebake": f"node scripts/spine_bake.js {src_manifest.get('costume_source', '?')}"
+        + (f" --derive {src_manifest['derived']}" if src_manifest.get("derived") else ""),
     }
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -117,6 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--src", required=True, type=Path, help="bake.js 的输出目录（含各动画子目录）")
     ap.add_argument("--out", required=True, type=Path, help="服装包目录，如 assets/pet/costumes/s1")
     ap.add_argument("--name", required=True, help="菜单里显示的名字")
+    ap.add_argument(
+        "--no-master",
+        action="store_true",
+        help="不写 frames/ PNG 母版（Spine 素材建议开启：可重烘，母版是 .skel+脚本）",
+    )
     ap.add_argument(
         "--downscale",
         type=int,
@@ -149,7 +163,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sizes = set()
     for cid, sub, start, end in mapping:
-        m = ingest_clip(args.src / sub, args.out / cid, cid, args.downscale, start, end)
+        m = ingest_clip(
+            args.src / sub, args.out / cid, cid, args.downscale, start, end, args.no_master
+        )
         sizes.add(tuple(m["size"]))  # type: ignore[arg-type]
     if len(sizes) > 1:
         print(f"  ⚠️ 各片段尺寸不一致：{sizes}（换动作时角色大小会跳）", file=sys.stderr)

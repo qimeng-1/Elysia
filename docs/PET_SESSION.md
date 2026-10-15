@@ -28,11 +28,15 @@
 每次改动**必须**做到：
 
 1. **门禁全绿**：`uv run ruff check` / `ruff format --check` / `uv run mypy src` / `uv run pytest`
-2. **桌面验收**：改完**重启桌宠**（`python -m elysia.body.pet`）并让用户看效果
-3. **更新文档**：`docs/HANDOVER.md`（结构/坑）与 `docs/PET_SESSION.md`（状态速查）保持真实
-4. **确认调用点**：新增片段/功能后，去 `pet.py` 查 `IDLE_WEIGHTS` / `CLICK_POOL` /
-   `DRAG_CLIP_CANDIDATES` / `WANDER_CLIP_CANDIDATES` / `STATE_CLIPS` ——
-   本项目已经犯过两次"入库了却没有调用点"的错（`grab`、`notice`）
+2. **素材验收**：动过服装包就跑 `uv run python scripts/spine_verify.py`
+   （检查画布裁切/尺寸一致/行为齐全/循环差 —— 每一项都对应一次真实事故）
+3. **桌面验收**：改完**重启桌宠**（`python -m elysia.body.pet`）并让用户看效果
+4. **更新文档**：`docs/HANDOVER.md`（结构/坑）与 `docs/PET_SESSION.md`（状态速查）保持真实
+5. **确认调用点**：新增片段/功能后，去 `pet.py` 查 `IDLE_WEIGHTS` / `CLICK_POOL` /
+   `DRAG_CLIP_CANDIDATES` / `WANDER_CLIP_CANDIDATES` / `STATE_CLIPS`，去 `anim.py` 查 `BRIDGE_CLIP`
+   —— 本项目犯过两次"入库了却没有调用点"的错（`grab`、`notice`）
+6. **批量脚本要逐步验证产出**：曾经因为 `argv.indexOf` 返回 -1 的 bug 让 32 个烘焙全失败，
+   而我只看摘要没看每步行，还拿旧数据做了半天测量
 
 ## 3. 一句话恢复上下文（新会话或很久没来时，把这段贴给我）
 
@@ -50,16 +54,20 @@
 |---|---|
 | 启动 | `python -m elysia.body.pet`（纯桌宠，不读灵魂） |
 | 关闭 | 右键 → 退出 |
-| 素材 | **6 套 Spine 服装**（s1~s6）、26 个片段、全部无缝循环 |
-| 内存 | ~78 MB |
-| 门禁 | ruff / format(122) / mypy strict(60) / **pytest 461 passed** |
-| 提交 | 本地领先 `origin/main` **42 个**（远程仍是 `91bf19d`） |
+| 素材 | **6 套 Spine 服装**（s1~s6）、**50 个片段**、循环片段全部无缝 |
+| 行为 | **7 类全部有素材**：待机 / 漫游 / 点击回应 / 拖拽漂浮 / 落地 / 动作后缓冲 / 鼠标移入 |
+| 素材体积 | **94.6 MB**（不存冗余 PNG 母版；此前 767 MB） |
+| 内存 | ~88 MB |
+| 门禁 | ruff / format(124) / mypy strict(60) / **pytest 461 passed** |
+| 素材验收 | `spine_verify.py` **全部通过**（触边 0、尺寸一致、行为齐全） |
+| 提交 | 本地领先 `origin/main` **44 个**（远程仍是 `91bf19d`） |
 | 已撤下 | 9 套 AI/立绘服装在 `assets/pet/_retired/`（297 MB，可恢复） |
 | 清理出的过期物 | `D:\ElysiaAssets\_obsolete\`（45.6 MB，可删） |
 
-**触发逻辑一句话版**：待机池加权轮换（18–45 秒）→ 点她 = `CLICK_POOL` 随机 → 拖拽 = `float`
-（只有物理漂浮）→ 松手 = `land`（无则回待机）→ 鼠标移入 = `notice`（无则无反应）→
-动作演完垫 `settle-bridge`（无则直接回待机）→ 每 70–200 秒走一小段（`run`/`walk`）。
+**触发逻辑一句话版**：待机池加权轮换（18–45 秒）→ 点她 = `CLICK_POOL` 随机 →
+按住 = `float` 漂浮 → 松手 = `land`（**硬切不溶解**，阻尼压缩回弹）→
+鼠标移入 = `notice`（1.4 秒 + 25 秒冷却）→ 动作演完垫 `settle-bridge`（1.75 秒）再回待机 →
+每 70–200 秒走一小段（`run`/`walk`）。
 
 ## 5. 常用命令
 
@@ -71,12 +79,16 @@ $env:Path = "$env:USERPROFILE\.local\bin;$PWD\.venv\Scripts;$env:PATH"
 python -m elysia.body.pet
 uv run pytest ; uv run ruff check ; uv run ruff format --check ; uv run mypy src
 
-# Spine 素材：预检 → 烘焙 → 全分辨率复查 → 入库（细节见 HANDOVER §5.1）
+# Spine 素材：预检 → **算共享画布** → 烘焙 → 全分辨率复查 → 入库 → 验收
+#   全套流程与踩坑见 HANDOVER §5.1；**算共享画布**这步别跳，跳过会内容被平切
 node scripts/spine_precheck.js
+node scripts/spine_canvas.js                       # 写 out/<outfit>/canvas.json
 node scripts/spine_bake.js elvisa_1 1_idle 24 560
+node scripts/spine_bake.js elvisa_1 --derive land 24 560
 python scripts/spine_check_all.py
 uv run python scripts/ingest_spine.py --src <烘焙输出> --out assets/pet/costumes/<id> `
-    --name "<名>" --downscale 2 --clip idle=1_idle --clip walk=2_walking_default
+    --name "<名>" --downscale 2 --no-master --clip idle=1_idle --clip walk=2_walking_default
+uv run python scripts/spine_verify.py              # ← 加了素材就跑这个
 
 # 桌面截图（离屏，用来看眼睛/网格线这类细节）
 $env:QT_QPA_PLATFORM="offscreen"   # 仅在离屏脚本里设，别影响真机启动
@@ -93,9 +105,11 @@ $env:QT_QPA_PLATFORM="offscreen"   # 仅在离屏脚本里设，别影响真机�
 
 ## 7. 还没做完的（下次可以接着做）
 
-1. **补齐缺失行为**：`float`（拖拽漂浮）、`land`（落地缓冲）、`settle-bridge`（动作后缓冲）、
-   `notice`（鼠标移入）—— 现在都是降级状态
+1. **`applaud`（鼓掌）用不了**：6 套**全部**是"眉毛/眼睑横穿眼睛"（系统性作者问题，
+   已逐帧全分辨率确认）⇒ 点击回应只有"挥手"和"比心"两种。要更多花样只能等作者修或找新素材
 2. **接灵魂状态**：`STATE_CLIPS` 映射已写好，用 `--with-soul-data` 启动才生效
 3. **`WANDER_SPEED_PX_S = 110` 是估的** —— 若看着"滑步"要和走动步频对齐
-4. **推不推送**：42 个提交待用户决定
-5. 可选：给 DSH 写个 `/pet` 插件命令；或走"运行时实时渲染 Spine"路线（HANDOVER §5）
+4. **共享画布让窗口变大**（s1: 528×634 → 714×674，多出的是动作摆幅空间）。
+   若嫌大，可在 `spine_canvas.js` 收窄采样范围，但会重新引入裁切风险
+5. **推不推送**：45 个提交待用户决定
+6. 可选：给 DSH 写个 `/pet` 插件命令；或走"运行时实时渲染 Spine"路线（HANDOVER §5）

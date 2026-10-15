@@ -78,7 +78,7 @@ NOTICE_CLIP = "notice"
 
 # ── 漫游（对应 dsh-pet 的 `moves` 槽位）──────────────────────────────
 # 每隔一段时间，她在桌面上小跑一段。**独立于灵魂状态**：纯桌宠模式下也会漫游。
-WANDER_CLIP = "run"
+WANDER_CLIP_CANDIDATES = ("run", "walk")
 WANDER_TICK_MS = 33  # 位移刷新 ~30fps（灵魂轮询是 5Hz，用来移动窗口会一顿一顿）
 WANDER_MIN_S = 70.0  # 两次漫游的最小间隔
 WANDER_MAX_S = 200.0
@@ -834,6 +834,15 @@ class PetWindow(QMainWindow):
         except Exception:
             pass
 
+    def _wander_clip(self) -> str:
+        """这套服装里用哪个片段漫游（`run` 优先，其次 Spine 烘焙的 `walk`）。"""
+        if self._clip_player is None:
+            return ""
+        for cid in WANDER_CLIP_CANDIDATES:
+            if self._clip_player.has_clip(cid):
+                return cid
+        return ""
+
     def _available_geometry(self) -> QRect:
         """当前窗口所在屏幕的可用区域（避开任务栏）；拿不到就退回窗口自身几何。"""
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -847,7 +856,7 @@ class PetWindow(QMainWindow):
         碰到屏幕边缘、被拖拽、或开始播回应时都会中止。
         """
         player = self._clip_player
-        if player is None or not player.has_clip(WANDER_CLIP):
+        if player is None or not self._wander_clip():
             return
         now = time.time()
 
@@ -894,7 +903,9 @@ class PetWindow(QMainWindow):
         )
         self._canvas.set_facing(self._wander_dir)
         if player is not None:
-            player.set_clip(WANDER_CLIP)
+            clip = self._wander_clip()
+            if clip:
+                player.set_clip(clip)
         self._idle_next_switch = time.time() + 60.0  # 别让待机轮换打断她跑步
 
     def _end_wander(self) -> None:

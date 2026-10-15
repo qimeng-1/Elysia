@@ -32,17 +32,31 @@ def _mean_diff(a: Image.Image, b: Image.Image) -> float:
     return float(ImageStat.Stat(ImageChops.difference(a.convert("L"), b.convert("L"))).mean[0])
 
 
-def ingest_clip(src_dir: Path, out_dir: Path, clip_id: str) -> dict[str, object]:
-    """一个动画 → 一个片段目录（frames/webp/manifest）。"""
+def ingest_clip(
+    src_dir: Path,
+    out_dir: Path,
+    clip_id: str,
+    downscale: int = 1,
+    start: int = 0,
+    end: int = 0,
+) -> dict[str, object]:
+    """一个动画 → 一个片段目录（frames/webp/manifest）。
+
+    `downscale > 1`：烘焙器是**超采样**渲的（为了消掉三角形缝隙），这里降采样回目标尺寸。
+    `start/end`：只取这个帧区间（`end=0` 表示到末尾）——用来避开原动画里不好看的相位。
+    """
     files = sorted(p for p in src_dir.glob("*.png"))
     if not files:
         raise SystemExit(f"  {clip_id}: 源目录没有 PNG：{src_dir}")
+    if start or end:
+        files = files[start : (end or len(files))]
+        if not files:
+            raise SystemExit(f"  {clip_id}: 裁剪 {start}:{end} 后没有帧")
     src_manifest = {}
     mf = src_dir / "manifest.json"
     if mf.is_file():
         src_manifest = json.loads(mf.read_text(encoding="utf-8"))
     fps = float(src_manifest.get("fps", 24))
-    size = list(Image.open(files[0]).size)
 
     frames_dir, webp_dir = out_dir / "frames", out_dir / "webp"
     for d in (frames_dir, webp_dir):
@@ -51,9 +65,16 @@ def ingest_clip(src_dir: Path, out_dir: Path, clip_id: str) -> dict[str, object]
         d.mkdir(parents=True, exist_ok=True)
 
     first = last = None
+    size = None
     for i, path in enumerate(files):
         with Image.open(path) as raw:
             im = raw.convert("RGBA")
+        if downscale > 1:
+            im = im.resize(
+                (max(1, im.width // downscale), max(1, im.height // downscale)),
+                Image.LANCZOS,
+            )
+        size = list(im.size)
         im.save(frames_dir / f"{i:04d}.png", optimize=True)
         im.save(webp_dir / f"{i:04d}.webp", "WEBP", quality=WEBP_QUALITY, method=4)
         if i == 0:
@@ -71,6 +92,8 @@ def ingest_clip(src_dir: Path, out_dir: Path, clip_id: str) -> dict[str, object]
         "frame_count": len(files),
         "fps": fps,
         "size": size,
+        "downscale": downscale,
+        "trimmed_frames": [start, end] if (start or end) else None,
         "loop_alpha_diff": round(loop_a, 3),
         "loop_rgb_diff": round(loop_rgb, 3),
         "loops_seamlessly": loops,
@@ -95,6 +118,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True, type=Path, help="服装包目录，如 assets/pet/costumes/s1")
     ap.add_argument("--name", required=True, help="菜单里显示的名字")
     ap.add_argument(
+        "--downscale",
+        type=int,
+        default=1,
+        help="烘焙器超采样的倍数（用它降采样回目标尺寸；bake.js 默认 2x ⇒ 这里填 2）",
+    )
+    ap.add_argument(
         "--clip",
         action="append",
         required=True,
@@ -104,17 +133,23 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    mapping: list[tuple[str, str]] = []
+    mapping: list[tuple[str, str, int, int]] = []
     for spec in args.clip:
         if "=" not in spec:
-            print(f"  --clip 需要 ID=目录名，收到：{spec!r}", file=sys.stderr)
+            print(f"  --clip 需要 ID=目录名[:起:止]，收到：{spec!r}", file=sys.stderr)
             return 2
         cid, sub = spec.split("=", 1)
-        mapping.append((cid.strip(), sub.strip()))
+        parts = sub.split(":")
+        start, end = 0, 0
+        if len(parts) >= 2 and parts[1].strip():
+            start = int(parts[1])
+        if len(parts) >= 3 and parts[2].strip():
+            end = int(parts[2])
+        mapping.append((cid.strip(), parts[0].strip(), start, end))
 
     sizes = set()
-    for cid, sub in mapping:
-        m = ingest_clip(args.src / sub, args.out / cid, cid)
+    for cid, sub, start, end in mapping:
+        m = ingest_clip(args.src / sub, args.out / cid, cid, args.downscale, start, end)
         sizes.add(tuple(m["size"]))  # type: ignore[arg-type]
     if len(sizes) > 1:
         print(f"  ⚠️ 各片段尺寸不一致：{sizes}（换动作时角色大小会跳）", file=sys.stderr)

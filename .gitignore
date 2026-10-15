@@ -47,3 +47,5 @@ desktop.ini
 assets/pet/costumes/
 # 素材流水线的中间产物
 assets/pet/_work/
+# 撤下的素材（AI 生成 / 官方立绘）：保留在本地但不再启用
+assets/pet/_retired/

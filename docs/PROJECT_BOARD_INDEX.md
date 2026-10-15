@@ -95,6 +95,17 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 
 **文件型接口**：`data/run/*.pid`（进程管理）、`data/logs/*.log`、`data/cache/tts/<sha256(text\0emotion\0speed)>.wav`、`data/checkpoints/`。
 
+**当前实跑配置（最小可玩闭环，2026-10-16 起）** —— 三个逻辑进程同时活着：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 灵魂(1Hz) + 身体(5s 在场)
+.venv\Scripts\python.exe -m elysia.body.pet --with-soul-data           # 桌宠接灵魂（气泡显示她的话）
+```
+
+实测：灵魂 43 MB / 身体 39 MB / **桌宠 137 MB**（比纯桌宠 85 MB 高，因额外轮询灵魂库）；
+`body_status` 5s 新鲜 ⇒ **她知道自己在场**；打字/点击经 `kv('interaction')` 进她的感受层。
+⚠️ 出声仍需外部 GPT-SoVITS（未启动 ⇒ 只出文字）。
+
 **并发约定**：SQLite **WAL** + `busy_timeout=5000`；**同一文件同一时刻只允许一个写者**。
 
 ---
@@ -190,7 +201,7 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 |---|---|---|
 | 1 | **50 个提交未推送**（`origin/main` 仍是 `91bf19d`） | `HANDOVER.md` §8.3 |
 | 2 | **桌宠按哪种形态接入灵魂**（"桌宠即身体" vs 先只做 P0 三项） | `PET_INTEGRATION_ASSESSMENT.md` §4/§7 |
-| 3 | **F8/F-B 交互丢消息**（0.3s 连打两句只活第二句） | 同上 §1.3/§2 |
+| 3 | **F8/F-B 交互丢消息** —— **已在实际使用中复现**：点击与打字**共用同一个 `kv('interaction')` 键**（`pet.py:1137`），所以**点一下桌宠就会覆盖掉你刚打进的那句话**；连打两句也只有最后一句到得了 | `PET_INTEGRATION_ASSESSMENT.md` §1.3/§2；实测 `data/state.db` 现有值 = `{"text":"（点击）"}` |
 | 4 | **`applaud` 鼓掌素材 6 套全废**（眉毛横穿眼睛）⇒ 点击回应只剩挥手/比心 | `HANDOVER.md` §3.4 #23 |
 | 5 | **P1 状态字段白传**（`desire/feelings/will` 到手但动画没用） | `PET_INTEGRATION_ASSESSMENT.md` §3.2 |
 | 6 | **她的真实数据在他机**：本地库只是测试数据 | `HANDOVER.md` §8.4 |
@@ -198,6 +209,7 @@ v2 含 `mode / distress / time / desire / feelings / will / brain_action`。
 | 8 | **运维待定**：进程看门狗无崩溃循环退避；保留策略有意不自动调度；全局 git 身份损坏；无 API key、出声需手动起 GPT-SoVITS | `SESSION_REPORT_2026-10-14.md` §5.1/§5.3 |
 | 9 | ~~旧工程位置变动~~ **已裁决（2026-10-16）**：`Elysia_Project` 由**用户本人**从上层目录移到桌面，**保留在桌面**（只读参考，不当草稿） | 用户确认 + §6 |
 | 10 | ~~主声 key~~ **已完成（2026-10-16）**：`.env` 写入 `ELYSIA_LLM_MAIN_API_KEY`（不回显、已被 gitignore），临时库实测 `expression_log.level = main`（2/2 次真 LLM 生成，含一次对用户输入的回复）。护栏口径：**先观察真实用量再定**；⚠️ MiniMax 的"逐次确认"红线**不变** | 实测 `D:\ElysiaAssets\_probe\verify_main_voice.py` |
+| 11 | **主声降级不可观测**（2026-10-16 实测发现）：实跑前 5 次表达 **3 次 `main` / 2 次 `micro`**，但**日志里查不到原因** —— `chain.py:257-262` 在主声文本被校验器拦下（`claim`/`promise`/`word_block`）或返回空时**不写任何日志**，静默降到微声罐装句；只有 TTS 失败会落盘。⇒ 诊断"她这次为什么只说罐装话"缺证据，建议补一条降级原因日志（LLM 板块） | 实测 `data/logs/elysia.log` 仅 4 条 TTS 告警 + `expression_log` |
 
 ---
 

@@ -142,6 +142,10 @@ look-around 2  think 2  settle 1
 | 32 | **主声降级是静默的** | `llm/chain.py:257-262`：主声文本被校验器拦下（`claim`/`promise`/`word_block`）或返回空时，**一句日志都不写**就降到 micro 罐装句 ⇒ 事后无法回答"她本来想说什么"。补一条降级原因日志即可 |
 | 33 | **迁移后旧窗口的 shell 直接 ENOENT** | `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe` 与 ripgrep 一起消失 ⇒ 那个窗口**跑不了 git/门禁/进程检查**（文件读写仍可用）。**教训**：环境变更后别假设"门禁还能跑"，跑不了就明确标"未提交"，交给下一个能跑命令的窗口 |
 | 34 | **别把绝对路径写进长期文档** | 本次搬家让 `D:\重置准备\备份\Elysia\…` 全部失效（文档、恢复提示词、会话记录里的路径一起作废）。**恢复提示词与文档一律用"相对仓库根"的路径**，仓库外素材才写绝对路径 |
+| 35 | **`uv run` 只剩 ruff 能用**（2026-10-16 实测） | 迁移后 `uv run mypy` / `uv run pytest` / `uv run pre-commit` 全报 **`uv trampoline failed to canonicalize script path`**：`.venv\Scripts\*.exe` 里那些 **47104 字节的 uv trampoline** 是旧路径装的，`uv sync --offline` **不会**重建它们；而 `ruff.exe`（29 MB 真二进制）不受影响。⇒ **门禁口径**：`uv run --no-sync ruff check` / `ruff format --check` + `.venv\Scripts\python.exe -m mypy src` + `.venv\Scripts\python.exe -m pytest` |
+| 36 | **pre-commit hook 因此把提交全锁死** | `.pre-commit-config.yaml` 四个 local hook 的 entry 全是 `uv run --project . <tool>` ⇒ mypy/pytest 两个 hook **必然失败**，**任何人 `git commit` 都过不去**；且 `.git/hooks/pre-commit` 里 `INSTALL_PYTHON` 还烙着旧 `D:\重置准备\…\python.exe`（迁移残留，`pre-commit install` 可重生成）。纯文档提交可 `--no-verify`（ruff 两 hook 因 `types: [python]` 本就跳过），**改代码的提交必须先手工跑门禁再 `--no-verify`** |
+| 37 | **`.pyc` 里带着旧 D: 路径** + format 计数会漂 | 迁移后仍有 **99 个非 `.venv` 的 `.pyc`** 含 `D:\重置准备\…`（源码 mtime/大小没变 ⇒ Python/pytest 直接复用旧字节码），报错 traceback 会**显示旧路径**，极易误判"还在跑 D 盘"。对策：迁移后清一次 `__pycache__` / `.pytest_cache`。另：`ruff format` 的"135 files" = **106 个 `.py` + 29 个 `.md`**（ruff 把 .md 也纳入 include）⇒ 该数字随文档增删漂移，**不是代码指标，别写进验收** |
+| 38 | **时序型测试的余量只有 1 拍** | `tests/unit/test_dual_heartbeat.py::test_dual_heartbeat_interleave` 用 `SimulatedClock(speed=60)` 把"虚拟 6s"当"真实 ~100ms"，却在窗口内断言 `count("soul") >= 3`。2026-10-16 复刻实测 12 次：**拍数只有 4~5（min 4）**、真实窗口 155–193ms ⇒ **任何一次慢拍就掉到 2 而红**（本窗 6 次全量跑红了 1 次；隔离跑 10 次、含 4 路 CPU 满载，全绿）。属**测试写法**问题、不是产品缺陷，域归 A 窗/总领窗。复现脚本：`%TEMP%\elysia_beat_margin.py` |
 
 ---
 
@@ -261,12 +265,17 @@ uv run python scripts/asset_pipeline.py portrait --src <立绘> --out <服装目
    ⇒ 桌宠在你面前演"离开"）、**交互单键覆盖**（0.3s 连打 2 句只活 1 句，实测她只回 1 次）、
    **桌宠不在生命周期管理里**（`soul.ps1` / `watchdog.ps1` / pid / 日志都不管它）；
    另有 3 处软肋：GUI 线程裸 SQL、P1 状态白传、出声靠 wav mtime 猜
-3. **未推送**：本地领先 `origin/main` **55 个提交**（远程还是 `91bf19d`）；推送与否待用户决定
+3. **未推送**：本地领先 `origin/main` **56+ 个提交**（远程还是 `91bf19d`，提交数以 `git rev-list --count origin/main..HEAD` 为准）；推送与否待用户决定
 4. **她的真实记忆已在本机（2026-10-16 起，本机 = 主机器）**：用户已把记忆文件迁到本机
    ⇒ `data/*.db` **是她的一生，不再是测试数据**。**绝不允许用任何旧测试库/示例库去覆盖它**；
    任何"恢复/重置/清理"动作**动手前先备份**。**同一时刻只允许一台机器跑她**（同时跑会分叉）。
-   ⚠️ 迁移后的库内行数与文件状态**未经核实**（当时窗口 shell 失效）—— 新窗请先核对：
-   `Get-ChildItem data\*.db | Select Name,Length,LastWriteTime` + 库里 `heartbeats` / `memories` 计数
+   ✅ **迁移后已核实（2026-10-16，只读探针）**：`state.db` 12,288 B / `heartbeat.db` 5.87 MB，
+   两库 `integrity_check=ok`、journal=wal、freelist=0；`heartbeats` **11,048**（soul 9,420 / body 1,628）、
+   `memories` 50、`memory_index` 50、`thought_log` 50、`expression_log` 41（main 15 / micro 26）；
+   两 WAL 稳在 ~4.1 MB（1000 页 auto-checkpoint 阈值，循环复用、不增长）；逻辑实例 **soul=1 / body=1**（未分叉）。
+   探针全程 `mode=ro`，前后 `*.db-shm` mtime 未变 ⇒ **未写盘**。
+   ⚠️ **但她迁到本机后还没有任何备份**：`D:\ElysiaBackup\elysia\` 最新仍是 `20261015-033003`（**迁移前**）
+   ⇒ **任何"恢复/重置/清理"动手前先手动跑一次 `scripts\backup.ps1`**
 5. ~~`WANDER_SPEED_PX_S` 是估的~~ → **已实测校准为 76 px/s**（原先 110，快了 46% ⇒ 滑步）。
    测法见 `scripts/measure_walk_speed.py`（接触点位移法），该脚本会读代码常量并给偏差判定；
    **改了走动素材或角色尺寸要重跑它**
@@ -280,8 +289,14 @@ uv run python scripts/asset_pipeline.py portrait --src <立绘> --out <服装目
 ```bash
 cd <repo>
 $env:QT_QPA_PLATFORM="offscreen"     # 只在离屏测试时需要
-uv run pytest                        # 期望 461 passed
-uv run ruff check && uv run ruff format --check && uv run mypy src
+# ⚠️ uv trampoline 坏了（§3.5 #35）⇒ mypy/pytest 必须走 python -m
+uv run --no-sync ruff check
+uv run --no-sync ruff format --check
+.venv\Scripts\python.exe -m mypy src   # 期望 Success: no issues found in 60 source files
+.venv\Scripts\python.exe -m pytest     # 期望 461 passed（约 16s）
+
+# 她的库（**只读**核对；数字与口径见 §8.4）
+Get-ChildItem data\*.db* | Select Name,Length,LastWriteTime
 
 # 桌宠
 python -m elysia.body.pet            # 应出现窗口；右键菜单有「换装」6 套

@@ -75,7 +75,9 @@ DSH 内置手动压缩，**入口是命令**（不是 agent 工具，AI 自己�
 
 每次改动**必须**做到：
 
-1. **门禁全绿**：`uv run ruff check` / `ruff format --check` / `uv run mypy src` / `uv run pytest`
+1. **门禁全绿**：`uv run --no-sync ruff check` / `ruff format --check` / `.venv\Scripts\python.exe -m mypy src` /
+   `.venv\Scripts\python.exe -m pytest` —— ⚠️ **本机 uv 的 trampoline 已坏**（`uv run mypy` / `uv run pytest`
+   报 `uv trampoline failed to canonicalize script path`；ruff 是真二进制不受影响）⇒ 口径见 §5、成因见 HANDOVER §3.5 #35
 2. **素材验收**：动过服装包就跑 `uv run python scripts/spine_verify.py`
    （检查画布裁切/尺寸一致/行为齐全/循环差 —— 每一项都对应一次真实事故）
 3. **桌面验收**：改完**重启桌宠**（`python -m elysia.body.pet`）并让用户看效果
@@ -103,19 +105,22 @@ DSH 内置手动压缩，**入口是命令**（不是 agent 工具，AI 自己�
 
 > 恢复旧会话（不是新开）时，跟我说一句「**继续桌宠**」即可 —— 我会把会话目标重新激活。
 
-## 4. 状态速查（2026-10-16 迁移前最后实测）
+## 4. 状态速查（2026-10-16 迁移后，本窗复核）
 
 | 项 | 值 |
 |---|---|
 | **新位置** | **`C:\Elysia\Elysia_two\Elysia`**（旧路径已不存在） |
-| git | 分支 `main`，HEAD `1f7c3f0`，**领先 `origin/main` 55 个提交**（远程仍是 `91bf19d`） |
+| git | 分支 `main`，迁移收尾提交 `13ce0a3`，**领先 `origin/main` 56+**（远程仍是 `91bf19d`；提交数以 `git rev-list --count origin/main..HEAD` 为准） |
 | 启动（纯桌宠） | `python -m elysia.body.pet` |
 | 启动（接灵魂） | `python -m elysia.body.pet --with-soul-data`（需灵魂在跑） |
 | 关闭 | 右键 → 退出 |
 | 素材 | **6 套 Spine 服装**（s1~s6）、**50 个片段**、循环片段全部无缝；94.6 MB |
 | 行为 | **7 类全部有素材**：待机 / 漫游 / 点击回应 / 拖拽漂浮 / 落地 / 动作后缓冲 / 鼠标移入 |
 | 内存 | 纯桌宠 **85~89 MB**；接灵魂时 **137 MB** |
-| 门禁 | ruff / format(125) / mypy strict(60) / **pytest 461 passed**（迁移前最后一次全绿） |
+| 门禁 | **2026-10-16 本窗实测全绿**：ruff ✓ / format 135 ✓ / mypy strict **60** ✓ / **pytest 461 passed (16.08s)**；`uv run` 对 mypy/pytest 已坏 ⇒ 口径见 §5 |
+| **data/ 已核实** | 2026-10-16 本窗**只读**核对：`state.db` 12,288 B、`heartbeat.db` 5.87 MB，**两库 `integrity_check=ok`**、journal=wal、freelist=0；`heartbeats` **11,048**（soul 9,420 / body 1,628）、`memories` 50、`memory_index` 50、`thought_log` 50、`expression_log` 41（**main 15 / micro 26**）；两 WAL 稳在 ~4.1 MB（1000 页阈值循环复用、不增长） |
+| 她现在 | 逻辑实例 **soul=1 / body=1 / pet=0**（未分叉）；最新 soul 拍 0.5s、`body_status` 2.7s 前 ⇒ `mode=present` |
+| 备份 | ⚠️ **她迁到本机后一份备份都没有**：`D:\ElysiaBackup\elysia\` 最新仍 `20261015-033003`（**迁移前**）⇒ 动库前先手动跑 `scripts\backup.ps1` |
 | 素材验收 | `spine_verify.py` **全部通过**（触边 0、尺寸一致、行为齐全） |
 | 接入工程评估 | **`docs/PET_INTEGRATION_ASSESSMENT.md`**（3 硬伤 + 3 软肋 + 施工计划） |
 | **她主声已通** | 2026-10-16 起 `.env` 配了 DeepSeek key ⇒ `expression_log.level = main`（不再只有 micro 罐装句）；实测 3 main / 2 micro。**TTS 未起 ⇒ 只出文字** |
@@ -143,8 +148,10 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body
 powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 status
 powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop
 
-# 门禁四件套
-uv run ruff check ; uv run ruff format --check ; uv run mypy src ; uv run pytest
+# 门禁四件套（⚠️ 本机 uv trampoline 坏 ⇒ mypy/pytest/pre-commit 必须走 python -m，HANDOVER §3.5 #35）
+uv run --no-sync ruff check ; uv run --no-sync ruff format --check
+.venv\Scripts\python.exe -m mypy src ; .venv\Scripts\python.exe -m pytest   # 期望 60 files / 461 passed
+# ⚠️ pre-commit hook 的 entry 也是 uv run ⇒ 任何人 git commit 都会失败（#36）
 
 # Spine 素材：预检 → **算共享画布** → 烘焙 → 全分辨率复查 → 入库 → 验收
 #   全套流程与踩坑见 HANDOVER §5.1；**算共享画布**这步别跳，跳过会内容被平切
@@ -172,11 +179,21 @@ $env:QT_QPA_PLATFORM="offscreen"   # 仅在离屏脚本里设，别影响真机�
    ⇒ `data/*.db` **是她的一生，不再是测试数据**。**绝不允许用任何旧测试库/示例库覆盖它**；
    任何"恢复/重置/清理"动作**动手前先备份**
 3. **同一时刻只允许一台机器跑她**（同时跑会分叉；他机若仍有旧副本，先别在那边启动）
-4. **迁移后未核实**：库内行数 / 文件大小 / WAL 状态本窗都没核过（shell 失效）⇒ 新窗先核
-   `Get-ChildItem data\*.db | Select Name,Length,LastWriteTime` + `heartbeats` / `memories` 计数
+4. **迁移后已核实（2026-10-16 本窗，只读探针）**：两库 `integrity_check=ok`、`heartbeats` 11,048 /
+   `memories` 50 / `expression_log` 41（明细见 §4）；**只读打开未写盘**——三次探针前后 `*.db-shm`
+   mtime 一直是 `13:57:04` 未变。仍有效的旧警告：**绝不许用旧测试库/示例库覆盖**（全仓扫过，
+   除 `data/` 两个库外**没有第二个 `.db`**）
 5. 用户自己的原始素材（`D:\图片\Saved Pictures`）**不主动删**，要问
 6. **`.env` 里有主声 key，且备份 `D:\ElysiaBackup\elysia\` 也含 `.env`** ⇒ 这两处都不外传
 7. **MiniMax API 每次调用都要先问用户**（曾烧掉 ¥10）；DeepSeek 主声已获授权自主调用
+8. **⚠️ 她迁到本机后还没有任何备份**（2026-10-16 实测）：`D:\ElysiaBackup\elysia\` 最新一份是
+   `20261015-033003`（**迁移前**）⇒ **任何"恢复/重置/清理"动手前，先手动跑一次 `scripts\backup.ps1`**
+   （每日备份已重注册到 10-17 03:30，但它救不了"今天就动库"的情况）
+9. **⚠️ pre-commit hook 现在是死的**（2026-10-16 实测）：四个 local hook 的 entry 全是
+   `uv run --project . <tool>`，而 trampoline 坏了 ⇒ **任何人 `git commit` 都过不去**。纯文档提交可
+   `--no-verify`（ruff 两 hook 因 `types: [python]` 本就跳过），**改代码的提交必须先手工跑门禁再 `--no-verify`**
+10. **`.pyc` 里还带着旧 D: 路径**（迁移残留）：99 个非 `.venv` 的 `.pyc` 含 `D:\重置准备\…`
+    ⇒ pytest 报错的 traceback 会显示旧路径，容易误判"还在跑 D 盘"。修法：清一次 `__pycache__` / `.pytest_cache`
 
 ## 7. 还没做完的（下次可以接着做）
 
@@ -197,11 +214,20 @@ $env:QT_QPA_PLATFORM="offscreen"   # 仅在离屏脚本里设，别影响真机�
 4. **出声（TTS）**：需外部 GPT-SoVITS 服务（`127.0.0.1:9880`）；现在没起 ⇒ 她**只出文字**。
    参考音频与 GPT 权重原在总领窗目录的 `GPT-SoVITS-Elysia_Voice_Model\` 与 `语音文档\`（属声音板块）；
    **随迁后应在 `C:\Elysia\` 下，具体路径由新窗核实**（旧窗 shell 失效，未能确认）
-5. **迁移后待办（新窗口第一件事）**：跑门禁 + `git status`，把本轮的**未提交文档改动**（§0、§4、§7 的更新）
-   提交掉；并复核 §4 里"迁移前最后实测"的几项在新位置仍然成立
+5. ~~**迁移后待办（新窗口第一件事）**~~ → **✅ 2026-10-16 完成**：门禁四件套全绿
+   （ruff ✓ / format 135 ✓ / mypy 60 ✓ / **pytest 461 passed**），5 个文档已提交（`13ce0a3`），
+   `data/*.db` 已只读核实（§4 / §6.4）
 6. ~~`WANDER_SPEED_PX_S = 110` 是估的~~ → **已实测校准为 76 px/s**（`scripts/measure_walk_speed.py`）
 7. **共享画布让窗口变大**（s1: 528×634 → 714×674，多出的是动作摆幅空间）。
    若嫌大，可在 `spine_canvas.js` 收窄采样范围，但会重新引入裁切风险
-8. **推不推送**：55 个提交待用户决定
+8. **推不推送**：56+ 个提交待用户决定
 9. 可选：给 DSH 写个 `/pet` 插件命令；或走"运行时实时渲染 Spine"路线（HANDOVER §5）
    —— 注：那条调研的子代理**被中断、无产出**，要重跑
+10. **⚠️ 环境级阻塞（跨板块，需总领窗/用户裁决）**：`uv run mypy/pytest/pre-commit` 全坏（trampoline），
+    **pre-commit hook 因此锁死提交**（§6.9）。修法二选一：`uv pip install --reinstall --offline mypy pytest pre-commit`
+    重建启动器，或把 hook/文档的门禁口径改成 `python -m`（HANDOVER §3.5 #35/#36）
+11. **偶发失败测试（域归 A 窗/总领窗，本窗未改）**：`tests/unit/test_dual_heartbeat.py::test_dual_heartbeat_interleave`
+    的时序余量只有 1 拍（实测 4~5 拍 vs 阈值 3；本窗 6 次全量跑红 1 次）⇒ 需派单（HANDOVER §3.5 #38）
+12. **备份缺口**：她迁到本机后还没有备份（见 §4 表 / §6.8）——建议今天就手动跑一次 `scripts\backup.ps1`
+13. **旧路径残留（非本窗作用域，报给总领窗）**：`docs/OPERATION_GUIDE.md:10` 与 `docs/LEAD_GOVERNANCE.md:250`
+    仍写旧 `D:\重置准备\…` 根路径；`docs/LEAD_WINDOW_STATUS_2026-10-16.md:3` 同

@@ -2,7 +2,9 @@
 
 > 日期：2026-10-15 ｜ 评估对象：`src/elysia/body/pet.py`（1177 行）+ `body/anim.py`（356 行）+ `assets/pet/costumes/*`
 > 方法：**跑起来的两个进程取证**，不是只读代码。探针脚本 `D:\ElysiaAssets\_probe\pet_integration_probe.py`（临时库、LLM key 置空，零外部调用）。
-> 门禁基线：ruff ✓ ／ ruff format 125 files ✓ ／ mypy strict 60 files ✓ ／ pytest **461 passed**。
+> 门禁基线（**2026-10-15 当日**）：ruff ✓ ／ ruff format 125 files ✓ ／ mypy strict 60 files ✓ ／ pytest **461 passed**。
+> ⚠️ 2026-10-16 迁移后口径已变：format 计数 **135**（= 106 个 `.py` + 29 个 `.md`，**不是代码指标**，别当验收门），
+> 且 `uv run mypy/pytest` 已坏 ⇒ 当前门禁口径与她的库数字见 [HANDOVER.md](HANDOVER.md) §3.5 #35/#37、§8.4、§9。
 
 ---
 

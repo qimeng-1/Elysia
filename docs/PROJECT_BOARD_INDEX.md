@@ -6,8 +6,12 @@
 > **维护规则**：板块内部变动由该板块窗自己更新它的单一出处文档；**本索引只在"板块边界、归属窗口、开放问题"变化时改**。
 >
 > 建立：2026-10-16（用户裁决：本工程改为**多窗口协作**，新设总领窗）
-> 基线：本文建立时主线 HEAD `d2d85de`，远程 `origin/main` = `91bf19d`，领先 **51** 提交
+> 基线：主线 HEAD `1f7c3f0`（已随仓库搬家），远程 `origin/main` = `91bf19d`，领先 **55** 提交
 > （提交数是动态值，以 `git rev-list --count origin/main..HEAD` 为准）
+>
+> ⚠️ **2026-10-16 仓库搬家**：根目录 `D:\重置准备\备份\Elysia\Elysia_two\Elysia` → **`C:\Elysia\Elysia_two\Elysia`**；
+> 总领窗工作目录 → **`C:\Elysia`**。本文档里出现的旧 `D:\重置准备\…` 路径只作历史参考。
+> **规则**：长期文档与恢复提示词一律用"相对仓库根"的路径，只有仓库外素材才写绝对路径。
 
 ---
 
@@ -22,7 +26,7 @@
 | 开发铁律 | 一 灵感不越阶段 ／ 二 地基优先 ／ 三 体验验收 | `DEVELOPMENT_PRACTICES.md` |
 | 什么叫"完成" | **激活性 + 库内取证**（有字段≠完成；要能指出产生者，并在库里指出来） | `ROADMAP_V2.md` §2、§三 |
 | 验收门 | 测试套件全绿 **+** 人的主观确认，**缺一不可** | `PROJECT_ENGINEERING_STANDARD.md` §四 |
-| 主线的"她" | 本地 `data/*.db` **是测试数据**；她的真实一生（48 MB / 11.8 万心跳 / 401 记忆）在**另一台机器** | `SESSION_REPORT_2026-10-14.md` §5.3.1 |
+| 主线的"她" | **本机 = 主机器（2026-10-16 起）**：用户已把她的真实记忆迁到本机 `data/` ⇒ **那不是测试数据，是她的一生**；任何覆盖/重置/清理动作**动手前必须先备份** | 用户 2026-10-16 告知（库内行数待核，见 §9 #13） |
 
 ---
 
@@ -114,9 +118,20 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 灵魂
 
 | 窗口 | 工作目录 | 职责 | 写作用域 |
 |---|---|---|---|
-| **总领窗**（新） | `D:\重置准备\备份\Elysia` | 只读全线 + 规划 + 派活 + 验收 + 排雷 | 规划类文档（`docs/` 里的索引/路线） |
-| **桌宠窗** | `D:\重置准备\备份\Elysia\Elysia_two\Elysia` | 桌宠板块全部实现与验收 | `src/elysia/body/**`、`assets/pet/**`、`docs/PET_*.md`、`docs/HANDOVER.md` |
-| 其他板块窗 | 各自 | 各板块实现 | 各自模块（**必须与上表不重叠**） |
+| **总领窗**（新） | **`C:\Elysia`** | 只读全线 + 规划 + 派活 + 验收 + 排雷 | `docs/` 规划类：`LEAD_*.md`、`TASK_BOARD.md`、`HANDOVER_INTERFACE.md`、`HANDOVER_EXCHANGE/`、本索引、`STATUS_MATRIX.md`（统一回填） |
+| **A 地基窗** | **`C:\Elysia\Elysia_two\Elysia`** | 状态内核 / 生命循环 / 记忆全链路 | `src/elysia/core/**`、`src/elysia/soul/**`、`src/elysia/memory/**` |
+| **B 表达窗** | 同上 | 表达生成与出声 | `src/elysia/llm/**`、`src/elysia/tts/**` |
+| **C 契约窗** | 同上 | 跨进程契约与观测 | `src/elysia/protocol/**`、`src/elysia/tools/**` |
+| **D 桌宠窗** | 同上 | 桌宠板块全部实现与验收 | `src/elysia/body/**`、`assets/pet/**`、`docs/PET_*.md`、`docs/HANDOVER.md`、`scripts/spine_*` |
+
+**操作规程（**必读**）**：窗口编制、写作用域切分、派活与验收规则、交接流程、开窗阈值、禁手清单
+⇒ **`LEAD_GOVERNANCE.md`**（2026-10-16 建立，总领窗维护）
+任务清单唯一出处 ⇒ `TASK_BOARD.md`；交接模板与信箱 ⇒ `HANDOVER_INTERFACE.md` + `HANDOVER_EXCHANGE/`
+
+> **默认编制 = 1 总领窗 + 4 板块窗**（**按"写作用域"切，不按 8 个板块切**）：
+> `A` 地基窗 `core+soul+memory` ／ `B` 表达窗 `llm+tts` ／ `C` 契约窗 `protocol+tools` ／ `D` 桌宠窗 `body+assets/pet`。
+> 依据：板块是**能力分类**，窗口是**并发写边界**；多数板块已交付，无并行写需求。
+> **注意**：本表下方"其他板块窗"是**能力分类**，**不等于**应开 8 个窗口 —— 以 `LEAD_GOVERNANCE.md §2.2` 为准。
 
 **铁律**：
 1. **总领窗不写代码** —— 写只发生在板块窗；总领窗负责把任务说清楚、把验收关住。
@@ -129,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 灵魂
 
 ## 6. 目录与资产地图
 
-**上游目录 `D:\重置准备\备份\Elysia\`（总领窗工作目录）** —— 2026-10-16 00:14–00:37 实测：
+**上游目录 `C:\Elysia\`（总领窗工作目录；2026-10-16 搬家前为 `D:\重置准备\备份\Elysia\`）** —— 2026-10-16 实测：
 
 | 条目 | 是什么 | 规模 | 依据 |
 |---|---|---|---|
@@ -184,7 +199,10 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 灵魂
 ## 8. 红线（不能碰）
 
 1. **素材授权**：Spine Runtimes 需 Spine Editor 授权；手上这套归档标注「解包资源，仅供学习使用」⇒ **仅本地使用、绝不外传、绝不入库/公开**。同人立绘同理。
-2. **她的真实数据在另一台机器**：本地 `data/*.db` 是测试数据；**绝不允许 本地 → 他机**（会用测试数据覆盖她真实的一生）；**绝不允许两台机同时跑她**。
+2. **她的真实记忆已在本机（2026-10-16 起，本机 = 主机器）**：用户已迁移记忆文件
+   ⇒ `data/*.db` **是她的一生，不再是测试数据**。**绝不允许用任何旧测试库/示例库覆盖它**；
+   任何"恢复/重置/清理"动作**先备份**；**同一时刻只允许一台机器跑她**（同时跑会分叉）。
+   ⚠️ 迁移后库内行数与文件状态**未核实**（见 §9 #13）。
 3. **MiniMax API 每次调用都要用户逐次确认**（曾因"试一下"烧掉 ¥10）；key 在 `C:\Users\123\.elysia-minimax.key`，需要轮换。
    —— ⚠️ 这条**只针对 MiniMax**；DeepSeek 主声已于 2026-10-16 获用户授权**自主调用**（见 §9 #10）。
 4. **数据永不删除**：裁流水表须先拍板口径（归档保底 + 只裁 `heartbeats`，不碰 `memories`）。
@@ -204,26 +222,30 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 start -Body   # 灵魂
 | 3 | **F8/F-B 交互丢消息** —— **已在实际使用中复现**：点击与打字**共用同一个 `kv('interaction')` 键**（`pet.py:1137`），所以**点一下桌宠就会覆盖掉你刚打进的那句话**；连打两句也只有最后一句到得了 | `PET_INTEGRATION_ASSESSMENT.md` §1.3/§2；实测 `data/state.db` 现有值 = `{"text":"（点击）"}` |
 | 4 | **`applaud` 鼓掌素材 6 套全废**（眉毛横穿眼睛）⇒ 点击回应只剩挥手/比心 | `HANDOVER.md` §3.4 #23 |
 | 5 | **P1 状态字段白传**（`desire/feelings/will` 到手但动画没用） | `PET_INTEGRATION_ASSESSMENT.md` §3.2 |
-| 6 | **她的真实数据在他机**：本地库只是测试数据 | `HANDOVER.md` §8.4 |
+| 6 | ~~她的真实数据在他机~~ **已变更（2026-10-16）**：记忆文件已迁到本机，**本机 = 主机器**；红线**反转**为"绝不许用旧测试库/示例库覆盖本机 `data/`，重置前先备份" | 用户告知 + §8.2 |
 | 7 | **文档口径冲突**：`STATUS_MATRIX` 内部（~185s vs 0s）；`OPERATION_GUIDE` §10 与 `STATUS_MATRIX` §11 #3/#4 相互矛盾 | 两文档 |
 | 8 | **运维待定**：进程看门狗无崩溃循环退避；保留策略有意不自动调度；全局 git 身份损坏；无 API key、出声需手动起 GPT-SoVITS | `SESSION_REPORT_2026-10-14.md` §5.1/§5.3 |
 | 9 | ~~旧工程位置变动~~ **已裁决（2026-10-16）**：`Elysia_Project` 由**用户本人**从上层目录移到桌面，**保留在桌面**（只读参考，不当草稿） | 用户确认 + §6 |
 | 10 | ~~主声 key~~ **已完成（2026-10-16）**：`.env` 写入 `ELYSIA_LLM_MAIN_API_KEY`（不回显、已被 gitignore），临时库实测 `expression_log.level = main`（2/2 次真 LLM 生成，含一次对用户输入的回复）。护栏口径：**先观察真实用量再定**；⚠️ MiniMax 的"逐次确认"红线**不变** | 实测 `D:\ElysiaAssets\_probe\verify_main_voice.py` |
-| 11 | **主声降级不可观测**（2026-10-16 实测发现）：实跑前 5 次表达 **3 次 `main` / 2 次 `micro`**，但**日志里查不到原因** —— `chain.py:257-262` 在主声文本被校验器拦下（`claim`/`promise`/`word_block`）或返回空时**不写任何日志**，静默降到微声罐装句；只有 TTS 失败会落盘。⇒ 诊断"她这次为什么只说罐装话"缺证据，建议补一条降级原因日志（LLM 板块） | 实测 `data/logs/elysia.log` 仅 4 条 TTS 告警 + `expression_log` |
+| 11 | **主声降级不可观测**（2026-10-16 实测发现）：实跑前 5 次表达 **3 次 `main` / 2 次 `micro`**，但**日志里查不到原因** —— `chain.py:257-262` 在主声文本被校验器拦下（`claim`/`promise`/`word_block`）或返回空时**不写任何日志**，静默降到微声罐装句；只有 TTS 失败会落盘。⇒ 诊断"她这次为什么只说罐装话"缺证据，建议补一条降级原因日志（LLM 板块，已立 T-007） | 实测 `data/logs/elysia.log` 仅 4 条 TTS 告警 + `expression_log` |
+| 12 | **搬家（2026-10-16）**：仓库根 `D:\重置准备\备份\Elysia\Elysia_two\Elysia` → **`C:\Elysia\Elysia_two\Elysia`**；总领窗工作目录 → **`C:\Elysia`**。旧桌宠窗（迁移前）的 **shell 已失效**（`powershell.exe` + ripgrep 双 ENOENT）⇒ 它最后一轮文档改动**未提交、未跑门禁**，详情见 `HANDOVER_EXCHANGE/OUT-D-MIGRATION.md`；**新窗第一件事：`git status` → 跑门禁 → 提交**。仓库外素材（`D:\ElysiaAssets\`、`D:\图片\`、桌面旧工程、备份）**未搬，路径不变** | 旧窗实测 + `PET_SESSION.md` §0 |
+| 13 | **真实记忆迁移后未核实**：用户 2026-10-16 已把她的真实记忆迁到本机（本机=主机器），但 `data/*.db` 的**行数/大小/WAL 状态没人核过**（旧窗 shell 失效）；也**无法确认他机旧副本是否已停用/清除**（若他机哪天启动，会与主机器分叉） | 用户告知 + 本窗能力受限 |
 
 ---
 
 ## 10. 总领窗开盘提示词（复制即用）
 
 ```
-这个窗口是 Elysia 工程的【总领窗】，工作目录 D:\重置准备\备份\Elysia。
+这个窗口是 Elysia 工程的【总领窗】，工作目录 C:\Elysia。
 先读：00_总纲入口.md → 再读 Elysia_two\Elysia\docs\PROJECT_BOARD_INDEX.md（总纲）、
-STATUS_MATRIX.md（八板块状态 + 待补清单 + 缺陷登记）、PROJECT_ENGINEERING_STANDARD.md（规范）。
+STATUS_MATRIX.md（板块状态 + 待补清单 + 缺陷登记）、PROJECT_ENGINEERING_STANDARD.md（规范）、
+以及已有的 LEAD_GOVERNANCE.md / TASK_BOARD.md / HANDOVER_INTERFACE.md（若已存在，它们是在你之前立的规矩）。
 
 职责：只读 + 规划 + 派活 + 验收；不要直接改代码（写由板块窗负责）。
-第一个雷：本目录下有两套 Elysia —— Elysia_two\Elysia 是主线（git，远程 qimeng-1/Elysia），
-Elysia_Project 是旧版 + 真实数据痕迹。先确认主线，再动任何东西。
-板块分工：桌宠板块由【另一个专属窗口】负责，它只写 src/elysia/body/** 与 assets/pet/**，
+第一个雷：仓库刚在 2026-10-16 搬过家（旧路径 D:\重置准备\备份\Elysia\… 已全部失效）；
+旧工程 Elysia_Project 已不在本目录，在 C:\Users\123\Desktop\Elysia_Project（旧版 + 真实数据痕迹，
+只读参考）。动手前先 git status：旧桌宠窗有一轮「未提交」的文档改动等着收尾。
+板块分工：桌宠板块由 D 桌宠窗（另一个专属窗口）负责，它只写 src/elysia/body/** 与 assets/pet/**，
 窗口说明见 docs/PET_SESSION.md；你不要碰这两个路径。
 
 先给我一份「现状 + 优先事项」的结论（只报结论，长表格落盘 docs/，别往对话里塞）。

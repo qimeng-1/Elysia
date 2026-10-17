@@ -67,7 +67,9 @@ def fake_root(tmp_path: Path) -> Path:
     return root
 
 
-def _run_soul_ps(root: Path, action: str, timeout_s: int = 15) -> subprocess.CompletedProcess[str]:
+def _run_soul_ps(
+    root: Path, action: str, timeout_s: int = 15, *extra: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             str(POWERSHELL),
@@ -82,6 +84,7 @@ def _run_soul_ps(root: Path, action: str, timeout_s: int = 15) -> subprocess.Com
             str(root),
             "-StopTimeoutSeconds",
             str(timeout_s),
+            *extra,
         ],
         capture_output=True,
         text=True,
@@ -257,3 +260,35 @@ def test_soul_ps1_is_utf8_with_bom_and_parses() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PARSE OK" in result.stdout
+
+
+# ── P0-R13：迁移防分叉（旧机器退役后拒绝启动）──────────────────────────
+# 取消测试：`test_retired_machine_refuses_start`（去掉 RETIRED 检查 ⇒ 该用例红）。
+# ⚠️ 这里只走 `-DryRun`（只检查、**绝不真正启动**）：启动复制品 = 双实例 = 分叉（红线 #2）。
+
+
+def test_retired_machine_refuses_start(fake_root: Path) -> None:
+    """取消测试（P0-R13）：`data\run\\RETIRED` 存在 ⇒ `start` 必须拒绝（防分叉）。"""
+    (fake_root / "data" / "run" / "RETIRED").write_text(
+        "retired_at=2026-10-18\nreason=迁移导出\n", encoding="utf-8"
+    )
+
+    result = _run_soul_ps(fake_root, "start", 1, "-DryRun")
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 2, out
+    assert "已退役" in out
+    assert "分叉" in out
+
+
+def test_start_dry_run_does_not_launch_anything(fake_root: Path) -> None:
+    """`-DryRun` 只做检查：没有 RETIRED 时也**只打印**，不得产生 pid 文件。"""
+    result = _run_soul_ps(fake_root, "start", 1, "-DryRun")
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "dry-run" in out
+    assert not (fake_root / "data" / "run" / "soul.pid").exists(), (
+        "DryRun 绝不能真的启动她（迁移演练的红线）"
+    )
+    assert not (fake_root / "data" / "run" / "body.pid").exists()

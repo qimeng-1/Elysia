@@ -6,12 +6,24 @@
 
 from __future__ import annotations
 
+import argparse
+import os
 import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-BAKE = Path(r"D:\ElysiaAssets\spine_bake\out")
+
+def default_bake_dir() -> Path | None:
+    """Spine 烘焙输出目录（素材工具用，仓库外路径）。**未配置返回 None**。
+
+    P0-R13（可迁移性）：原本写死本机盘符路径，换机/换盘即失效。
+    现在从 `ELYSIA_BAKE_DIR` 或 `--bake` 读；都没有就明确报"未配置"，不猜。
+    """
+    raw = (os.environ.get("ELYSIA_BAKE_DIR") or "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
 OUTFITS = ["elvisa_1", "elvisa_2", "elvisa_3", "elvisa_4", "elvisa_5", "elvisa_6"]
 # 计划入库的动画（key = Spine 动画名，值 = 用途）
 ANIMS = [
@@ -25,7 +37,27 @@ ANIMS = [
 ]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Spine 入库前全量复查（拼一张眼区总表）")
+    parser.add_argument(
+        "--bake",
+        type=Path,
+        default=None,
+        help="烘焙输出目录（缺省读 ELYSIA_BAKE_DIR；两者都没有则报未配置）",
+    )
+    args = parser.parse_args(argv)
+    bake = args.bake or default_bake_dir()
+    if bake is None:
+        print(
+            "[未配置] 找不到 Spine 烘焙输出目录：请用 --bake 指定，或设环境变量 "
+            "ELYSIA_BAKE_DIR（它不在仓库内，换机器要重新指一次）",
+            file=sys.stderr,
+        )
+        return 2
+    if not bake.is_dir():
+        print(f"[失败] 烘焙输出目录不存在：{bake}", file=sys.stderr)
+        return 2
+
     cw, ch = 170, 92
     sheet = Image.new("RGB", (cw * len(OUTFITS) + 150, ch * len(ANIMS)), (26, 28, 36))
     dr = ImageDraw.Draw(sheet)
@@ -34,7 +66,7 @@ def main() -> int:
     for r, (anim, label) in enumerate(ANIMS):
         dr.text((6, r * ch + ch // 2 - 6), label[:22], fill=(235, 240, 255))
         for c, outfit in enumerate(OUTFITS):
-            files = sorted((BAKE / outfit / anim).glob("*.png"))
+            files = sorted((bake / outfit / anim).glob("*.png"))
             if not files:
                 dr.text((150 + c * cw + 20, r * ch + ch // 2), "—", fill=(120, 126, 140))
                 continue

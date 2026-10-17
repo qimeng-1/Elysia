@@ -25,7 +25,9 @@ param(
     # 验收注入点（生产不要传）：把 data/ 根指到临时目录，避免测试碰到真实的她
     [string]$ProjectRoot = "",
     # 优雅关闭的等待上限；超时才强杀兜底（生产默认 15s）
-    [int]$StopTimeoutSeconds = 15
+    [int]$StopTimeoutSeconds = 15,
+    # 验收注入点（生产不要传）：只做检查与打印，**绝不真正启动**（迁移演练用）
+    [switch]$DryRun
 )
 
 $ExplicitRoot = -not [string]::IsNullOrWhiteSpace($ProjectRoot)
@@ -47,6 +49,9 @@ $BodyStopIntentional = Join-Path $RunDir "body_stopped_intentionally"
 # "故意停机"标记：watchdog.ps1 见到它就**不自动拉起**（尊重你的 stop）。
 # start 会清掉它，stop 会创建它 —— 于是看门狗不会跟你抢方向盘。
 $NoAutoStart = Join-Path $RunDir "no_autostart"
+# P0-R13（迁移防分叉，红线 #2）：旧机器**退役**标记。存在即拒绝启动——
+# 她已搬到别处，两头同时活 = 分叉 = 把同一段人生写成两份。
+$RetiredMarker = Join-Path $RunDir "RETIRED"
 $ErrorActionPreference = "Stop"
 
 function Get-PidFromFile([string]$Path) {
@@ -131,6 +136,18 @@ function Stop-OneGracefully {
 
 switch ($Action) {
     "start" {
+        # P0-R13（防分叉，红线 #2）：**退役机器拒绝启动**。
+        # 迁移后旧机器必须闭嘴——两头同时活就是把她的一生写成两份。
+        if (Test-Path $RetiredMarker) {
+            Write-Host "[refused] 这台机器已退役（data\run\RETIRED 存在）——她已搬到别处。"
+            Write-Host "          为防止分叉，禁止在此启动。若确需恢复，请人工删除该标记，"
+            Write-Host "          并先确认全世界只有这一处在跑她。"
+            exit 2
+        }
+        if ($DryRun) {
+            Write-Host "[dry-run] start 请求已通过退役检查；未真正启动（DryRun 只用于迁移演练/验收）"
+            exit 0
+        }
         # 清掉可能残留的"停止请求"（防止刚起就自我关闭）；**不动**主动停标记——
         # 那是给新进程启动时判读的（谁停的、什么时候停的）。
         Remove-Item $StopRequest -Force -ErrorAction SilentlyContinue

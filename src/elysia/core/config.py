@@ -34,10 +34,30 @@ class Settings(BaseSettings):
     )
 
     # ── 路径 ──────────────────────────────────────────────
+    # P0-R13（可迁移性）：**默认全部相对仓库根**；机器相关的外部路径一律走配置/环境变量。
+    # `backup_dir` 曾写死为本机 D 盘路径（真依赖，换机即失效）——现改为
+    # `<repo>/../_backup`；要放别处就设 `ELYSIA_BACKUP_DIR`。
     data_dir: Path = Field(default=PROJECT_ROOT / "data")
     log_dir: Path = Field(default=PROJECT_ROOT / "data" / "logs")
     run_dir: Path = Field(default=PROJECT_ROOT / "data" / "run")
-    backup_dir: Path = Field(default=Path("D:/ElysiaBackup/elysia"))
+    backup_dir: Path = Field(default=PROJECT_ROOT.parent / "_backup")
+    # GPT-SoVITS 的启动脚本（外部程序，不随仓库走）。**留空 = 未配置**：
+    # 面板/终端显示"未配置"而不是报错（P0-R13）。设 `ELYSIA_TTS_LAUNCHER_PATH` 指向它。
+    tts_launcher_path: str = ""
+    # Spine 烘焙输出目录（素材工具用，同样是仓库外路径）。留空 = 未配置。
+    bake_dir: str = ""
+
+    @property
+    def tts_launcher(self) -> Path | None:
+        """GPT-SoVITS 启动脚本的路径；**未配置返回 None**（调用方据此显示"未配置"）。"""
+        raw = (self.tts_launcher_path or "").strip()
+        return Path(raw).expanduser() if raw else None
+
+    @property
+    def bake_dir_path(self) -> Path | None:
+        """Spine 烘焙输出目录；未配置返回 None。"""
+        raw = (self.bake_dir or "").strip()
+        return Path(raw).expanduser() if raw else None
 
     # ── 行为 ──────────────────────────────────────────────
     log_level: str = "INFO"

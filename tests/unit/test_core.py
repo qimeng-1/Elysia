@@ -14,11 +14,17 @@ from elysia.core.supervisor import SupervisorFatal, supervise
 
 
 def test_settings_defaults() -> None:
+    from elysia.core.config import PROJECT_ROOT
+
     settings = Settings()
     assert settings.log_level == "INFO"
     assert settings.heartbeat_interval_s == 1.0
     assert settings.body_heartbeat_interval_s == 5.0
-    assert settings.backup_dir.name == "elysia"
+    # P0-R13：备份目录不再写死本机路径，而是"仓库上一级的 _backup"（可随仓库搬家）
+    assert settings.backup_dir == PROJECT_ROOT.parent / "_backup"
+    # 外部程序的路径留空 = 未配置（调用方显示"未配置"，不报错）
+    assert settings.tts_launcher is None
+    assert settings.bake_dir_path is None
 
 
 def test_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None:

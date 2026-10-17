@@ -81,6 +81,11 @@ logger = logging.getLogger("elysia.soul.heartbeat")
 # P3 记忆维护：每 N 拍晋升扫描一次（心跳 1s → 约每 5 分钟）
 MEMORY_MAINTAIN_EVERY_N = 300
 
+# P0-R1（D-2）：周期快照——每 N 拍把双库做成**事务一致**快照（心跳 1s → 约每 30 分钟）。
+# 审计实测此前 `CheckpointManager.create()` **全仓 0 个调用者** ⇒ 文档说"已落地"、
+# 实际一份快照都没生成过。这里的接线才是"有退路"的物理实现。
+CHECKPOINT_EVERY_N = 1800
+
 # P3-O 记忆感受路径：每 N 拍静默唤起一次（同 5 分钟节律，小脉冲不冲保护带）
 MEMORY_FEELING_EVERY_N = 300
 
@@ -160,6 +165,7 @@ class SoulHeartbeat:
         distress_monitor: DistressMonitor | None = None,
         away_life: AwayLife | None = None,
         checkpoint: CheckpointManager | None = None,
+        checkpoint_every_n: int = CHECKPOINT_EVERY_N,
         expression: ExpressionService | None = None,
         expression_worker: ExpressionWorker | None = None,
         vram_threshold_pct: float = 85.0,
@@ -179,6 +185,9 @@ class SoulHeartbeat:
         self._distress_monitor = distress_monitor
         self._away_life = away_life
         self._checkpoint = checkpoint
+        # P0-R1：周期快照的节拍器（每 checkpoint_every_n 拍一次；0/负数视为关闭）
+        self._checkpoint_every_n = checkpoint_every_n
+        self._checkpoint_tick = 0
         self._expression = expression
         # 阶段 1（20.6 的 1.3）：表达由 worker 执行——心跳只提交任务与取回落库
         self._expression_worker = expression_worker
@@ -287,6 +296,18 @@ class SoulHeartbeat:
                 payload["frozen"] = True
             await self._heartbeat_store.append(now, "soul", payload)
             await self._state_store.save_json("timesense", to_payload(self._timesense.state))
+
+            # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──
+            # 此前 create() 全仓 0 调用者 ⇒ 回滚这条路是断的（文档却写"已落地"）。
+            self._checkpoint_tick += 1
+            if (
+                self._checkpoint is not None
+                and self._checkpoint_every_n > 0
+                and not frozen
+                and self._checkpoint_tick >= self._checkpoint_every_n
+            ):
+                self._checkpoint_tick = 0
+                await self._save_checkpoint(now)
 
             # ── 离线内部生活 ──────────────────────────────
             if self._away_life is not None and not frozen:
@@ -417,6 +438,31 @@ class SoulHeartbeat:
                 await self._maintain_memories(now)
 
             await self._clock.sleep(self._interval_s)
+
+    async def _save_checkpoint(self, now: float) -> None:
+        """周期快照（P0-R1）：双库 `.backup` 一致快照落 `data/checkpoints/`。
+
+        **失败必须可见、但不得致命**：快照是"退路"，不是生命循环本身。
+        磁盘满 / 单库被锁坏时她仍应继续活着 —— 记 exception（含拍号与快照名），
+        下个周期重试；绝不把异常吞成静默成功（`backup_database` 失败会抛）。
+        """
+        checkpoint = self._checkpoint
+        if checkpoint is None:  # 防御：调用点已判空，此处再兜一层
+            return
+        try:
+            target = await checkpoint.create(
+                checkpoint.data_dir / "state.db",
+                checkpoint.data_dir / "heartbeat.db",
+            )
+        except Exception:
+            logger.exception("周期快照失败（心跳继续，下个周期重试）｜ seq=%d", self._heartbeat_seq)
+            return
+        logger.info(
+            "checkpoint created ｜ %s ｜ seq=%d ｜ now=%.3f",
+            target.name,
+            self._heartbeat_seq,
+            now,
+        )
 
     async def persist_expressions(
         self,

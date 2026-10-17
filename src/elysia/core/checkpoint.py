@@ -19,6 +19,16 @@ from pathlib import Path
 CHECKPOINT_KEEP = 10  # 保留最近 10 份快照
 FREEZE_MARKER_NAME = "freeze"  # 紧急冻结标记文件
 
+# SQLite WAL 模式的**伴生文件**后缀。回滚覆盖前必须一并删除：
+# 她跑在 WAL 模式，若把旧 `-wal` 留在原地，下次打开会把"回滚前未合并的帧"
+# **重放到刚恢复的库上** ⇒ 回滚不但没回滚，还把库搞坏（P0 审计 D-2）。
+# `scripts/backup.ps1` 的保留策略早就懂这个陷阱（它显式删 -wal/-shm）；
+# 本模块此前**不懂**——同一工程里两套口径，实测代价是"回滚变二次损坏"。
+WAL_COMPANION_SUFFIXES = ("-wal", "-shm")
+
+# 一份检查点必须覆盖的两个库（单一出处：创建与回滚都按这张表走）
+_DB_NAMES: tuple[str, ...] = ("state.db", "heartbeat.db")
+
 
 def backup_database(src: Path, dst: Path) -> None:
     """SQLite **在线**备份（`.backup` 协议，线程安全、事务一致）。
@@ -48,6 +58,11 @@ class CheckpointManager:
         self._version = version
 
     @property
+    def data_dir(self) -> Path:
+        """现役库所在目录（周期快照的源；供心跳等调用方定位 `state.db`/`heartbeat.db`）。"""
+        return self._data_dir
+
+    @property
     def checkpoint_dir(self) -> Path:
         return self._data_dir / "checkpoints"
 
@@ -73,10 +88,37 @@ class CheckpointManager:
             key=lambda p: p.name,
         )
 
-    def restore(self, checkpoint: Path) -> None:
-        """回滚：用快照覆盖两个库（先停止灵魂/身体进程）。"""
-        shutil.copy2(checkpoint / "state.db", self._data_dir / "state.db")
-        shutil.copy2(checkpoint / "heartbeat.db", self._data_dir / "heartbeat.db")
+    def latest(self) -> Path | None:
+        """最新一份快照（没有则 None）——回滚入口的 `latest` 语义。"""
+        checkpoints = self.list_checkpoints()
+        return checkpoints[-1] if checkpoints else None
+
+    def restore(self, checkpoint: Path) -> list[Path]:
+        """回滚：用快照覆盖两个库（先停止灵魂/身体进程）。
+
+        **必须同时删除 `-wal`/`-shm` 伴生文件**（`WAL_COMPANION_SUFFIXES`）。
+        实测（P0 审计 D-2，2026-10-17）：快照 10 行 → 崩溃时 `-wal` 里另有 90 行
+        未合并 → 只 copy `.db` 回滚 → 重新打开读到 **100 行**。
+        即：少了这步，"回滚"会把回滚前的事务重放回来，**等于没回滚**，
+        而且调用方会以为恢复成功（最坏的失败模式：假装成功）。
+
+        返回**实际被覆盖**的现役文件清单（供回滚脚本如实打印"覆盖了什么"）。
+        """
+        if not checkpoint.is_dir():
+            raise FileNotFoundError(f"检查点不存在或不是目录：{checkpoint}")
+        missing = [name for name in _DB_NAMES if not (checkpoint / name).is_file()]
+        if missing:
+            raise FileNotFoundError(f"检查点不完整（缺 {', '.join(missing)}）：{checkpoint}")
+
+        restored: list[Path] = []
+        for name in _DB_NAMES:
+            dst = self._data_dir / name
+            # 先清除伴生文件，再覆盖本体：顺序反了会留下"新库 + 旧 WAL"的组合
+            for suffix in WAL_COMPANION_SUFFIXES:
+                Path(f"{dst}{suffix}").unlink(missing_ok=True)
+            shutil.copy2(checkpoint / name, dst)
+            restored.append(dst)
+        return restored
 
     def _prune(self) -> None:
         checkpoints = self.list_checkpoints()

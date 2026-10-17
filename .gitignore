@@ -13,11 +13,17 @@ venv/
 .coverage
 htmlcov/
 
-# 运行时数据（data/ 进 git 做记忆快照版本化；仅排除缓存/日志/临时）
+# 运行时数据。
+# ⚠️ 2026-10-18 更正：旧注释写「data/ 进 git 做记忆快照版本化」，那是快照**仅 20KB 空库**的时代。
+# 现在她的真实快照约 **92 MB/份**、心跳每 1800 拍（≈30 分钟）生成一份；
+# 若入库：git 历史**永不删除旧 blob** ⇒ 一天约 48 份 × 92MB ≈ **4.4 GB/天** 不可回收增长。
+# ⇒ **检查点不入库**；她的备份由 scripts/backup.ps1 覆盖（含 data/ 与 _archive）。
 data/logs/
 data/cache/
 data/tmp/
 data/run/
+# 大二进制快照：不入库（理由见上方注释）。注意 .gitignore 不支持行尾注释，只能单独成行。
+data/checkpoints/
 # 运行时 SQLite 主体文件（进程持续锁定写入，改由 checkpoints/ 做快照版本化）
 data/heartbeat.db
 data/state.db

@@ -24,12 +24,15 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起某件事）+ `
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from elysia.llm.micro import micro_speak
 from elysia.llm.validator import ExpressionValidator, ValidationResult
+
+log = logging.getLogger("elysia.llm.chain")
 
 
 class LLMBackend(Protocol):
@@ -248,28 +251,75 @@ class LLMChain:
 
         校验拦截的文本不采用，回到下一级——保证任何越权/异常都到不了
         文本/TTS，且必然有一条微声兜底。
+
+        **P0-R11 / T-007：降级原因必须可查。** 此前降级链只说一句"fallback/micro"，
+        `expression_log.validation.reason` 恒为 `null`——她"为什么只说罐装话"查不到。
+        现在把每一级失败的原因（网络层 / 校验拦截 / 响应为空 / 工具回合超限）收集进
+        `ValidationResult.reason`（落库即 `expression_log.validation.reason`），并记日志。
         """
+        reasons: list[str] = []
+
         # ── 主声 ────────────────────────────────────────
         if self._main is not None:
-            text = await self._main_speak(instruction)
+            try:
+                text = await self._main_speak(instruction)
+            except Exception as exc:  # 后端抛异常也要降级，不能让她这一句直接没声音
+                text = None
+                reasons.append(f"main 后端异常：{type(exc).__name__}: {exc}")
             if text:
                 result = self._validator.check(text, instruction)
                 if result.ok:
                     return SpeakResult(
                         text=result.sanitized or text, level="main", validated=result
                     )
+                reasons.append(f"main 被校验拦截：{result.reason}")
+            elif not reasons:
+                reasons.append(f"main 无文本：{self._backend_reason(self._main)}")
 
         # ── 次声 ────────────────────────────────────────
         if self._fallback is not None:
-            text = await self._fallback.complete(instruction, self._template)
+            try:
+                text = await self._fallback.complete(instruction, self._template)
+            except Exception as exc:
+                text = None
+                reasons.append(f"fallback 后端异常：{type(exc).__name__}: {exc}")
             if text:
                 result = self._validator.check(text, instruction)
                 if result.ok:
                     await self._degrade("fallback")
                     return SpeakResult(
-                        text=result.sanitized or text, level="fallback", validated=result
+                        text=result.sanitized or text,
+                        level="fallback",
+                        validated=self._annotate(result, reasons),
                     )
+                reasons.append(f"fallback 被校验拦截：{result.reason}")
+            elif not reasons:
+                reasons.append(f"fallback 无文本：{self._backend_reason(self._fallback)}")
 
         # ── 微声：无 LLM，纯结构化，天然合规 ────────────
         await self._degrade("micro")
-        return SpeakResult(text=micro_speak(instruction), level="micro")
+        detail = "；".join(reasons) if reasons else "无可用后端"
+        log.warning("表达降级到微声：%s", detail)
+        return SpeakResult(
+            text=micro_speak(instruction),
+            level="micro",
+            # ok=True：罐装话本身是合规的；reason 记的是**为什么没说出更好的一句**
+            validated=ValidationResult(ok=True, reason=f"micro：{detail}"),
+        )
+
+    @staticmethod
+    def _backend_reason(backend: LLMBackend | None) -> str:
+        """取后端自报的失败原因（`DeepSeekBackend.last_error`）；没有就给"无返回"。"""
+        reason = getattr(backend, "last_error", None)
+        return str(reason) if reason else "无返回"
+
+    @staticmethod
+    def _annotate(result: ValidationResult, reasons: list[str]) -> ValidationResult:
+        """在通过校验的结果上追加"为什么没用主声"（保留 ok / sanitized）。"""
+        if not reasons:
+            return result
+        return ValidationResult(
+            ok=result.ok,
+            reason="；".join(reasons),
+            sanitized=result.sanitized,
+        )

@@ -30,12 +30,77 @@ import contextlib
 import json
 import logging
 from typing import Any
+from urllib import error as urlerror
 from urllib import request
 
 from elysia.llm.chain import LLMBackend, ToolRunner
 from elysia.llm.identity import IDENTITY_FIELD, compose_identity, identity_lines
 
 log = logging.getLogger("elysia.llm.deepseek")
+
+# ── D-10（P0-R11）：代理不可缓存 + 直连自愈 ────────────────────────────
+# 事故（2026-10-18 确诊，用户独立确认："主要是由于我电脑的系统代理自动启动了"）：
+# urllib 的**全局 opener** 在首次 urlopen 时构建并缓存 ProxyHandler。她 00:28:52 启动时
+# 系统代理（127.0.0.1:7890）开着 ⇒ 缓存的 opener 绑死死代理；代理随后退出，该进程内
+# **所有** urlopen 都打向已死的 7890 ⇒ WinError 10061 ⇒ 主声永久降级 micro
+# （实测哑了 **22.5 小时**，只有重启才恢复）。
+#
+# 因此本模块**不使用全局 opener**：
+#   1) 每次请求`现建` opener（重新读 `getproxies()`，开销微秒级）——环境变了立刻跟上；
+#   2) 连接层失败（拒绝连接/超时/DNS）时，**绕过代理直连重试一次** ——
+#      让"代理突然消失"在**进程内**自愈（这条最关键）。
+_CONNECTION_ERROR_TOKENS = (
+    "10061",  # WSAECONNREFUSED（代理端口没人听）
+    "10060",  # WSAETIMEDOUT
+    "10054",  # WSAECONNRESET（代理中途死掉）
+    "connection refused",
+    "actively refused",
+    "refused",
+    "timed out",
+    "timeout",
+    "no route",
+    "unreachable",
+    "getaddrinfo",
+    "name or service not known",
+    "tunnel connection failed",
+)
+
+
+def _build_opener(*, use_proxy: bool) -> request.OpenerDirector:
+    """现建 opener：`use_proxy=True` 时**重新读取**系统代理，绝不缓存。
+
+    这正是 D-10 的修复点——`urllib.request.urlopen` 用的是模块级 `_opener`，
+    它在首次调用后就把 `ProxyHandler` 定死；本函数每次调用都重新读环境。
+    """
+    proxies = request.getproxies() if use_proxy else {}
+    return request.build_opener(request.ProxyHandler(proxies))
+
+
+def _is_connection_layer_error(exc: BaseException) -> bool:
+    """连接层错误（代理死了 / 直连不通 / 超时 / DNS）——与 HTTP 4xx/5xx 区分。
+
+    `HTTPError` 是 `URLError` 的子类，必须**先排除**，否则"401 无权限"会被当成
+    "代理不可用"（重试不亏，但会掩盖真正的配置错误）。例外：`407` 明确是代理问题，
+    值得直连重试。
+    """
+    if isinstance(exc, urlerror.HTTPError):
+        return exc.code == 407
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ConnectionError, TimeoutError)):
+            return True
+        if isinstance(current, urlerror.URLError) and current.reason is not None:
+            reason = current.reason
+            if isinstance(reason, (ConnectionError, TimeoutError)):
+                return True
+            message = str(reason).lower()
+            if any(token in message for token in _CONNECTION_ERROR_TOKENS):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
 
 # 工具回合上限：防她反复"想起"把一次开口拖长（超出即放弃本轮 → 降级）
 MAX_TOOL_ROUNDS = 3
@@ -152,9 +217,21 @@ class DeepSeekBackend(LLMBackend):
         # 次声挂在这一类端点上时用 `require_key=False`。默认 True → 主声零行为变化。
         self._require_key = require_key
         self._endpoint = f"{self._base}/chat/completions"
+        # P0-R11/T-007：最近一次失败原因（chain 据此写进 expression_log.validation，
+        # 让"她这次为什么只说罐装话"可查——此前 reason 恒为 null）
+        self._last_error: str | None = None
+
+    @property
+    def last_error(self) -> str | None:
+        """最近一次失败的可读原因（成功时清空）。"""
+        return self._last_error
+
+    def _fail(self, reason: str) -> None:
+        self._last_error = reason
 
     def _unavailable(self) -> bool:
         if self._require_key and not self._api_key:
+            self._fail("无 api_key")
             log.warning("DeepSeek backend 无 api_key，判定不可用")
             return True
         return False
@@ -169,9 +246,15 @@ class DeepSeekBackend(LLMBackend):
         try:
             data = await asyncio.to_thread(self._post, self._payload(self._messages(instruction)))
         except Exception as exc:  # 网络/HTTP/JSON 异常统一视为不可用 → 降级
+            self._fail(f"网络层（{type(exc).__name__}）: {exc}")
             log.warning("DeepSeek 调用失败，判定不可用：%s", exc)
             return None
-        return _content_or_none(data)
+        text = _content_or_none(data)
+        if text is None:
+            self._fail("响应正文为空")
+        else:
+            self._last_error = None
+        return text
 
     async def complete_with_tools(
         self,
@@ -195,7 +278,12 @@ class DeepSeekBackend(LLMBackend):
                 message = _first_message(data)
                 calls = message.get("tool_calls")
                 if not isinstance(calls, list) or not calls:
-                    return _content_or_none(data)
+                    text = _content_or_none(data)
+                    if text is None:
+                        self._fail("响应正文为空")
+                    else:
+                        self._last_error = None
+                    return text
                 messages.append(
                     {
                         "role": "assistant",
@@ -212,8 +300,10 @@ class DeepSeekBackend(LLMBackend):
                         }
                     )
         except Exception as exc:
+            self._fail(f"工具回合网络层（{type(exc).__name__}）: {exc}")
             log.warning("DeepSeek 工具回合失败，判定不可用：%s", exc)
             return None
+        self._fail(f"工具回合超出上限（{MAX_TOOL_ROUNDS} 轮）")
         log.warning("DeepSeek 工具回合超出上限（%d），放弃本轮", MAX_TOOL_ROUNDS)
         return None
 
@@ -263,9 +353,34 @@ class DeepSeekBackend(LLMBackend):
         return payload
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """同步 HTTP 调用（在 to_thread 中运行），返回响应 JSON。"""
+        """同步 HTTP 调用（在 to_thread 中运行），返回响应 JSON。
+
+        **P0-R11 核心**：每次请求现建 opener（不缓存代理）；连接层失败时
+        绕过代理直连重试一次。绝不再用 `request.urlopen`（那个全局 opener
+        会把首次读到的死代理缓存整个进程生命周期）。
+
+        ⚠️ 重试必须**新建 Request**：`ProxyHandler` 会调 `Request.set_proxy` 改写
+        原对象（host/type/selector），复用同一个 Request 重试会继续打向代理
+        （实测：直连路径仍然报 10061——这是本条修复的第一个坑）。
+        """
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = request.Request(
+        try:
+            return self._open(body, use_proxy=True)
+        except Exception as exc:
+            if not _is_connection_layer_error(exc):
+                raise
+            log.warning("DeepSeek 连接层失败（疑似系统代理不可用）：%s ⇒ 绕过代理直连重试一次", exc)
+            try:
+                return self._open(body, use_proxy=False)
+            except Exception as direct_exc:
+                raise RuntimeError(
+                    "连接层失败（绕过代理直连也不可达）："
+                    f"代理路径={type(exc).__name__}: {exc}；"
+                    f"直连路径={type(direct_exc).__name__}: {direct_exc}"
+                ) from direct_exc
+
+    def _request(self, body: bytes) -> request.Request:
+        return request.Request(
             self._endpoint,
             data=body,
             headers={
@@ -274,6 +389,11 @@ class DeepSeekBackend(LLMBackend):
             },
             method="POST",
         )
-        with request.urlopen(req, timeout=self._timeout_s) as resp:
+
+    def _open(self, body: bytes, *, use_proxy: bool) -> dict[str, Any]:
+        """用**现建**的 opener 发请求（`use_proxy=False` = 绕过一切代理直连）。"""
+        opener = _build_opener(use_proxy=use_proxy)
+        req = self._request(body)
+        with opener.open(req, timeout=self._timeout_s) as resp:
             data: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
         return data

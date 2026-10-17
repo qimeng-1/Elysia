@@ -340,6 +340,13 @@ class SoulHeartbeat:
                 if frozen:
                     payload["frozen"] = True
                 await self._heartbeat_store.append(now, "soul", payload)
+                # ── P0-R5（D-4）：每拍更新 last_soul_beat_ts ──────────────
+                # 这个字段声称"最近一次灵魂心跳"，旧写法**只在启动时写一次**
+                # （审计实测落后 3.86 天：停在 2026-10-14 01:18:35）——"声明了却不维护"，
+                # 按 T1 本应删除；用户裁决为**修**，且修法由 D-3 决定：看门狗读的是
+                # heartbeat.db 的 ts，这里写 state.db 的同一事实。两者**同拍推进**，
+                # 长期背离自此不可能（只在启动期兜底赋值的是旧写法）。
+                self._timesense.state.last_soul_beat_ts = now
                 await self._state_store.save_json("timesense", to_payload(self._timesense.state))
 
                 # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──

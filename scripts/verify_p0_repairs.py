@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import json
 import re
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -192,6 +195,35 @@ def _marker_text(path: Path) -> str:
         return f"（读不出：{type(exc).__name__}: {exc}）"
 
 
+def _fmt_mb(n: int) -> str:
+    return f"{n / 1024 / 1024:.1f} MB"
+
+
+def _snapshot_entry(checkpoint: Path, name: str) -> tuple[Path, bool] | None:
+    """快照里的库来源：`(路径, 是否压缩)`。P0-R10 起新快照是 `.db.gz`，旧快照仍是 `.db`。"""
+    plain = checkpoint / name
+    if plain.is_file():
+        return plain, False
+    compressed = checkpoint / f"{name}.gz"
+    if compressed.is_file():
+        return compressed, True
+    return None
+
+
+def _snapshot_quick_check(path: Path, *, compressed: bool) -> str:
+    """校验快照里的库：压缩快照先解到临时文件再 `quick_check`（只读，不改快照）。"""
+    if not compressed:
+        return _quick_check(path)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="elysia_verify_"))
+    tmp = tmp_dir / "db"
+    try:
+        with gzip.open(path, "rb") as fin, open(tmp, "wb") as fout:
+            shutil.copyfileobj(fin, fout, length=1024 * 1024)
+        return _quick_check(tmp)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 # ── R1：检查点真的在跑 ──────────────────────────────────────────────
 def check_r1(data_dir: Path) -> list[Check]:
     cp_dir = data_dir / "checkpoints"
@@ -214,20 +246,28 @@ def check_r1(data_dir: Path) -> list[Check]:
         )
     out = [Check("R1", WARN if stale else PASS, detail)]
 
-    missing = [n for n in ("state.db", "heartbeat.db") if not (latest / n).is_file()]
+    entries: list[tuple[str, Path, bool]] = []
+    missing: list[str] = []
+    for name in ("state.db", "heartbeat.db"):
+        entry = _snapshot_entry(latest, name)
+        if entry is None:
+            missing.append(name)
+        else:
+            entries.append((entry[0].name, entry[0], entry[1]))
     if missing:
-        out.append(Check("R1", FAIL, f"最新快照缺库：{', '.join(missing)}"))
+        out.append(Check("R1", FAIL, f"最新快照缺库：{', '.join(missing)}（.db / .db.gz 都没有）"))
         return out
     results: list[str] = []
     bad = False
-    for name in ("state.db", "heartbeat.db"):
+    for shown, path, compressed in entries:
         try:
-            result = _quick_check(latest / name)
-        except sqlite3.Error as exc:
-            result = f"打不开（{type(exc).__name__}: {exc}）"
+            result = _snapshot_quick_check(path, compressed=compressed)
+            size = _fmt_mb(path.stat().st_size)
+        except Exception as exc:  # 验收工具：任何读失败都要如实报出来，不许吞成 PASS
+            result, size = f"打不开（{type(exc).__name__}: {exc}）", "?"
         if result != "ok":
             bad = True
-        results.append(f"{name}={result}")
+        results.append(f"{shown}={result}（{size}）")
     out.append(Check("R1", FAIL if bad else PASS, "快照两库 quick_check：" + "  ".join(results)))
     return out
 

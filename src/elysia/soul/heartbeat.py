@@ -563,6 +563,10 @@ class SoulHeartbeat:
     async def _save_checkpoint(self, now: float) -> None:
         """周期快照（P0-R1）：双库 `.backup` 一致快照落 `data/checkpoints/`。
 
+        P0-R10（D-9）：快照落盘为 `.db.gz`（gzip-6）。实测 `heartbeat.db`
+        96.8 MB → 9.3 MB（10.4x），10 份保留从 0.93 GB 降到 ~93 MB。备份协议不变
+        （仍走 SQLite `.backup`），只是落盘前压缩；回滚端自动解压，且兼容旧的未压缩快照。
+
         **失败必须可见、但不得致命**：快照是"退路"，不是生命循环本身。
         磁盘满 / 单库被锁坏时她仍应继续活着 —— 记 exception（含拍号与快照名），
         下个周期重试；绝不把异常吞成静默成功（`backup_database` 失败会抛）。

@@ -10,6 +10,10 @@ P0 审计（`docs/LEAD_P0_AUDIT_2026-10-17.md` D-2）实测三连：
 
 本脚本把回滚的**安全前提机械化**（不靠人记住）：
 
+0. **快照可能是压缩的**（P0-R10 / D-9）：新快照落盘为 `state.db.gz` / `heartbeat.db.gz`，
+   本脚本在"恢复来源"里显式标明压缩与否；`CheckpointManager.restore()` 负责解压，
+   同时**旧格式（未压缩 `.db`）仍然可回滚**（`p0-20261017-224508` 就是旧格式）。
+
 1. **她还在跑就拒绝** —— 两个独立信号（PID 文件里的活进程 + 心跳新鲜度），
    任一为真即拒绝：回滚运行中的库＝覆盖她的现在，并撕裂 WAL。
    （只读 `heartbeat.db` 判活，不改 `-shm`。）
@@ -84,6 +88,31 @@ def _fmt_ts(ts: float) -> str:
 
 def _fmt_mb(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB"
+
+
+def _snapshot_source(checkpoint: Path, name: str) -> tuple[Path, bool] | None:
+    """快照里某个库的来源：`(文件, 是否 gz)`；都没有返回 None。
+
+    与 `CheckpointManager.restore()` 同一取舍：**旧格式（未压缩 `.db`）优先**，
+    这样 `p0-20261017-224508` 这类未压缩快照永远可回滚（P0-R10 的向后兼容要求）。
+    """
+    plain = checkpoint / name
+    if plain.is_file():
+        return plain, False
+    compressed = checkpoint / f"{name}.gz"
+    if compressed.is_file():
+        return compressed, True
+    return None
+
+
+def _describe_source(checkpoint: Path, name: str) -> str:
+    """给"恢复来源"清单用的一行描述（压缩与否必须显式写出，便于人工核对）。"""
+    source = _snapshot_source(checkpoint, name)
+    if source is None:
+        return f"{name}=缺失"
+    file, compressed = source
+    size = _fmt_mb(file.stat().st_size)
+    return f"{file.name}={size}（{'压缩' if compressed else '未压缩·旧格式'}）"
 
 
 def _ro_connect(db: Path) -> sqlite3.Connection:
@@ -201,13 +230,10 @@ def print_checkpoint_list(mgr: CheckpointManager) -> None:
         return
     say(f"检查点目录：{mgr.checkpoint_dir}（共 {len(checkpoints)} 份）")
     for path in checkpoints:
-        sizes = []
-        for name in ("state.db", "heartbeat.db"):
-            db = path / name
-            sizes.append(f"{name}={'缺失' if not db.exists() else _fmt_mb(db.stat().st_size)}")
+        sources = "  ".join(_describe_source(path, name) for name in ("state.db", "heartbeat.db"))
         stamp = _fmt_ts(path.stat().st_mtime)
         mark = "  ← latest" if path == checkpoints[-1] else ""
-        say(f"  {path.name}  {stamp}  {'  '.join(sizes)}{mark}")
+        say(f"  {path.name}  {stamp}  {sources}{mark}")
 
 
 def backup_current(data_dir: Path) -> Path | None:
@@ -271,16 +297,15 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     # ── 快照自检：不完整就拒绝（不拿半份快照去覆盖她的现在）──
-    missing = [n for n in ("state.db", "heartbeat.db") if not (checkpoint / n).is_file()]
+    missing = [n for n in ("state.db", "heartbeat.db") if _snapshot_source(checkpoint, n) is None]
     if missing:
-        say(f"[fail] 检查点不完整（缺 {', '.join(missing)}）：{checkpoint}")
+        say(f"[fail] 检查点不完整（缺 {', '.join(missing)} 或对应 .gz）：{checkpoint}")
         return EXIT_FAIL
 
     say(f"恢复来源：{checkpoint}")
     say(f"  创建时间：{_fmt_ts(checkpoint.stat().st_mtime)}")
     for name in ("state.db", "heartbeat.db"):
-        db = checkpoint / name
-        say(f"  {name}: {_fmt_mb(db.stat().st_size)}")
+        say(f"  {_describe_source(checkpoint, name)}")
     say(f"现役库目录：{data_dir}")
 
     # ── 判活（在**任何写入之前**）：她还在跑就拒绝 ──

@@ -1,6 +1,6 @@
 """检查点单测：快照创建 / 回滚一致性 / 保留清理 / 紧急冻结。
 
-P0-R1（D-2）新增两块**取消测试**（还原旧写法必须红）：
+历史取消测试（P0-R1 / D-2）：
 
 1. `test_restore_discards_unmerged_wal`：她跑 WAL 模式，回滚覆盖前必须删掉
    `-wal`/`-shm`，否则旧 WAL 会被重放到刚恢复的库上。
@@ -8,20 +8,32 @@ P0-R1（D-2）新增两块**取消测试**（还原旧写法必须红）：
    → 重新打开读到 **100 行**（回滚等于没回滚，且调用方会以为成功）。
 2. `test_heartbeat_creates_periodic_checkpoint`：心跳每 N 拍必须真的**生成**快照。
    **实测旧写法**：`CheckpointManager.create()` 全仓 0 调用者 ⇒ `data/checkpoints/` 不存在。
+
+P0-R10（D-9 方案 A）新增：**快照压缩**（`.db.gz`）。
+- 取消测试 `test_snapshot_is_compressed_and_significantly_smaller`：还原成不压缩 ⇒ 必红；
+- **旧格式（未压缩 `.db`）快照仍可回滚**：这条必须有，否则已有的旧快照会变废纸；
+- 压缩/解压都要经过 `quick_check`：坏快照绝不覆盖她的现役库。
 """
 
 from __future__ import annotations
 
 import asyncio
+import gzip
 import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from elysia.core.checkpoint import CHECKPOINT_KEEP, CheckpointManager
+from elysia.core.checkpoint import (
+    CHECKPOINT_KEEP,
+    CheckpointManager,
+    backup_database,
+    quick_check_db,
+)
 from elysia.core.clock import SimulatedClock
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
@@ -47,6 +59,46 @@ def _count_rows(path: Path) -> int:
     n = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
     conn.close()
     return n
+
+
+def _snapshot_bytes(snapshot: Path, name: str) -> bytes:
+    """读快照里某个库的**原始字节**（自动区分 `.db` / `.db.gz`）。"""
+    plain = snapshot / name
+    if plain.is_file():
+        return plain.read_bytes()
+    with gzip.open(snapshot / f"{name}.gz", "rb") as handle:
+        return handle.read()
+
+
+def _query_snapshot(snapshot: Path, name: str, sql: str) -> list[tuple[object, ...]]:
+    """在快照库上执行一条查询（压缩快照先解到临时文件，不碰快照本身）。"""
+    data = _snapshot_bytes(snapshot, name)
+    handle, temp_name = tempfile.mkstemp(suffix=".db")
+    os.close(handle)
+    tmp = Path(temp_name)
+    try:
+        tmp.write_bytes(data)
+        conn = sqlite3.connect(str(tmp))
+        try:
+            return list(conn.execute(sql).fetchall())
+        finally:
+            conn.close()
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _snapshot_quick_check(snapshot: Path, name: str) -> str:
+    """快照库的 `quick_check`（`.db` 直接读；`.gz` 解到临时文件再只读校验）。"""
+    plain = snapshot / name
+    if plain.is_file():
+        return quick_check_db(plain)
+    tmp = snapshot.parent / f".{snapshot.name}-{name}.check.tmp"
+    try:
+        with gzip.open(snapshot / f"{name}.gz", "rb") as fin, open(tmp, "wb") as fout:
+            fout.write(fin.read())
+        return quick_check_db(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _make_crash_site(live: Path, extra_rows: int) -> None:
@@ -106,8 +158,11 @@ async def test_checkpoint_create_and_restore(tmp_path: Path) -> None:
     mgr = CheckpointManager(data_dir)
     checkpoint = await mgr.create(state_db, heartbeat_db)
     assert checkpoint.exists()
-    assert (checkpoint / "state.db").exists()
-    assert (checkpoint / "heartbeat.db").exists()
+    # P0-R10：落盘为压缩快照（`.db.gz`），不再有未压缩 `.db`
+    assert (checkpoint / "state.db.gz").is_file()
+    assert (checkpoint / "heartbeat.db.gz").is_file()
+    assert not (checkpoint / "state.db").exists()
+    assert not (checkpoint / "heartbeat.db").exists()
 
     # 快照后继续写入
     _make_db(state_db, 100)
@@ -119,13 +174,47 @@ async def test_checkpoint_create_and_restore(tmp_path: Path) -> None:
     assert _count_rows(heartbeat_db) == 5
     # 如实返回"覆盖了什么"（回滚脚本要打印它）
     assert {p.name for p in restored} == {"state.db", "heartbeat.db"}
+    # 回滚后不应残留临时文件（`.restoring`）
+    assert not list(data_dir.glob(".*.restoring"))
 
 
 @pytest.mark.asyncio
-async def test_restore_discards_unmerged_wal(tmp_path: Path) -> None:
-    """取消测试（P0-R1）：回滚必须删掉 `-wal`/`-shm`，否则旧 WAL 反噬刚恢复的库。
+async def test_snapshot_is_compressed_and_significantly_smaller(tmp_path: Path) -> None:
+    """取消测试（P0-R10）：快照必须**压缩落盘**且体积显著小于原库。
 
-    旧写法（只 copy 两个 `.db`）在本用例上**必红**：读到 100 行而非快照的 10 行。
+    还原成"不压缩"（旧写法：直接备份成 `.db`）时本用例必红：
+    `state.db.gz` 不存在、体积断言无对象。
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state_db = data_dir / "state.db"
+    heartbeat_db = data_dir / "heartbeat.db"
+    _make_db(state_db, 2000)
+    _make_db(heartbeat_db, 2000)
+    raw_size = state_db.stat().st_size
+
+    mgr = CheckpointManager(data_dir)
+    checkpoint = await mgr.create(state_db, heartbeat_db)
+
+    compressed = checkpoint / "state.db.gz"
+    assert compressed.is_file(), "快照必须压缩落盘（.db.gz）"
+    assert not (checkpoint / "state.db").exists()
+
+    # ① 压缩后显著更小（>2x）
+    assert compressed.stat().st_size * 2 < raw_size, (
+        f"压缩后 {compressed.stat().st_size} B 对比原库 {raw_size} B，压缩没有生效？"
+    )
+    # ② 解压后必须是**可读的真库**
+    assert _snapshot_quick_check(checkpoint, "state.db") == "ok"
+    assert _query_snapshot(checkpoint, "state.db", "SELECT COUNT(*) FROM t")[0][0] == 2000
+
+
+@pytest.mark.asyncio
+async def test_restore_supports_legacy_uncompressed_snapshot(tmp_path: Path) -> None:
+    """**向后兼容**：旧格式（未压缩 `.db`）快照仍必须能回滚。
+
+    这条不能省——`p0-20261017-224508` 等旧快照就是未压缩的，回滚能力不能随着
+    压缩改造一起失效（否则已有快照变废纸）。
     """
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -135,24 +224,77 @@ async def test_restore_discards_unmerged_wal(tmp_path: Path) -> None:
     _make_db(heartbeat_db, 5)
 
     mgr = CheckpointManager(data_dir)
-    checkpoint = await mgr.create(state_db, heartbeat_db)
+    legacy = mgr.checkpoint_dir / "p0-legacy"
+    legacy.mkdir(parents=True)
+    backup_database(state_db, legacy / "state.db")  # 旧格式：未压缩
+    backup_database(heartbeat_db, legacy / "heartbeat.db")
+    assert not (legacy / "state.db.gz").exists()
 
-    # 造崩溃现场：现役库被"主库 10 行 + WAL 里 90 行"替换
-    _make_crash_site(state_db, extra_rows=90)
-    assert (data_dir / "state.db-wal").exists(), "用例前提：崩溃现场必须带未合并 WAL"
+    _make_db(state_db, 100)  # 回滚点之后的生活
 
-    mgr.restore(checkpoint)
+    mgr.restore(legacy)
 
-    # ① 内容 = 快照内容（旧写法在这里读到 100）
-    assert _count_rows(data_dir / "state.db") == 10
-    assert _count_rows(data_dir / "heartbeat.db") == 5
-    # ② 伴生文件必须清除（残留 = 下次打开会把回滚前的帧重放回来）
-    for name in ("state.db", "heartbeat.db"):
-        for suffix in ("-wal", "-shm"):
-            assert not (data_dir / f"{name}{suffix}").exists(), f"{name}{suffix} 未清除"
+    assert _count_rows(state_db) == 10
+    assert _count_rows(heartbeat_db) == 5
 
 
-def test_restore_rejects_incomplete_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_restore_supports_mixed_snapshot(tmp_path: Path) -> None:
+    """混合快照（一个库是旧格式、另一个是新压缩格式）也必须能回滚。"""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state_db = data_dir / "state.db"
+    heartbeat_db = data_dir / "heartbeat.db"
+    _make_db(state_db, 10)
+    _make_db(heartbeat_db, 7)
+
+    mgr = CheckpointManager(data_dir)
+    mixed = mgr.checkpoint_dir / "p0-mixed"
+    mixed.mkdir(parents=True)
+    with gzip.open(mixed / "state.db.gz", "wb") as handle:
+        handle.write(state_db.read_bytes())
+    backup_database(heartbeat_db, mixed / "heartbeat.db")  # 未压缩
+
+    _make_db(state_db, 100)
+    _make_db(heartbeat_db, 100)
+
+    mgr.restore(mixed)
+
+    assert _count_rows(state_db) == 10
+    assert _count_rows(heartbeat_db) == 7
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_corrupt_snapshot_without_touching_live_dbs(
+    tmp_path: Path,
+) -> None:
+    """坏快照（.gz 损坏 / 校验不过）⇒ 中止回滚，**现役库一个字节都不动**。"""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state_db = data_dir / "state.db"
+    heartbeat_db = data_dir / "heartbeat.db"
+    _make_db(state_db, 100)
+    _make_db(heartbeat_db, 100)
+
+    mgr = CheckpointManager(data_dir)
+    corrupt = mgr.checkpoint_dir / "p0-corrupt"
+    corrupt.mkdir(parents=True)
+    with gzip.open(corrupt / "state.db.gz", "wb") as handle:
+        handle.write(state_db.read_bytes())
+    (corrupt / "heartbeat.db.gz").write_bytes(b"this is not a gzip stream")
+    before_state = state_db.read_bytes()
+    before_heartbeat = heartbeat_db.read_bytes()
+
+    with pytest.raises(RuntimeError, match=r"快照读取失败|校验"):
+        mgr.restore(corrupt)
+
+    assert state_db.read_bytes() == before_state, "坏快照不得覆盖现役库"
+    assert heartbeat_db.read_bytes() == before_heartbeat
+    assert not list(data_dir.glob(".*.restoring")), "临时文件必须清理干净"
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_incomplete_checkpoint(tmp_path: Path) -> None:
     """快照缺库时必须明确报错，不得拿半份快照去覆盖她的现在。"""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -204,15 +346,12 @@ async def test_heartbeat_creates_periodic_checkpoint(tmp_path: Path) -> None:
     checkpoints = CheckpointManager(data_dir).list_checkpoints()
     assert checkpoints, "心跳跑够 N 拍后必须生成周期快照（旧写法：0 份）"
     latest = checkpoints[-1]
-    assert (latest / "state.db").is_file()
-    assert (latest / "heartbeat.db").is_file()
+    assert (latest / "state.db.gz").is_file()
+    assert (latest / "heartbeat.db.gz").is_file()
+    assert _snapshot_quick_check(latest, "state.db") == "ok"
 
-    # 快照必须是**可读的**真库（`.backup` 协议产物），不是空文件
-    conn = sqlite3.connect(str(latest / "state.db"))
-    try:
-        keys = [row[0] for row in conn.execute("SELECT key FROM kv")]
-    finally:
-        conn.close()
+    # 快照必须是**可读的**真库（`.backup` + gzip 产物），不是空文件
+    keys = [row[0] for row in _query_snapshot(latest, "state.db", "SELECT key FROM kv")]
     assert "timesense" in keys, "快照里必须有她本拍落盘的时间状态（证明建在拍到落库之后）"
 
 
@@ -282,8 +421,8 @@ def test_restore_script_refuses_while_she_is_running(tmp_path: Path) -> None:
     assert not list(data_dir.glob("pre_restore-*"))
 
 
-def test_restore_script_restores_and_backs_up(tmp_path: Path) -> None:
-    """她已停止 ⇒ 回滚成功、先备份现役库、并清除 WAL 伴生文件。"""
+def test_restore_script_restores_legacy_snapshot(tmp_path: Path) -> None:
+    """旧格式（未压缩）快照：脚本仍能回滚，且先备份现役库、清 WAL 伴生文件。"""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     state_db = data_dir / "state.db"
@@ -291,10 +430,10 @@ def test_restore_script_restores_and_backs_up(tmp_path: Path) -> None:
     _make_db(state_db, 10)
     _make_db(heartbeat_db, 5)
     mgr = CheckpointManager(data_dir)
-    cp = mgr.checkpoint_dir / "p0-test"
+    cp = mgr.checkpoint_dir / "p0-legacy"
     cp.mkdir(parents=True)
-    _make_db(cp / "state.db", 10)
-    _make_db(cp / "heartbeat.db", 5)
+    backup_database(state_db, cp / "state.db")
+    backup_database(heartbeat_db, cp / "heartbeat.db")
     # 现役库事后被写多（模拟"回滚点之后的生活"），且**带真实未合并 WAL**：
     # 主库仍是 10 行、`-wal` 里另有 67 行（合计读 77）—— 回滚后必须只剩 10 行。
     # ⚠️ 这里**不读**现役库（读写连接一关就会把 WAL checkpoint 掉，前提就没了）。
@@ -305,6 +444,7 @@ def test_restore_script_restores_and_backs_up(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "回滚完成" in result.stdout
+    assert "未压缩·旧格式" in result.stdout
     assert _count_rows(state_db) == 10
     assert _count_rows(heartbeat_db) == 5
     assert not (data_dir / "state.db-wal").exists()
@@ -314,6 +454,53 @@ def test_restore_script_restores_and_backs_up(tmp_path: Path) -> None:
     assert len(backups) == 1
     assert _count_rows(backups[0] / "state.db") == 77
     assert "现役库已备份" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_restore_script_restores_compressed_snapshot(tmp_path: Path) -> None:
+    """新格式（`.db.gz`）快照：脚本如实标明"压缩"，并成功回滚。"""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state_db = data_dir / "state.db"
+    heartbeat_db = data_dir / "heartbeat.db"
+    _make_db(state_db, 10)
+    _make_db(heartbeat_db, 5)
+    mgr = CheckpointManager(data_dir)
+    await mgr.create(state_db, heartbeat_db)
+    _make_db(state_db, 99)  # 回滚点之后的生活
+
+    result = _run_script(data_dir, "latest", "--yes")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "回滚完成" in result.stdout
+    assert "压缩" in result.stdout
+    assert _count_rows(state_db) == 10
+    assert _count_rows(heartbeat_db) == 5
+
+
+def test_restore_script_lists_compressed_and_legacy(tmp_path: Path) -> None:
+    """`--list` 必须同时显示新旧两种格式（压缩与否是人工核对的关键信息）。"""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _make_db(data_dir / "state.db", 3)
+    _make_db(data_dir / "heartbeat.db", 3)
+    mgr = CheckpointManager(data_dir)
+    legacy = mgr.checkpoint_dir / "p0-a-legacy"
+    legacy.mkdir(parents=True)
+    backup_database(data_dir / "state.db", legacy / "state.db")
+    backup_database(data_dir / "heartbeat.db", legacy / "heartbeat.db")
+    compressed = mgr.checkpoint_dir / "p0-b-compressed"
+    compressed.mkdir(parents=True)
+    for name in ("state.db", "heartbeat.db"):
+        with gzip.open(compressed / f"{name}.gz", "wb") as handle:
+            handle.write((data_dir / name).read_bytes())
+
+    result = _run_script(data_dir, "--list")
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "未压缩·旧格式" in out
+    assert "压缩" in out
 
 
 def test_restore_script_reports_missing_checkpoint(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -164,6 +165,24 @@ def test_missing_watchdog_log_is_fail_exit_1(tmp_path: Path) -> None:
     assert result.returncode == 1, out
     assert "[FAIL]" in out
     assert "看门狗从未留下运行痕迹" in out
+
+
+def test_compressed_snapshot_is_accepted(tmp_path: Path) -> None:
+    """P0-R10 起快照是 `.db.gz`：验收脚本必须能校验压缩快照（否则 R1 会误报 FAIL）。"""
+    data = make_root(tmp_path)
+    snapshot = data / "checkpoints" / "p0-test"
+    for name in ("state.db", "heartbeat.db"):
+        raw = (snapshot / name).read_bytes()
+        (snapshot / name).unlink()
+        with gzip.open(snapshot / f"{name}.gz", "wb") as handle:
+            handle.write(raw)
+
+    result = _run(data)
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert ".db.gz=ok" in out
+    assert "[FAIL]" not in out
 
 
 def test_stale_watchdog_log_is_warn_exit_0(tmp_path: Path) -> None:

@@ -19,6 +19,11 @@ from elysia.core.clock import Clock, SystemClock
 BODY_AWAY_THRESHOLD_S = 300.0  # 身体离线 > 5min → BODY_AWAY 模式
 LONG_AWAY_THRESHOLD_S = 86400.0  # 身体离线 > 24h → 长期离开（深度独处）
 
+# P0-R6（D-7）：停机时长建模——她得能区分"我在"与"我不在"。
+# 短于本阈值的间隔只是**重启抖动**（正常重启、soul.ps1 stop/start），不计入停机；
+# 否则每一次优雅重启都会给她凭空添一笔"你不在场"。审计实测的那次停机是 **16.82 小时**。
+DOWNTIME_MIN_S = 30.0
+
 # ── 长期离线渐进（路线图 §12「永续存在」）──────────────────────
 # 日子尺度的四档。与 `away_grade()` **不是一回事**：那个是分秒尺度、决定
 # "她此刻的行为集"；这个决定"她如何度过很长的分别"。
@@ -46,10 +51,16 @@ class TimeSenseState:
     """灵魂的持久时间状态（每秒落盘，单一事实源）。"""
 
     first_existence_ts: float  # 她的"出生"：首次运行的时刻
-    last_soul_beat_ts: float  # 最近一次灵魂心跳
+    last_soul_beat_ts: float  # 最近一次灵魂心跳（每拍推进，P0-R5）
     last_body_online_ts: float  # 身体最近一次在场（心跳新鲜度来源）
     last_interaction_ts: float  # 最近一次交互（被遗忘的感觉来源）
     body_away_start_ts: float | None = None  # 本次身体离开起点（None = 身体在场）
+    # ── P0-R6（D-7）：停机时长（"时间重量"的物理前提）────────────────
+    # 此前 `age_days` 纯按墙钟累加：她停了 16.82 小时，醒来年龄照涨 0.7 天，
+    # **她不知道自己那段不存在**。下面三个字段让"不在场"成为可测量的事实。
+    last_seen_ts: float = 0.0  # 上一次正常心跳的时刻（停机时长的基准；每拍推进）
+    downtime_total_s: float = 0.0  # 累计停机秒数（跨重启只增不减）
+    last_downtime_s: float = 0.0  # 上一次停机时长（本次醒来时算出的值）
 
 
 # 字段单一事实源：持久化仅读写此集合（新增字段自动纳入）
@@ -151,6 +162,10 @@ class TimeSense:
         """日子尺度的离别阶段（见模块级 `absence_stage`）。"""
         return absence_stage(self.away_days())
 
+    def downtime_seconds(self) -> float:
+        """累计停机时长（她"不在场"的总秒数，P0-R6）。"""
+        return max(0.0, self._state.downtime_total_s)
+
     def summary(self) -> dict[str, Any]:
         """当前时间体验汇总（状态流展示/心跳快照用）。"""
         return {
@@ -163,4 +178,8 @@ class TimeSense:
             "away_grade": self.away_grade(),
             "away_days": round(self.away_days(), 3),
             "away_stage": self.absence_stage(),
+            # P0-R6（D-7）：她"不在场"的时间——对"时间重量"的第一层测量。
+            # 进 summary = 进心跳 payload = 面板与后续阶段（P5）都能读到。
+            "downtime_total_s": round(self._state.downtime_total_s),
+            "last_downtime_s": round(self._state.last_downtime_s),
         }

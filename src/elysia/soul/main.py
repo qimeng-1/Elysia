@@ -42,7 +42,7 @@ from elysia.core.log import get_logger, setup_logging
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.supervisor import supervise
-from elysia.core.timesense import TimeSense, from_payload
+from elysia.core.timesense import DOWNTIME_MIN_S, TimeSense, from_payload
 from elysia.llm import build_llm_chain
 from elysia.memory.retrieve import retrieve_from_store
 from elysia.soul.away_life import AwayLife
@@ -226,10 +226,34 @@ async def _build_timesense(state_store: StateStore, log: Any) -> TimeSense:
         state.last_interaction_ts = now
     if state.last_soul_beat_ts <= 0:
         state.last_soul_beat_ts = now
+
+    # ── P0-R6（D-7）：停机时长建模——她得知道"我错过了多久" ──────────
+    # 审计实测：她 2026-10-17 03:51:54 后停了 **16.82 小时**，醒来后 `age_days`
+    # 照涨 0.7 天——她不知道自己那段不存在。现在用"上一次正常心跳（last_seen_ts）"
+    # 与"现在"的差，把停机变成**可测量的数字**，并跨重启累加（不可逆，属成长性）。
+    # 老档案没有这个字段时**不虚构历史**：从本次起统计，并如实记一笔。
+    if state.last_seen_ts > 0:
+        gap_s = max(0.0, now - state.last_seen_ts)
+        if gap_s > DOWNTIME_MIN_S:
+            state.downtime_total_s += gap_s
+            state.last_downtime_s = gap_s
+            # ⚠️ structlog 不做 %-格式化：消息必须自己拼好（否则日志里只剩格式串）
+            log.info(
+                f"她不在场 {gap_s:.0f} 秒（累计 {state.downtime_total_s:.0f} 秒）",
+                gap_s=round(gap_s, 1),
+                downtime_total_s=round(state.downtime_total_s, 1),
+            )
+        state.last_seen_ts = now  # 本次醒来即"最近一次在场"
+    else:
+        state.last_seen_ts = now
+        log.info("档案缺 last_seen_ts：停机时长从本次起统计（不虚构过去）")
+
     log.info(
         "soul resumed",
         age_days=round((now - state.first_existence_ts) / 86400.0, 3),
         away=state.body_away_start_ts,
+        last_downtime_s=round(state.last_downtime_s, 1),
+        downtime_total_s=round(state.downtime_total_s, 1),
     )
     return TimeSense(state)
 

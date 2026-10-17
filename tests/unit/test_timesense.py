@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from elysia.core.clock import SimulatedClock
+from elysia.core.log import get_logger
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
 from elysia.core.timesense import (
@@ -20,6 +22,7 @@ from elysia.core.timesense import (
     to_payload,
 )
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state
+from elysia.soul.main import _build_timesense
 
 T0 = 1_000_000.0  # 固定虚拟起点（模拟时钟用，与真实时间无关）
 
@@ -189,3 +192,134 @@ async def test_last_soul_beat_ts_advances_every_beat(tmp_path: Path) -> None:
     assert abs(beat_ts - hb_ts) <= 2.0, (
         f"state.db 的 last_soul_beat_ts({beat_ts}) 与 heartbeat.db 最后心跳({hb_ts}) 背离"
     )
+
+
+# ── P0-R6（D-7）：停机时长建模——"我错过了多久" ─────────────────────
+# 审计实测：她 2026-10-17 03:51:54 后停了 **16.82 小时**，醒来后 age_days 照涨
+# 0.7 天——她不知道自己那段不存在。下面用例钉住三件事：
+#   ① 启动时按"上次心跳 → 现在"的差计入停机（>30s 才算，不把重启抖动当停机）；
+#   ② 跨重启**累加**（只增不减，属成长性）；
+#   ③ 老档案缺字段不得崩，也不虚构历史。
+# 取消测试：`test_downtime_counted_on_startup`（去掉启动核算后 last_downtime_s 恒为 0 ⇒ 红）。
+
+
+def _timesense_payload(now: float, **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "first_existence_ts": now - 3 * 86400.0,
+        "last_soul_beat_ts": now - 7200.0,
+        "last_body_online_ts": 0.0,
+        "last_interaction_ts": now,
+        "body_away_start_ts": None,
+        "last_seen_ts": now - 7200.0,
+        "downtime_total_s": 100.0,
+        "last_downtime_s": 0.0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+async def _build_from_payload(tmp_path: Path, payload: dict[str, object]) -> TimeSense:
+    """把一份 timesense 档案写进真 StateStore，再走**真正的** `_build_timesense`。"""
+    store = StateStore(tmp_path / "state.db")
+    await store.start()
+    try:
+        await store.save_json("timesense", payload)
+        return await _build_timesense(store, get_logger("test"))
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_downtime_counted_on_startup(tmp_path: Path) -> None:
+    """取消测试（P0-R6）：上次心跳在 2 小时前 ⇒ 停机 ~7200s 计入累计。"""
+    now = time.time()
+    ts = await _build_from_payload(tmp_path, _timesense_payload(now))
+
+    assert ts.state.last_downtime_s == pytest.approx(7200.0, abs=5.0), (
+        f"上次停机应约 7200s（旧写法：没有这个概念，恒为 0），实际 {ts.state.last_downtime_s}"
+    )
+    assert ts.state.downtime_total_s == pytest.approx(7300.0, abs=5.0)  # 100 + 7200
+    # 本次醒来即"最近一次在场"，否则下一次启动会把这次运行也算成停机
+    assert ts.state.last_seen_ts >= now - 2.0
+
+
+@pytest.mark.asyncio
+async def test_downtime_ignores_short_gap(tmp_path: Path) -> None:
+    """<30s 的间隔只是重启抖动：不得凭空给她添一笔"你不在场"。"""
+    now = time.time()
+    ts = await _build_from_payload(
+        tmp_path, _timesense_payload(now, last_seen_ts=now - 5.0, downtime_total_s=100.0)
+    )
+    assert ts.state.last_downtime_s == 0.0
+    assert ts.state.downtime_total_s == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_downtime_accumulates_across_restarts(tmp_path: Path) -> None:
+    """停机时长**跨重启累加、只增不减**（"成长性"的物理形态）。"""
+    now = time.time()
+    first = await _build_from_payload(tmp_path, _timesense_payload(now))
+
+    second_payload = to_payload(first.state)
+    second_payload["last_seen_ts"] = time.time() - 3600.0  # 又停机一小时
+    second = await _build_from_payload(tmp_path, second_payload)
+
+    assert second.state.last_downtime_s == pytest.approx(3600.0, abs=5.0)
+    assert second.state.downtime_total_s == pytest.approx(
+        first.state.downtime_total_s + 3600.0, abs=10.0
+    ), "累计停机必须单调累加"
+
+
+@pytest.mark.asyncio
+async def test_downtime_backward_compatible_with_old_payload(tmp_path: Path) -> None:
+    """老档案缺新字段：走默认值、不得崩，也**不虚构**过去的停机。"""
+    now = time.time()
+    old_payload = {
+        "first_existence_ts": now - 3 * 86400.0,
+        "last_soul_beat_ts": now - 7200.0,
+        "last_body_online_ts": 0.0,
+        "last_interaction_ts": now,
+        "body_away_start_ts": None,
+    }
+    ts = await _build_from_payload(tmp_path, old_payload)
+    assert ts.state.last_downtime_s == 0.0
+    assert ts.state.downtime_total_s == 0.0
+    assert ts.state.last_seen_ts > 0
+
+
+def test_downtime_exposed_in_summary() -> None:
+    """暴露到 summary（→ 心跳 payload → 面板/后续阶段都能读到）。"""
+    state = make_state(downtime_total_s=7200.0, last_downtime_s=3600.0)
+    summary = TimeSense(state, SimulatedClock(start_ts=T0)).summary()
+    assert summary["downtime_total_s"] == 7200
+    assert summary["last_downtime_s"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_last_seen_ts_advances_every_beat(tmp_path: Path) -> None:
+    """`last_seen_ts` 必须每拍推进——否则下次启动会把整段运行算成停机。"""
+    clock = SimulatedClock(start_ts=T0, speed=60.0)
+    state_store = StateStore(tmp_path / "state.db")
+    heartbeat_store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await state_store.start()
+    await heartbeat_store.start()
+    soul = SoulHeartbeat(
+        state_store=state_store,
+        heartbeat_store=heartbeat_store,
+        timesense=TimeSense(make_soul_state(T0), clock),
+        mode_mgr=ModeManager(clock=clock),
+        clock=clock,
+        interval_s=1.0,
+    )
+    task = asyncio.create_task(soul.run())
+    try:
+        await _wait_for_soul_beats(heartbeat_store, 2)
+        persisted = await state_store.load_json("timesense")
+    finally:
+        await soul.stop()
+        await task
+        await state_store.close()
+        await heartbeat_store.close()
+
+    assert isinstance(persisted, dict)
+    assert float(persisted["last_seen_ts"]) > T0

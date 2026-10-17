@@ -347,6 +347,12 @@ class SoulHeartbeat:
                 # heartbeat.db 的 ts，这里写 state.db 的同一事实。两者**同拍推进**，
                 # 长期背离自此不可能（只在启动期兜底赋值的是旧写法）。
                 self._timesense.state.last_soul_beat_ts = now
+                # ── P0-R6（D-7）：停机时长的基准也每拍推进 ──────────────
+                # 否则下一次启动会把"这一整段运行"算成停机（她明明一直醒着）。
+                # 与 last_soul_beat_ts 分开存是**故意的**：那个字段的语义是
+                # "最近一次心跳"（R5 修活、面向观察者），这个是"停机核算的锚点"
+                # （面向时间体验）——将来若其中一个语义变了，另一个不会静默跟着坏。
+                self._timesense.state.last_seen_ts = now
                 await self._state_store.save_json("timesense", to_payload(self._timesense.state))
 
                 # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──
@@ -1070,12 +1076,17 @@ class SoulHeartbeat:
 
 
 def make_soul_state(now: float) -> TimeSenseState:
-    """新生 TimeSenseState：出生/交互起点此刻起算（无 0 时刻保证）。"""
+    """新生 TimeSenseState：出生/交互起点此刻起算（无 0 时刻保证）。
+
+    `last_seen_ts` 也从此刻起算：她诞生的那一刻就是"最近一次在场"，
+    否则首次重启会把"从 epoch 到现在的整段时间"算成停机（凭空几十年的虚无）。
+    """
     return TimeSenseState(
         first_existence_ts=now,
         last_soul_beat_ts=now,
         last_body_online_ts=0.0,
         last_interaction_ts=now,
+        last_seen_ts=now,
     )
 
 

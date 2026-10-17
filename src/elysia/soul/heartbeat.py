@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from elysia.core.checkpoint import CheckpointManager
@@ -184,6 +185,8 @@ class SoulHeartbeat:
         expression: ExpressionService | None = None,
         expression_worker: ExpressionWorker | None = None,
         vram_threshold_pct: float = 85.0,
+        stop_marker: Path | None = None,
+        stop_event: asyncio.Event | None = None,
     ) -> None:
         self._state_store = state_store
         self._heartbeat_store = heartbeat_store
@@ -206,6 +209,12 @@ class SoulHeartbeat:
         self._expression = expression
         # 阶段 1（20.6 的 1.3）：表达由 worker 执行——心跳只提交任务与取回落库
         self._expression_worker = expression_worker
+        # P0-R8（D-8）：优雅关闭的"请求通道"。Windows 上从 PowerShell 可靠发 SIGTERM
+        # 不现实（CloseMainWindow 只对 GUI 有效），故用**标记文件 + 每拍轮询**：
+        # `soul.ps1 stop` 写 `stop_requested`，这里每拍看一眼 → 置 stop 事件 →
+        # `main._run()` 的 finally 正常关闭序（排空表达 → 关库 → 写 soul stopped）。
+        self._stop_marker = stop_marker
+        self._stop_event = stop_event
 
         # 交互事件追踪（防止重复触发）
         self._last_interaction_event_ts: float = 0.0
@@ -272,6 +281,19 @@ class SoulHeartbeat:
         while self._running:
             self._heartbeat_seq += 1
             now = self._clock.now()
+
+            # ── P0-R8（D-8）：优雅关闭请求（每拍看一眼标记文件）──────────
+            # 旧停止路径 = `Stop-Process -Force`（= 拔电源）：关闭序里的
+            # "排空表达 → 关库 → 写 soul stopped" 永不执行，且 R2 的
+            # `soul.running` 每次都被残留 ⇒ 下次启动必然误报"非正常退出"。
+            # 现在停止方先写 `stop_requested`，这里响应 → 置 stop 事件 →
+            # `main._run()` 走正常关闭序 → 进程自己退出。
+            if self._stop_marker is not None and self._stop_marker.exists():
+                logger.info("收到停止请求（%s）：心跳停止，进入优雅关闭序", self._stop_marker.name)
+                if self._stop_event is not None:
+                    self._stop_event.set()
+                self._running = False
+                break
 
             # ── 阶段 A：读身体状态 + mode ────────────────────────
             try:

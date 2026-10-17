@@ -24,6 +24,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Any
 
 from elysia.body.heartbeat import BodyHeartbeat
 from elysia.body.resource import ResourceSampler
@@ -36,6 +37,12 @@ from elysia.core.supervisor import supervise
 # ── P0-R2（D-1）：崩溃现场（约定与 soul/main.py 一致）──────────────
 CRASH_LOG_PREFIX = "crash-"
 SESSION_MARKER_NAME = "body.running"
+
+# ── P0-R8（D-8）：优雅关闭（约定与 soul/main.py 一致，标记名加 `body_` 前缀）──
+# `soul.ps1 stop-body` 写 `body_stop_requested` → 本进程轮询到后走正常关闭序；
+# `body_stopped_intentionally` 供下次启动区分"主动停"与"崩溃"。
+STOP_REQUEST_NAME = "body_stop_requested"
+STOP_INTENTIONAL_NAME = "body_stopped_intentionally"
 
 
 class _CrashContext:
@@ -72,8 +79,40 @@ def _session_marker(settings: Settings) -> Path:
     return settings.run_dir / SESSION_MARKER_NAME
 
 
+def _stop_request_marker(settings: Settings) -> Path:
+    return settings.run_dir / STOP_REQUEST_NAME
+
+
+def _intentional_marker(settings: Settings) -> Path:
+    return settings.run_dir / STOP_INTENTIONAL_NAME
+
+
+def _intentional_stop_evidence(settings: Settings) -> str | None:
+    """上一次是不是**你主动停的**（P0-R8）。返回证据串；没有标记则 None。"""
+    marker = _intentional_marker(settings)
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"主动停标记存在但读不出（{type(exc).__name__}: {exc}）"
+    return " | ".join(line for line in raw.splitlines() if line.strip()) or "空"
+
+
+def _clear_stop_markers(settings: Settings) -> None:
+    """启动时消费掉上一次的停止标记（避免污染下一次判定，P0-R8）。"""
+    for marker in (_stop_request_marker(settings), _intentional_marker(settings)):
+        with contextlib.suppress(OSError):
+            marker.unlink(missing_ok=True)
+
+
 def _detect_abnormal_exit(settings: Settings) -> str | None:
-    """上次是否非正常退出：标记还在 = 上次没走到正常关闭。只陈述事实，不猜死因。"""
+    """上次是否非正常退出：标记还在 = 上次没走到正常关闭。只陈述事实，不猜死因。
+
+    P0-R8：存在 `body_stopped_intentionally` ⇒ 上次是人为停止，不算非正常退出。
+    """
+    if _intentional_stop_evidence(settings) is not None:
+        return None
     marker = _session_marker(settings)
     try:
         raw = marker.read_text(encoding="utf-8").strip()
@@ -136,7 +175,26 @@ def _write_crash_report(settings: Settings, exc: BaseException, ctx: _CrashConte
     return path
 
 
-async def _run(settings: Settings, *, previous_session: str | None = None) -> int:
+async def _watch_stop_request(marker: Path, stop: asyncio.Event, log: Any) -> None:
+    """P0-R8：轮询"停止请求"标记（身体 5s 一拍，故用独立轮询任务，响应 ≤0.5s）。
+
+    与灵魂的差别：灵魂心跳 1Hz，直接在拍内检查标记；身体 5s 一拍，
+    若也只在拍内查，用户按下「停止」后最多要等 5 秒才开始关闭。轮询任务让两者一致。
+    """
+    while not stop.is_set():
+        if marker.exists():
+            log.info("收到停止请求（%s）：进入优雅关闭序", marker.name)
+            stop.set()
+            return
+        await asyncio.sleep(0.5)
+
+
+async def _run(
+    settings: Settings,
+    *,
+    previous_session: str | None = None,
+    intentional_stop: str | None = None,
+) -> int:
     ctx = _CrashContext()
     try:
         ctx.phase = "setup_logging"
@@ -145,6 +203,9 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
         log.info("body process starting", pid=os.getpid())
         if previous_session is not None:
             log.warning("上次是非正常退出（死因未知）", evidence=previous_session)
+        elif intentional_stop is not None:
+            # P0-R8：上次是人为停的（soul.ps1 stop-body / stop）⇒ 不是异常
+            log.info("上次是你主动停的（不是异常退出）", evidence=intentional_stop)
 
         ctx.phase = "state_store.start"
         state_store = StateStore(settings.data_dir / "state.db")
@@ -175,6 +236,11 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
         beat_task = asyncio.create_task(
             supervise(heartbeat.run, "body-heartbeat"), name="body-heartbeat"
         )
+        # P0-R8：停止请求轮询任务（与心跳并行；stop 事件一置就退出）
+        watch_task = asyncio.create_task(
+            _watch_stop_request(_stop_request_marker(settings), stop, log),
+            name="body-stop-watch",
+        )
         ctx.phase = "heartbeat_loop"
         try:
             await stop.wait()
@@ -185,15 +251,19 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
             log.info("body stopping：优雅关闭")
             await heartbeat.stop()
             beat_task.cancel()
+            watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await beat_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch_task
             await state_store.close()
             await heartbeat_store.close()
-            # P0-R2：正常关闭 = 删掉会话标记
+            # P0-R8：正常关闭 = 消费掉停止请求 + 删掉会话标记
             try:
+                _stop_request_marker(settings).unlink(missing_ok=True)
                 _mark_session_end(settings)
             except OSError:
-                log.exception("无法清除会话标记（下次启动会误报上次非正常退出）")
+                log.exception("无法清除停止请求/会话标记（下次启动会误报上次非正常退出）")
             ctx.phase = "stopped"
             log.info("body stopped")
         return 0
@@ -213,13 +283,23 @@ def main() -> int:
     settings.ensure_dirs()
     # P0-R2：启动即留痕 + 上次是否正常关闭（在任何库/日志初始化之前，纯文件操作）
     previous_session = _detect_abnormal_exit(settings)
+    # P0-R8：上次是不是"你主动停的"——主动停不算异常，但要留一句"我知道为什么"。
+    intentional_stop = _intentional_stop_evidence(settings)
+    # 启动即**消费**这两个标记，避免污染下一次判定（崩溃时下次仍会如实报异常）
+    _clear_stop_markers(settings)
     try:
         _mark_session_start(settings)
     except OSError as exc:
         with contextlib.suppress(Exception):
             sys.stderr.write(f"[warn] 无法写启动标记 {_session_marker(settings)}: {exc}\n")
     try:
-        return asyncio.run(_run(settings, previous_session=previous_session))
+        return asyncio.run(
+            _run(
+                settings,
+                previous_session=previous_session,
+                intentional_stop=intentional_stop,
+            )
+        )
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

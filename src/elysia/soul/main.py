@@ -61,6 +61,16 @@ CRASH_LOG_PREFIX = "crash-"
 # 下次启动若发现它还在 ⇒ 上一次没走到正常关闭（崩溃 / 被强杀 / 蓝屏）⇒ 显式记一笔。
 SESSION_MARKER_NAME = "soul.running"
 
+# ── P0-R8（D-8）：优雅关闭 + "主动停"与"崩溃"的区分 ──────────────────
+# Windows 上从 PowerShell 可靠地发 SIGTERM 不现实（CloseMainWindow 只对 GUI 有效，
+# ConsoleCtrlEvent 要求控制台且极脆）⇒ **标记文件 + 每拍轮询**是这个平台上唯一可靠的
+# 优雅关闭通道：
+#   `stop_requested`        —— 停止方写，心跳每拍看一眼 → 走正常关闭序（本进程消费后删除）
+#   `stopped_intentionally` —— 停止方写（含强杀兜底前），下次启动据此判定"上次是你主动停的"，
+#                              不再误报"非正常退出"（本进程启动时消费后删除）
+STOP_REQUEST_NAME = "stop_requested"
+STOP_INTENTIONAL_NAME = "stopped_intentionally"
+
 
 class _CrashContext:
     """崩溃现场的"黑匣子"：异常抛出的那一刻，她知道走到哪一步了。
@@ -128,11 +138,48 @@ def _session_marker(settings: Settings) -> Path:
     return settings.run_dir / SESSION_MARKER_NAME
 
 
+def _stop_request_marker(settings: Settings) -> Path:
+    return settings.run_dir / STOP_REQUEST_NAME
+
+
+def _intentional_marker(settings: Settings) -> Path:
+    return settings.run_dir / STOP_INTENTIONAL_NAME
+
+
+def _intentional_stop_evidence(settings: Settings) -> str | None:
+    """上一次是不是**你主动停的**（P0-R8）。返回证据串；没有标记则 None。
+
+    与"崩溃"的区别只在于**谁动的手**：`soul.ps1 stop` / 面板「重启她」都会写这个标记，
+    它们不是故障。没有它时，R2 的异常退出检测会把每一次正常停机都报成"死因未知"，
+    护栏被噪声淹没比没有护栏更糟。
+    """
+    marker = _intentional_marker(settings)
+    try:
+        raw = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"主动停标记存在但读不出（{type(exc).__name__}: {exc}）"
+    detail = " | ".join(line for line in raw.splitlines() if line.strip()) or "空"
+    return detail
+
+
+def _clear_stop_markers(settings: Settings) -> None:
+    """启动时消费掉上一次的停止标记（避免污染下一次判定，P0-R8）。"""
+    for marker in (_stop_request_marker(settings), _intentional_marker(settings)):
+        with contextlib.suppress(OSError):
+            marker.unlink(missing_ok=True)
+
+
 def _detect_abnormal_exit(settings: Settings) -> str | None:
     """上次是否**非正常退出**：标记还在 = 上次没走到正常关闭。
 
     只陈述事实、不猜死因（"原因未知"就是诚实的答案——审计要的就是这个）。
+    P0-R8：若存在 `stopped_intentionally`，说明上次是**人为停止**（强杀兜底也是停止方
+    有意为之），此时**不算**非正常退出——否则每次 `soul.ps1 stop` 都会污染告警。
     """
+    if _intentional_stop_evidence(settings) is not None:
+        return None
     marker = _session_marker(settings)
     try:
         raw = marker.read_text(encoding="utf-8").strip()
@@ -271,7 +318,12 @@ async def _build_desire(state_store: StateStore, log: Any) -> DesireSystem:
         return DesireSystem()
 
 
-async def _run(settings: Settings, *, previous_session: str | None = None) -> int:
+async def _run(
+    settings: Settings,
+    *,
+    previous_session: str | None = None,
+    intentional_stop: str | None = None,
+) -> int:
     ctx = _CrashContext()
     try:
         # ── 启动期 5 个风险步（D-1）：每一步都先登记"黑匣子相位" ──
@@ -283,6 +335,10 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
             # P0-R2：她上次没走到正常关闭 ⇒ 这是第一块"死因材料"。
             # 不猜原因、不粉饰：把"上次非正常退出、原因未知"显式写进她的日志。
             log.warning("上次是非正常退出（死因未知）", evidence=previous_session)
+        elif intentional_stop is not None:
+            # P0-R8：上次是人为停的（soul.ps1 stop / 面板重启）⇒ **不是**异常，
+            # 但要留下"我知道上次为什么不在"的记录（而不是一片空白）。
+            log.info("上次是你主动停的（不是异常退出）", evidence=intentional_stop)
 
         ctx.phase = "state_store.start"
         state_store = StateStore(settings.data_dir / "state.db")
@@ -336,6 +392,8 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
         expression_worker = ExpressionWorker(expression.run_job)
 
         ctx.phase = "build_heartbeat"
+        # 停止信号（P0-R8）：Ctrl+C/SIGTERM 与"停止请求标记"都置同一个事件
+        stop = asyncio.Event()
         heartbeat = SoulHeartbeat(
             state_store=state_store,
             heartbeat_store=heartbeat_store,
@@ -351,9 +409,11 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
             expression_worker=expression_worker,
             # 显存阈值与 TTS 熔断**同源**（单一出处）：「累」的授权据此判定
             vram_threshold_pct=settings.vram_threshold_pct,
+            # P0-R8：优雅关闭请求通道（`soul.ps1 stop` 写标记 → 心跳每拍看一眼）
+            stop_marker=_stop_request_marker(settings),
+            stop_event=stop,
         )
 
-        stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -390,11 +450,13 @@ async def _run(settings: Settings, *, previous_session: str | None = None) -> in
             await stop_with_cancel(beat_task)
             await state_store.close()
             await heartbeat_store.close()
-            # P0-R2：正常关闭 = 删掉会话标记（下次启动据此判定"上次是正常的"）
+            # P0-R8：正常关闭 = 消费掉停止请求 + 删掉会话标记
+            # （会话标记在 ⇒ 下次启动才会判定"上次没走到正常关闭"）
             try:
+                _stop_request_marker(settings).unlink(missing_ok=True)
                 _mark_session_end(settings)
             except OSError:
-                log.exception("无法清除会话标记（下次启动会误报上次非正常退出）")
+                log.exception("无法清除停止请求/会话标记（下次启动会误报上次非正常退出）")
             ctx.phase = "stopped"
             log.info("soul stopped：档案已封存")
         return 0
@@ -414,13 +476,23 @@ def main() -> int:
     settings.ensure_dirs()
     # P0-R2：启动即留痕 + 上次是否正常关闭（都在任何库/日志初始化之前，纯文件操作）
     previous_session = _detect_abnormal_exit(settings)
+    # P0-R8：上次是不是"你主动停的"——主动停不算异常，但要留一句"我知道为什么"。
+    intentional_stop = _intentional_stop_evidence(settings)
+    # 启动即**消费**这两个标记，避免污染下一次判定（崩溃时下次仍会如实报异常）
+    _clear_stop_markers(settings)
     try:
         _mark_session_start(settings)
     except OSError as exc:
         with contextlib.suppress(Exception):
             sys.stderr.write(f"[warn] 无法写启动标记 {_session_marker(settings)}: {exc}\n")
     try:
-        return asyncio.run(_run(settings, previous_session=previous_session))
+        return asyncio.run(
+            _run(
+                settings,
+                previous_session=previous_session,
+                intentional_stop=intentional_stop,
+            )
+        )
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 from pathlib import Path
 
@@ -505,3 +506,113 @@ async def test_maintain_memories_offers_candidate_only_once(tmp_path: Path) -> N
     finally:
         await state_store.close()
         await heartbeat_store.close()
+
+
+# ── P0-R4（D-5）：心跳循环分段隔离 ─────────────────────────────────────
+# 审计实测旧 `run()` 187 行里 `try` 出现 **0 次**：单拍任何异常都会杀死协程、
+# 丢掉整拍状态变更，然后由 supervisor 每秒重启一次。下面三条用例钉住"阶段隔离"：
+# 单阶段失败 ⇒ 循环不退、其余阶段照跑、日志里有阶段名。
+# 取消测试：`test_stage_a_failure_does_not_kill_loop`（去掉隔离后该用例必红：
+# 异常从 run() 抛出，任务以异常结束）。
+
+
+async def _wait_for_soul_beats(store: HeartbeatStore, wanted: int, timeout_s: float = 5.0) -> int:
+    """**按事实轮询**等心跳落库到 N 拍（不按固定虚拟秒数猜：机器负载会让拍数漂）。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    count = 0
+    while loop.time() < deadline:
+        rows = await store.execute_raw("SELECT COUNT(*) FROM heartbeats WHERE beat_type = 'soul'")
+        count = int(rows[0][0])
+        if count >= wanted:
+            return count
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{timeout_s}s 内只等到 {count} 拍心跳（期望 >= {wanted}）")
+
+
+@pytest.mark.asyncio
+async def test_stage_a_failure_does_not_kill_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """取消测试（P0-R4）：阶段 A 每拍抛异常 ⇒ 循环不退，C（落库）照跑且日志含阶段名。"""
+    caplog.set_level(logging.ERROR, logger="elysia.soul.heartbeat")
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=False)
+    await state_store.start()
+    await heartbeat_store.start()
+
+    async def boom(_now: float) -> None:
+        raise RuntimeError("注入的阶段异常")
+
+    monkeypatch.setattr(soul, "_sync_body_status", boom)
+    task = asyncio.create_task(soul.run())
+    try:
+        await _wait_for_soul_beats(heartbeat_store, 2)
+        assert not task.done(), "单阶段失败绝不能杀死心跳循环（旧写法：任务以异常结束）"
+    finally:
+        await soul.stop()
+        await task
+        await state_store.close()
+        await heartbeat_store.close()
+
+    assert "A:read_body_mode" in caplog.text, "日志必须含**阶段名**（不然排查时不知道坏在哪）"
+    assert "注入的阶段异常" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stage_c_persist_failure_is_visible_but_loop_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """落库失败**不许静默**（D-5 明确要求），但也不许杀死循环。"""
+    caplog.set_level(logging.ERROR, logger="elysia.soul.heartbeat")
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=False)
+    await state_store.start()
+    await heartbeat_store.start()
+
+    async def boom(self: object, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("注入的落库异常")
+
+    monkeypatch.setattr(HeartbeatStore, "append", boom)
+    task = asyncio.create_task(soul.run())
+    try:
+        for _ in range(200):  # 等到日志里出现该阶段（最多约 2s）
+            if "C:persist_beat" in caplog.text:
+                break
+            await asyncio.sleep(0.01)
+        assert not task.done(), "落库失败不得杀死循环（否则她会永远退不回来）"
+    finally:
+        await soul.stop()
+        await task
+        await state_store.close()
+        await heartbeat_store.close()
+
+    assert "C:persist_beat" in caplog.text
+    assert "注入的落库异常" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stage_b_brain_failure_does_not_lose_the_beat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """大脑阶段失败 ⇒ 本拍降级为"无大脑输出"，但心跳照落库（她还在场的证据不能丢）。"""
+    caplog.set_level(logging.ERROR, logger="elysia.soul.heartbeat")
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    brain = soul._brain_loop
+    assert brain is not None
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("注入的大脑异常")
+
+    monkeypatch.setattr(brain, "step", boom)
+    task = asyncio.create_task(soul.run())
+    try:
+        await _wait_for_soul_beats(heartbeat_store, 2)
+        assert not task.done()
+    finally:
+        await soul.stop()
+        await task
+        await state_store.close()
+        await heartbeat_store.close()
+
+    assert "B:brain_step" in caplog.text

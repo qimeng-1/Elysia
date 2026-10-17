@@ -10,7 +10,7 @@ import structlog
 
 from elysia.core.config import Settings, get_settings
 from elysia.core.log import get_logger, setup_logging
-from elysia.core.supervisor import supervise
+from elysia.core.supervisor import SupervisorFatal, supervise
 
 
 def test_settings_defaults() -> None:
@@ -124,3 +124,135 @@ async def test_supervise_reports_errors_to_callback() -> None:
     )
     assert calls == 3, "回调抛异常不得阻断重启"
     assert len(errors) == 2, f"两次失败应各回调一次，实际 {len(errors)}"
+
+
+# ── P0-R4（D-5）：指数退避 + 熔断 ─────────────────────────────────────
+# 旧写法固定等 1.0s、无上限 ⇒ 持久故障（库损坏/磁盘满/内存不足）会让她
+# **每 1 秒崩一次、无限循环**，而看门狗只看到"进程在"，永远不介入。
+# 取消测试：
+#   - test_supervise_exponential_backoff（去掉退避 ⇒ 延迟恒为 1.0s，用例红）
+#   - test_supervise_circuit_breaker_fires（去掉熔断 ⇒ 无限重启，用例超时红）
+
+
+@pytest.mark.asyncio
+async def test_supervise_exponential_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """取消测试（P0-R4）：连续失败必须**指数退避**，而不是每次固定 1 秒。"""
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await real_sleep(0)  # 不真的等，但保留让出控制权
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    async def always_fail() -> None:
+        raise RuntimeError("持久故障")
+
+    fatal: list[tuple[str, int]] = []
+    with pytest.raises(SupervisorFatal):
+        await asyncio.wait_for(
+            supervise(
+                always_fail,
+                "backoff-test",
+                restart_delay_s=1.0,
+                max_delay_s=60.0,
+                max_consecutive_failures=4,
+                reset_after_s=60.0,
+                on_fatal=lambda name, n: fatal.append((name, n)),
+            ),
+            timeout=5.0,
+        )
+
+    assert delays == [1.0, 2.0, 4.0], f"退避应是 1s→2s→4s（旧写法恒为 1.0）；实际 {delays}"
+    assert fatal == [("backoff-test", 4)]
+
+
+@pytest.mark.asyncio
+async def test_supervise_circuit_breaker_exits_instead_of_restarting_forever() -> None:
+    """取消测试（P0-R4）：连续失败达阈值 ⇒ **主动退出**，不是无限重启。
+
+    旧写法会永远重启（本用例在 `wait_for` 超时处变红），而不是走到熔断。
+    """
+    calls = 0
+
+    async def always_fail() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("持久故障")
+
+    with pytest.raises(SupervisorFatal):
+        await asyncio.wait_for(
+            supervise(
+                always_fail,
+                "breaker-test",
+                restart_delay_s=0.001,
+                max_consecutive_failures=3,
+                reset_after_s=60.0,
+                on_fatal=lambda _name, _n: None,
+            ),
+            timeout=5.0,
+        )
+    assert calls == 3, "连续失败 3 次即熔断，不应继续重启"
+
+
+@pytest.mark.asyncio
+async def test_supervise_circuit_breaker_default_path_exits_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """生产路径：没有注入 on_fatal 时，熔断必须**真的退出进程**（让看门狗接管）。
+
+    为什么不能只是 `raise`：`main()` 只 `await stop`，不观察 beat_task 的异常，
+    所以"抛出去"等于"她僵在原地"。这里用替身拦住 `os._exit` 以断言它被调用。
+    """
+    exit_codes: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        exit_codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr("elysia.core.supervisor.os._exit", fake_exit)
+
+    async def always_fail() -> None:
+        raise RuntimeError("持久故障")
+
+    with pytest.raises(SystemExit):
+        await asyncio.wait_for(
+            supervise(
+                always_fail,
+                "exit-test",
+                restart_delay_s=0.001,
+                max_consecutive_failures=2,
+            ),
+            timeout=5.0,
+        )
+    assert exit_codes == [1], "熔断必须退出进程（非 0），旧写法是永远重启"
+
+
+@pytest.mark.asyncio
+async def test_supervise_resets_counter_after_a_healthy_run() -> None:
+    """跑够 `reset_after_s` 才崩 ⇒ 计数归零（不把旧账算进这一次）。"""
+    calls = 0
+
+    async def factory() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await asyncio.sleep(0.05)  # 跑够 reset_after_s=0.02 ⇒ 计数重置
+        raise RuntimeError(f"第 {calls} 次失败")
+
+    fatal: list[int] = []
+    with pytest.raises(SupervisorFatal):
+        await asyncio.wait_for(
+            supervise(
+                factory,
+                "reset-test",
+                restart_delay_s=0.001,
+                max_consecutive_failures=3,
+                reset_after_s=0.02,
+                on_fatal=lambda _n, n: fatal.append(n),
+            ),
+            timeout=5.0,
+        )
+    assert calls == 4, "第 2 次失败前跑够了 reset_after_s ⇒ 计数重置，故第 4 次才熔断"
+    assert fatal == [3]

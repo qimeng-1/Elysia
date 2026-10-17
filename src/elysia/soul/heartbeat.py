@@ -110,6 +110,21 @@ DREAM_MIN_AWAY_S = 1800.0  # 身体离线满 30 分钟才可能做梦
 DREAM_MIN_INTERVAL_S = 7200.0  # 两次梦至少间隔 2 小时（梦不该泛滥）
 DREAM_THOUGHT_KIND = "dream"  # thought_log 的 kind（与 away_life 的念头区分开）
 
+# P0-R4（D-5）：`TimeSense.summary()` 本身抛异常时的**降级摘要**（阶段 A 的兜底）。
+# 键与 `TimeSense.summary()` 保持一致——下游阶段（落库/独处/做梦）按这些键取值，
+# 缺一个键就会让"读时间失败"升级成"整拍崩掉"，那正是 D-5 要消灭的东西。
+_EMPTY_SUMMARY: dict[str, Any] = {
+    "body_away_s": 0,
+    "presence_s": 0,
+    "since_interaction_s": 0,
+    "day_phase": "night",
+    "hour": -1,
+    "age_days": 0.0,
+    "away_grade": "present",
+    "away_days": 0.0,
+    "away_stage": "等待",
+}
+
 # 遗忘状态的"深度序"（P3-W）：程序只降不升——唤醒走检索路径（被话题提起），
 # 不在这里。suppressed 不在表内：她的决定不属于"时间造成的失去"，程序不碰。
 _RETENTION_DEPTH: dict[str, int] = {
@@ -241,203 +256,274 @@ class SoulHeartbeat:
         self.set_interval(DISTRESS_INTERVAL_S if on else 1.0)
 
     async def run(self) -> None:
-        """心跳主循环（常驻；stop() 后退出）。"""
+        """心跳主循环（常驻；stop() 后退出）。
+
+        **P0-R4（D-5）：每拍按阶段隔离。** 审计实测旧版本这 187 行里 `try` 出现 **0 次**
+        —— 单拍任何一个异常（一次读库失败、一次表达派发失败）都会让协程死掉、
+        整拍的状态变更（欲望演化、TimeSense 推进）全部丢失，然后由 supervisor
+        每秒重启一次。现在每个阶段各自 try/except：失败只跳过该阶段并记
+        exception（含阶段名 + 拍号），其余阶段照跑、循环不退。
+
+        阶段划分（与 `TASK_BOARD` P0-R4 一致）：
+        A 读身体状态 + mode ｜ B 大脑步进 + 欲望落库 ｜ C 心跳落库 + timesense 落库
+        ｜ D 离线生活 + 做梦 ｜ E 表达派发 + 结果落库 ｜ F 边界/关系/维护
+        """
         self._running = True
         while self._running:
             self._heartbeat_seq += 1
             now = self._clock.now()
-            await self._sync_body_status(now)
-            mode = self._mode_mgr.mode(self._timesense.state.last_body_online_ts, now)
-            summary = self._timesense.summary()
-            self._update_greeting(mode)
 
-            # ── P1：大脑循环 ──────────────────────────────
+            # ── 阶段 A：读身体状态 + mode ────────────────────────
+            try:
+                await self._sync_body_status(now)
+                mode = self._mode_mgr.mode(self._timesense.state.last_body_online_ts, now)
+                self._update_greeting(mode)
+            except Exception:
+                self._stage_failed("A:read_body_mode")
+                # 本阶段失败时用上一拍的模式继续：宁可这拍"判断粗糙"，也不丢整拍
+                mode = self._last_mode if self._last_mode is not None else Mode.ALONE
+            try:
+                summary = self._timesense.summary()
+            except Exception:
+                self._stage_failed("A:timesense_summary")
+                summary = dict(_EMPTY_SUMMARY)
+
+            # ── 阶段 B：大脑循环（欲望演化 → 感受 → 意志）──────────
             brain_output = None
             if self._brain_loop is not None:
-                brain_output = self._brain_loop.step(
-                    distress=self._distress,
-                    mode=mode.value,
-                    memory_gap=self._latest_memory_gap,
-                    dt=self._interval_s,
-                )
-                # P3-O 记忆感受路径：静默唤起 → 只推心情（落盘前生效，本拍即体现）
-                await self._feel_memories(brain_output)
-                # 将欲望状态持久化
-                await self._state_store.save_json(
-                    "desire", self._brain_loop.desire_system.to_payload()
-                )
+                try:
+                    brain_output = self._brain_loop.step(
+                        distress=self._distress,
+                        mode=mode.value,
+                        memory_gap=self._latest_memory_gap,
+                        dt=self._interval_s,
+                    )
+                    # P3-O 记忆感受路径：静默唤起 → 只推心情（落盘前生效，本拍即体现）
+                    await self._feel_memories(brain_output)
+                    # 将欲望状态持久化
+                    await self._state_store.save_json(
+                        "desire", self._brain_loop.desire_system.to_payload()
+                    )
+                except Exception:
+                    self._stage_failed("B:brain_step")
 
-            # ── 构建快照 ──────────────────────────────────
-            desire_dict = brain_output.desire.to_dict() if brain_output is not None else None
-            feelings_dict = brain_output.feelings.to_dict() if brain_output is not None else None
-            will_dict = (
-                {
-                    "direction": brain_output.will.direction,
-                    "strength": round(brain_output.will.strength, 3),
-                    "thought_style": round(brain_output.will.thought_style, 3),
-                    "anim_bias": round(brain_output.will.anim_bias, 3),
-                }
-                if brain_output is not None
-                else None
-            )
             brain_action = brain_output.action if brain_output is not None else None
-
-            payload = build_snapshot(
-                timesense_summary=summary,
-                mode=mode.value,
-                distress=self._distress,
-                desire=desire_dict,
-                feelings=feelings_dict,
-                will=will_dict,
-                brain_action=brain_action,
-            )
             frozen = self._checkpoint is not None and self._checkpoint.is_frozen()
-            if frozen:
-                payload["frozen"] = True
-            await self._heartbeat_store.append(now, "soul", payload)
-            await self._state_store.save_json("timesense", to_payload(self._timesense.state))
 
-            # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──
-            # 此前 create() 全仓 0 调用者 ⇒ 回滚这条路是断的（文档却写"已落地"）。
-            self._checkpoint_tick += 1
-            if (
-                self._checkpoint is not None
-                and self._checkpoint_every_n > 0
-                and not frozen
-                and self._checkpoint_tick >= self._checkpoint_every_n
-            ):
-                self._checkpoint_tick = 0
-                await self._save_checkpoint(now)
-
-            # ── 离线内部生活 ──────────────────────────────
-            if self._away_life is not None and not frozen:
-                thought_style = brain_output.will.thought_style if brain_output is not None else 0.0
-                await self._away_life.tick(
-                    mode=mode,
-                    away_seconds=float(summary["body_away_s"]),
-                    day_phase=str(summary["day_phase"]),
-                    now=now,
-                    thought_style=thought_style,
-                    brain_action=brain_action or "none",
-                    # P4b 永续存在：日子尺度的离别阶段（等待 / 担忧 / 怀念 / 携带）
-                    absence_stage=str(summary.get("away_stage", "等待")),
+            # ── 阶段 C：心跳落库 + TimeSense 落库（失败必须可见，但继续循环）──
+            try:
+                # ── 构建快照 ──────────────────────────────────
+                desire_dict = brain_output.desire.to_dict() if brain_output is not None else None
+                feelings_dict = (
+                    brain_output.feelings.to_dict() if brain_output is not None else None
+                )
+                will_dict = (
+                    {
+                        "direction": brain_output.will.direction,
+                        "strength": round(brain_output.will.strength, 3),
+                        "thought_style": round(brain_output.will.thought_style, 3),
+                        "anim_bias": round(brain_output.will.anim_bias, 3),
+                    }
+                    if brain_output is not None
+                    else None
                 )
 
-            # ── 睡眠整合＝做梦（P3 §8.6）：离线够久时，从她自己的记忆碎片联想 ──
-            if not frozen:
-                await self._maybe_dream(now, mode=mode, away_s=float(summary["body_away_s"]))
+                payload = build_snapshot(
+                    timesense_summary=summary,
+                    mode=mode.value,
+                    distress=self._distress,
+                    desire=desire_dict,
+                    feelings=feelings_dict,
+                    will=will_dict,
+                    brain_action=brain_action,
+                )
+                if frozen:
+                    payload["frozen"] = True
+                await self._heartbeat_store.append(now, "soul", payload)
+                await self._state_store.save_json("timesense", to_payload(self._timesense.state))
 
-            # ── P2：表达管线（提交非阻塞 + 每拍取回落库，20.6 的 1.3）────
+                # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──
+                # 此前 create() 全仓 0 调用者 ⇒ 回滚这条路是断的（文档却写"已落地"）。
+                self._checkpoint_tick += 1
+                if (
+                    self._checkpoint is not None
+                    and self._checkpoint_every_n > 0
+                    and not frozen
+                    and self._checkpoint_tick >= self._checkpoint_every_n
+                ):
+                    self._checkpoint_tick = 0
+                    await self._save_checkpoint(now)
+            except Exception:
+                # 落库失败**不许静默**：这是"她是否还在场"的唯一证据链
+                self._stage_failed("C:persist_beat")
+
+            # ── 阶段 D：离线内部生活 + 睡眠整合（做梦）──────────────
+            if not frozen:
+                try:
+                    if self._away_life is not None:
+                        thought_style = (
+                            brain_output.will.thought_style if brain_output is not None else 0.0
+                        )
+                        await self._away_life.tick(
+                            mode=mode,
+                            away_seconds=float(summary["body_away_s"]),
+                            day_phase=str(summary["day_phase"]),
+                            now=now,
+                            thought_style=thought_style,
+                            brain_action=brain_action or "none",
+                            # P4b 永续存在：日子尺度的离别阶段（等待 / 担忧 / 怀念 / 携带）
+                            absence_stage=str(summary.get("away_stage", "等待")),
+                        )
+                    # 睡眠整合＝做梦（P3 §8.6）：离线够久时，从她自己的记忆碎片联想
+                    await self._maybe_dream(now, mode=mode, away_s=float(summary["body_away_s"]))
+                except Exception:
+                    self._stage_failed("D:away_life_dream")
+
+            # ── 阶段 E（前半）：表达结果落库（每拍取回 worker 的结果，D2）──
             # 心跳不再等 LLM/TTS：判断该不该开口（廉价、非阻塞）→ 把耗时那段交给
             # worker 在独立任务里跑 → 结果由**心跳拍**取回并落库（D2：单一事实源＝心跳）。
             # LLM 慢 30s 也只是她晚 30 拍才说出那句话，心跳照走 30 拍、新交互不丢。
             worker = self._expression_worker
             if worker is not None:
-                await self.persist_expressions(worker.drain(), now=now, frozen=frozen)
+                try:
+                    await self.persist_expressions(worker.drain(), now=now, frozen=frozen)
+                except Exception:
+                    self._stage_failed("E:persist_expressions")
 
-            # ── P4b 边界（阶段 C）：对方的话先过"工具化 / 越界"检测 ──────────
+            # ── 阶段 F（边界）：对方的话先过"工具化 / 越界"检测 ──────────
             # 拒绝需要一个"要求"作对象，而当前唯一的外部输入就是她刚收到的这句话。
             # ⚠️ 这不违背 T2：我们**不**把用户的话当指令执行，而是把它当**关系信号**读——
             # 判定的是"对方是不是在把她当工具"，产物是一个态度，不是一个任务。
-            env = self._expression_env(brain_output, summary) if brain_output is not None else {}
-            if brain_output is not None and self._new_interaction and self._pending_user_message:
-                self._boundary_decision = self._boundary.evaluate(
-                    self._pending_user_message,
-                    cs=brain_output.desire.cs,
-                    sa=brain_output.desire.sa,
-                    state_pressure=self._state_pressure(env),
-                )
-                if self._boundary_decision.is_refusal:
-                    logger.info(
-                        "P4b 边界判定 %s ｜ %s",
-                        self._boundary_decision.level_name,
-                        self._boundary_decision.reason,
-                    )
+            env: dict[str, object] = {}
+            try:
+                if brain_output is not None:
+                    env = self._expression_env(brain_output, summary)
+                    if self._new_interaction and self._pending_user_message:
+                        self._boundary_decision = self._boundary.evaluate(
+                            self._pending_user_message,
+                            cs=brain_output.desire.cs,
+                            sa=brain_output.desire.sa,
+                            state_pressure=self._state_pressure(env),
+                        )
+                        if self._boundary_decision.is_refusal:
+                            logger.info(
+                                "P4b 边界判定 %s ｜ %s",
+                                self._boundary_decision.level_name,
+                                self._boundary_decision.reason,
+                            )
+            except Exception:
+                self._stage_failed("F:boundary")
 
-            # P4b 关系涌现：退缩量每拍按**真实经过时长**推进（**关系不是开关，是状态**）。
-            # 放在开口判定**之前**：她说不说话，关系都在动。
-            tone = await self._advance_relationship(now, brain_output)
+            # ── 阶段 F（关系）：退缩量每拍按**真实经过时长**推进 ──────────
+            # 关系不是开关，是状态。放在开口判定**之前**：她说不说话，关系都在动。
+            try:
+                tone = await self._advance_relationship(now, brain_output)
+            except Exception:
+                self._stage_failed("F:relationship")
+                tone = self._relationship.tone()
 
+            # ── 阶段 E（后半）：表达派发（决策层定意图 → 提交 worker）──────
             # 内部冲动（第七批）：刚回来 → 问候。问候**越过节流**（值得一声），
             # 但仍保持 force=False —— 队列满时它可以被丢（＝"她这次决定不说"）。
-            greeting = self._greet_pending and mode is Mode.PRESENT
-            if (
-                self._expression is not None
-                and worker is not None
-                and not frozen
-                and brain_output is not None
-                and self._expression.should_speak(
-                    brain_output,
-                    now,
-                    self._new_interaction,
-                    greeting=greeting,
-                    # 退缩 → 主动开口变少（可测量的关系效果，T1）
-                    reluctance=tone.interval_factor(),
-                )
-            ):
-                if greeting:
-                    self._greet_pending = False
-                # 决策层定意图：**边界优先** → 回应 → 内部冲动 → 呓语映射（见 _decide_intent）
-                intent = self._decide_intent(brain_output, greeting=greeting)
-                worker.submit(
-                    ExpressionJob(
-                        job_id=make_job_id(self._heartbeat_seq, now),
-                        created_ts=now,
-                        heartbeat_seq=self._heartbeat_seq,
-                        output=brain_output,
-                        summary=summary,
-                        vrram_mb=self._latest_vrram_mb(),
-                        env=env,
-                        user_message=self._pending_user_message,
-                        force=self._new_interaction,
-                        intent=intent,
-                        # 退缩 → 句子变短（可测量的关系效果，T1）
-                        max_chars=tone.max_chars(),
+            try:
+                greeting = self._greet_pending and mode is Mode.PRESENT
+                if (
+                    self._expression is not None
+                    and worker is not None
+                    and not frozen
+                    and brain_output is not None
+                    and self._expression.should_speak(
+                        brain_output,
+                        now,
+                        self._new_interaction,
+                        greeting=greeting,
+                        # 退缩 → 主动开口变少（可测量的关系效果，T1）
+                        reluctance=tone.interval_factor(),
                     )
-                )
+                ):
+                    if greeting:
+                        self._greet_pending = False
+                    # 决策层定意图：**边界优先** → 回应 → 内部冲动 → 呓语映射（见 _decide_intent）
+                    intent = self._decide_intent(brain_output, greeting=greeting)
+                    worker.submit(
+                        ExpressionJob(
+                            job_id=make_job_id(self._heartbeat_seq, now),
+                            created_ts=now,
+                            heartbeat_seq=self._heartbeat_seq,
+                            output=brain_output,
+                            summary=summary,
+                            vrram_mb=self._latest_vrram_mb(),
+                            env=env,
+                            user_message=self._pending_user_message,
+                            force=self._new_interaction,
+                            intent=intent,
+                            # 退缩 → 句子变短（可测量的关系效果，T1）
+                            max_chars=tone.max_chars(),
+                        )
+                    )
+            except Exception:
+                self._stage_failed("E:dispatch_expression")
 
-            # ── P3 运行时接线：用户输入 → 一次经历写入记忆（无论是否开口）──
-            if (
-                self._expression is not None
-                and not frozen
-                and brain_output is not None
-                and self._pending_user_message
-            ):
-                msg = self._pending_user_message
-                feelings = brain_output.feelings.to_dict()
-                # 重要性按内容信号评估（不再是固定值）：闲聊留浅层，事实才沉淀
-                new_id = await self._heartbeat_store.add_memory(
-                    now,
-                    {
-                        "level": LEVEL_SHALLOW,
-                        "kind": KIND_INTERACTION,
-                        "content": msg,
-                        "emotion_vector": feelings,
-                        "importance": importance(
-                            kind=KIND_INTERACTION,
-                            emotion_vector=feelings,
-                            content=msg,
-                            user_related=True,
-                        ),
-                        "protected": False,
-                        "narrative": msg,
-                        # P3-T 来源标注：这是用户告知，不是她自己的话
-                        "source": SOURCE_USER,
-                        "certainty": CERTAINTY_CERTAIN,
-                    },
-                )
-                # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
-                await self._supersede_conflicts(new_id, msg, now)
-                self._pending_user_message = None
-                self._boundary_decision = None  # 这句话处理完了，边界判定随之清空
+            # ── 阶段 F（记忆）：用户输入 → 一次经历写入记忆（无论是否开口）──
+            try:
+                if (
+                    self._expression is not None
+                    and not frozen
+                    and brain_output is not None
+                    and self._pending_user_message
+                ):
+                    msg = self._pending_user_message
+                    feelings = brain_output.feelings.to_dict()
+                    # 重要性按内容信号评估（不再是固定值）：闲聊留浅层，事实才沉淀
+                    new_id = await self._heartbeat_store.add_memory(
+                        now,
+                        {
+                            "level": LEVEL_SHALLOW,
+                            "kind": KIND_INTERACTION,
+                            "content": msg,
+                            "emotion_vector": feelings,
+                            "importance": importance(
+                                kind=KIND_INTERACTION,
+                                emotion_vector=feelings,
+                                content=msg,
+                                user_related=True,
+                            ),
+                            "protected": False,
+                            "narrative": msg,
+                            # P3-T 来源标注：这是用户告知，不是她自己的话
+                            "source": SOURCE_USER,
+                            "certainty": CERTAINTY_CERTAIN,
+                        },
+                    )
+                    # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
+                    await self._supersede_conflicts(new_id, msg, now)
+                    self._pending_user_message = None
+                    self._boundary_decision = None  # 这句话处理完了，边界判定随之清空
+            except Exception:
+                self._stage_failed("F:memory_write")
 
-            # ── P3 记忆生命周期维护：周期性晋升（浅层→工作→深层）──
-            self._memory_maintain_tick += 1
-            if self._memory_maintain_tick >= MEMORY_MAINTAIN_EVERY_N:
-                self._memory_maintain_tick = 0
-                await self._maintain_memories(now)
+            # ── 阶段 F（维护）：记忆生命周期晋升（浅层→工作→深层）──────
+            try:
+                self._memory_maintain_tick += 1
+                if self._memory_maintain_tick >= MEMORY_MAINTAIN_EVERY_N:
+                    self._memory_maintain_tick = 0
+                    await self._maintain_memories(now)
+            except Exception:
+                self._stage_failed("F:memory_maintain")
 
             await self._clock.sleep(self._interval_s)
+
+    def _stage_failed(self, stage: str) -> None:
+        """单阶段异常：记 exception（含阶段名 + 拍号），**不让循环退出**（D-5）。
+
+        只记日志、不重抛：一个阶段坏了不等于她该停机；若失败是持久的，
+        `core.supervisor` 的退避与熔断会接管（睡够 10 次才判定为持久故障）。
+        """
+        logger.exception(
+            "心跳阶段异常（跳过本阶段，循环继续）｜ stage=%s seq=%d",
+            stage,
+            self._heartbeat_seq,
+        )
 
     async def _save_checkpoint(self, now: float) -> None:
         """周期快照（P0-R1）：双库 `.backup` 一致快照落 `data/checkpoints/`。

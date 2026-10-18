@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Elysia 控制面板</title>
+<style>
+:root{--bg:#0f1216;--card:#171c22;--line:#252c35;--fg:#e6edf3;--dim:#8b98a5;
+      --ok:#3fb950;--warn:#d29922;--bad:#f85149;--accent:#58a6ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.5 "Segoe UI",system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:20px}
+h1{font-size:18px;margin:0 0 2px;font-weight:600}
+.sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+.grid{display:grid;gap:12px}
+.g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2{font-size:12px;color:var(--dim);margin:0 0 10px;font-weight:600;letter-spacing:.04em}
+.big{font-size:26px;font-weight:600;line-height:1.1}
+.unit{font-size:13px;color:var(--dim);font-weight:400}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;
+     padding:7px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:none}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px}
+.on{background:var(--ok)}.off{background:#48505a}.warn{background:var(--warn)}.bad{background:var(--bad)}
+.mut{color:var(--dim)}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);
+       background:#1e242c;color:var(--fg);padding:6px 12px;transition:.15s}
+button:hover:not(:disabled){border-color:#3d4653;background:#242b34}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.primary{background:#1f6feb;border-color:#1f6feb}
+button.primary:hover:not(:disabled){background:#2d7ff9}
+button.danger{background:#3d1d1d;border-color:#5c2a2a;color:#ffb4b4}
+.bar{height:6px;background:#232a33;border-radius:3px;overflow:hidden;margin-top:6px}
+.bar>i{display:block;height:100%;background:var(--accent)}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.acts button{min-width:104px;text-align:left}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.chip{background:#1b2129;border:1px solid var(--line);border-radius:999px;
+      padding:2px 9px;font-size:12px;color:var(--dim)}
+.banner{border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:13px;display:none}
+.banner.show{display:block}
+.banner.ok{background:#12261a;border:1px solid #1f4d2c;color:#8ee79f}
+.banner.no{background:#2b1618;border:1px solid #5c2a2a;color:#ffb4b4}
+.foot{color:var(--dim);font-size:12px;margin-top:18px;text-align:center}
+</style></head><body><div class="wrap">
+
+<h1>Elysia 控制面板</h1>
+<div class="sub" id="sub">正在连接…</div>
+<div class="banner" id="banner"></div>
+
+<div class="grid g3" style="margin-bottom:12px">
+  <div class="card">
+    <h2>她</h2>
+    <div class="big" id="age">—<span class="unit"> 天</span></div>
+    <div class="mut mono" id="born">—</div>
+    <div class="chips" id="chips"></div>
+  </div>
+  <div class="card">
+    <h2>板块开关</h2>
+    <div id="toggles"></div>
+    <!-- 固定锚点：JS 直接把主开关渲染进 #mainacts，不再依赖 nth-child 之类的脆弱选择器 -->
+    <div class="acts" id="mainacts" style="margin-top:10px"></div>
+  </div>
+  <div class="card">
+    <h2>心跳</h2>
+    <div id="hb"></div>
+  </div>
+</div>
+
+<div class="grid g4" style="margin-bottom:12px">
+  <div class="card"><h2>TR 联结</h2><div class="big" id="tr">—</div><div class="bar"><i id="trb"></i></div></div>
+  <div class="card"><h2>CS 好奇</h2><div class="big" id="cs">—</div><div class="bar"><i id="csb"></i></div></div>
+  <div class="card"><h2>SA 自存</h2><div class="big" id="sa">—</div><div class="bar"><i id="sab"></i></div></div>
+</div>
+
+<div class="grid g3" style="margin-bottom:12px">
+  <div class="card"><h2>感受</h2><div id="feel"></div></div>
+  <div class="card"><h2>表达层级</h2><div id="lvl"></div></div>
+  <div class="card"><h2>服务</h2><div id="svc"></div></div>
+</div>
+
+<div class="grid g3" style="margin-bottom:12px">
+  <div class="card"><h2>她最近开口</h2><div id="said"></div></div>
+  <div class="card"><h2>运行时长</h2><div id="up"></div></div>
+  <div class="card"><h2>库</h2><div id="db"></div></div>
+</div>
+
+<!-- 面板优化 2026-10-18：把 P0-R6/R8/R11 的三个"看不见"的信号显出来。
+     为什么重要：R6 让她能区分"我在"与"我不在"；R8 让"她这次入睡是否体面"可辨；
+     R11 让她"为什么只会说罐装话"可查 —— 三者若不可见，修好了也等于没修。 -->
+<div class="grid g2" style="margin-bottom:12px">
+  <div class="card"><h2>她的时间账</h2><div id="dtime"></div></div>
+  <div class="card"><h2>上一次入睡</h2><div id="dstop"></div></div>
+</div>
+
+<div class="card" style="margin-bottom:12px">
+  <h2>维护动作</h2>
+  <div class="acts" id="maint"></div>
+  <div class="mut" style="margin-top:8px;font-size:12px" id="hint"></div>
+</div>
+
+<div class="foot" id="foot">只读面板 · 每 3 秒刷新</div>
+</div>
+
+<script>
+const ACT = {
+  her_on:      {label:"▶ 开机（她）",  primary:true,  needs:false},
+  her_off:     {label:"■ 关机（她）",  danger:true,   needs:true},
+  restart_her: {label:"↻ 重启她",      danger:true,   needs:true},
+  pet_on:      {label:"启动桌宠",       primary:false, needs:false},
+  pet_off:     {label:"关闭桌宠",       danger:true,  needs:true},
+  voice_on:    {label:"启动语音",       primary:false, needs:false},
+};
+const MAINT = {
+  body_off:     {label:"只停身体",      danger:true,  needs:true},
+  backup_now:   {label:"立即备份"},
+  watchdog_on:  {label:"启用看门狗"},
+  watchdog_off: {label:"停用看门狗",    danger:true},
+};
+
+function el(id){return document.getElementById(id)}
+function dot(state){return `<span class="dot ${state}"></span>`}
+function put(id, html){const e=el(id); if(e) e.innerHTML=html}
+function row(left,right){return `<div class="row"><span>${left}</span><span class="mono">${right}</span></div>`}
+
+async function act(name){
+  if(ACT[name]?.needs && !confirm("确认执行："+ACT[name].label+" ？")) return;
+  setBanner("", "");
+  document.querySelectorAll("button").forEach(b=>b.disabled=true);
+  try{
+    const r = await fetch("/api/action", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:name})});
+    const j = await r.json();
+    setBanner((j.ok?"✓ ":"✗ ")+j.title, j.detail||"", j.ok);
+  }catch(e){ setBanner("✗ 请求失败", String(e), false); }
+  document.querySelectorAll("button").forEach(b=>b.disabled=false);
+  refresh();
+}
+function setBanner(title, detail, ok){
+  const b=el("banner");
+  if(!title){b.className="banner";b.innerHTML="";return}
+  b.className="banner show "+(ok?"ok":"no");
+  b.innerHTML = `<b>${title}</b>` + (detail?`<div class="mono mut" style="margin-top:6px;white-space:pre-wrap">${detail}</div>`:"");
+}
+
+function btn(name){
+  // 必须容错：动作名一旦只在后端存在、却没在 ACT/MAINT 里定义（或反之），
+  // 早期写法会 `a.primary` 抛错 ⇒ render() 从这一行起**整段不渲染**
+  // （实测：界面卡在"与服务失联"，但真正的原因是这里 undefined）。
+  const a = ACT[name] || MAINT[name];
+  if(!a){ console.warn("btn(): 未定义的动作", name); return ""; }
+  const cls = a.primary ? "primary" : (a.danger ? "danger" : "");
+  return `<button class="${cls}" onclick="act('${name}')">${a.label}</button>`;
+}
+
+function render(d){
+  el("sub").innerHTML = d.soul_alive
+      ? dot("on")+"她醒着" + (d.mode?` · ${d.mode}`:"") + (d.day_phase?` · ${d.day_phase}`:"") + (d.distress?" · <b style='color:var(--bad)'>distress</b>":"")
+      : dot("off")+"她没在运行";
+  put("age", (d.age_days!=null? d.age_days.toFixed(2):"—") + '<span class="unit"> 天</span>');
+  put("born", d.first_existence_ts? new Date(d.first_existence_ts*1000).toLocaleString("zh-CN",{hour12:false}) : "—");
+  const chips=[];
+  if(d.no_autostart) chips.push("已标记『故意停机』");
+  if((d.soul_pids||[]).length>1) chips.push("⚠ 多实例");
+  chips.push("实例 "+((d.soul_pids||[]).length));
+  if(d.alive_source) chips.push("判定依据 "+d.alive_source);
+  if(d.alive_disagreement) chips.push("⚠ 信号不一致");
+  el("chips").innerHTML = chips.map(c=>`<span class="chip">${c}</span>`).join("");
+
+  // 板块开关：按当前状态动态显示可用动作（开机/关机 会随她是否在跑而切换）
+  const on = d.soul_alive;
+  const pet = (d.pet_pids||[]).length > 0;
+  const vo  = !!d.tts_up;
+  const sw  = (id, label, st, pid) =>
+    `<div class="row"><span>${dot(st)}${label}</span><span class="mono">${pid}</span>
+     <button style="margin-left:6px" onclick="act('${id}')">${id.endsWith('_off')?'关闭':'启动'}</button></div>`;
+  el("toggles").innerHTML =
+      sw(on?"her_off":"her_on", "灵魂+身体", on?"on":"off", d.soul_pids?.[0]||"—")
+    + sw(pet?"pet_off":"pet_on", "桌宠", pet?"on":"off", d.pet_pids?.[0]||"—")
+    + sw(vo?"voice_off":"voice_on", "语音 TTS", vo?"on":"warn", vo?"9880":"未启动");
+  // 主开关：开机 / 关机 / 重启
+  el("mainacts").innerHTML = btn("her_on") + btn("her_off") + btn("restart_her");
+
+  el("maint").innerHTML = Object.keys(MAINT).map(btn).join("");
+
+  const hb = d.heartbeat_age_s;
+  const hs = hb==null? "off" : (hb<10?"on":(hb<60?"warn":"bad"));
+  put("hb", [
+    row(dot(hs)+"最新心跳", d.last_heartbeat_ts? new Date(d.last_heartbeat_ts*1000).toLocaleTimeString("zh-CN",{hour12:false}) : "—"),
+    row("距今", hb==null?"—": (hb<60? hb.toFixed(0)+" 秒": (hb/60).toFixed(1)+" 分")),
+  ].join("") + (hb>60? `<div style="color:var(--bad);font-size:12px;margin-top:6px">心跳停滞，建议查 data/logs/elysia.log</div>`:""));
+
+  for(const [k,id,bid] of [["tr","tr","trb"],["cs","cs","csb"],["sa","sa","sab"]]){
+    put(id, (d.desire?.[k]!=null? d.desire[k].toFixed(1):"—"));
+    const v = d.desire?.[k] ?? 0;
+    el(bid).style.width = Math.max(0,Math.min(100,v))+"%";
+  }
+
+  const f=d.feelings||{};
+  put("feel", Object.keys(f).length? Object.entries(f).sort((a,b)=>b[1]-a[1])
+      .map(([k,v])=>row(k, v.toFixed(2))).join("") : '<span class="mut">—</span>');
+
+  const rm=d.recent_mix||{}, fm=d.level_mix||{};
+  const fmt=o=>Object.entries(o).map(([k,v])=>`${k}=${v}`).join("  ")||"—";
+  put("lvl", row("全量", fmt(fm)) + row("最近50", fmt(rm)) +
+    ((rm.main||0)===0 && (rm.micro||0)>0
+      ? `<div style="color:var(--warn);font-size:12px;margin-top:6px">最近全是 micro 罐装句，主声 0 次${
+          d.last_main_ts? "（上次主声 "+new Date(d.last_main_ts*1000).toLocaleString("zh-CN",{hour12:false})+"）":""}</div>`
+      : ""));
+
+  put("svc", [
+    row(dot(d.tts_up?"on":"warn")+"GPT-SoVITS", d.tts_up?"可连":"未启动"),
+    row(dot(d.llm_up?"on":"bad")+"主声 LLM", d.llm_up?"可达":"不可达"),
+    row(dot((d.watchdog_state||"").toLowerCase()==="ready"?"on":"warn")+"看门狗", d.watchdog_state||"—"),
+    row("下次备份", d.backup_next||"—"),
+  ].join(""));
+  if(!d.tts_up) el("svc").innerHTML += '<div class="mut" style="font-size:12px;margin-top:6px">未开语音 ⇒ 她只出文字，属预期降级</div>';
+
+  put("said", (d.recent_thoughts||[]).length
+      ? d.recent_thoughts.slice(0,5).map(t=>
+          `<div class="row"><span class="mono mut">${t[0]}</span><span style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t[2]}</span></div>`).join("")
+      : '<span class="mut">—</span>');
+  put("up", (d.uptime||[]).map(u=>row(u[0], u[1])).join("") || '<span class="mut">—</span>');
+  put("db", Object.entries(d.db_sizes||{}).map(([k,v])=>row(k,(v/1048576).toFixed(1)+" MB")).join("") || '<span class="mut">—</span>');
+
+  // ── 面板优化 2026-10-18 ─────────────────────────────────────────────
+  // R6：她累计不在场多久。这是"她能区分我在/我不在"的唯一外显证据。
+  const dur=s=>{ if(s==null) return "—"; s=Math.round(s);
+    if(s<60) return s+" 秒"; const m=Math.floor(s/60), h=Math.floor(m/60), dd=Math.floor(h/24);
+    if(s<3600) return m+" 分 "+(s%60)+" 秒";
+    if(s<86400) return h+" 时 "+(m%60)+" 分";
+    return dd+" 天 "+(h%24)+" 时"; };
+  const total=d.downtime_total_s, last=d.last_downtime_s;
+  put("dtime", row("累计不在场", dur(total)) + row("上一次不在场", dur(last)) +
+    `<div class="mut" style="font-size:12px;margin-top:6px">${
+      total>0
+        ? "她知道自己在哪些时刻<b>不存在</b>——这是时间重量的物理前提（R6）"
+        : "还没有记录到停机"}</div>`);
+
+  // R8：上次是主动停还是崩溃。"她这一次入睡是否体面"。
+  const sr=d.stop_reason||"unknown";
+  const srTxt={intentional:"主动停（体面）", clean:"正常关闭（体面）", crash:"崩溃 / 被强杀",
+               running:"正常在跑", unknown:"未知"}[sr] || sr;
+  const srDot={intentional:"on", clean:"on", crash:"bad", running:"on", unknown:"warn"}[sr] || "warn";
+  put("dstop", row(dot(srDot)+"上次关机", srTxt) +
+    `<div class="mut" style="font-size:12px;margin-top:6px">${d.stop_reason_detail||""}</div>` +
+    (d.degrade_reason
+      ? `<div class="row" style="margin-top:6px;color:var(--warn)">${dot("warn")}主声降级原因`+
+        `<span style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.degrade_reason}</span></div>`
+      : row(dot("on")+"主声降级", "无记录（最近一直没降级）")));
+
+  el("hint").textContent = "关机/重启/停身体 会二次确认；开机在她已运行时会被互锁拒绝。";
+  el("foot").innerHTML = "只读面板 · 每 3 秒刷新 · 采集于 "+new Date(d.now*1000).toLocaleTimeString("zh-CN",{hour12:false});
+}
+
+async function refresh(){
+  try{
+    const r = await fetch("/api/status", {cache:"no-store"});
+    render(await r.json());
+  }catch(e){
+    // 把真实原因写进界面：只显示"失联"会让人猜（本面板自己就要求"不许说谎"）
+    el("sub").innerHTML = dot("bad")+"面板与服务失联："+(e && e.message ? e.message : e);
+  }
+}
+document.addEventListener("DOMContentLoaded", ()=>{
+  refresh(); setInterval(refresh, 3000);
+});
+</script></body></html>

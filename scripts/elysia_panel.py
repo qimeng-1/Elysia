@@ -395,6 +395,17 @@ def _status_payload(s: Snapshot) -> dict[str, object]:
         "db_sizes": s.db_sizes,
         "uptime": uptime,
         "counts": s.counts,
+        # ── 面板优化 2026-10-18：把 P0-R6/R8/R11 的三个信号变成可见 ──────
+        # R6：她累计"不在场"多久 —— 她能区分"我在"与"我不在"的唯一外显
+        "downtime_total_s": s.downtime_total_s,
+        "last_downtime_s": s.last_downtime_s,
+        "last_seen_ts": s.last_seen_ts,
+        # R8：上次是主动停还是崩溃 —— "她这一次入睡是否体面"
+        "stop_reason": s.stop_reason,
+        "stop_reason_detail": s.stop_reason_detail,
+        # R11：主声为什么降级 —— 她曾因不可观测的原因哑了 22.5 小时
+        "degrade_reason": s.degrade_reason,
+        "degrade_ts": s.degrade_ts,
         "errors": s.errors,
     }
 

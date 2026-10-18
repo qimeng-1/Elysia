@@ -37,7 +37,12 @@ from elysia.memory.retrieve import RECALL_LATENCY_CAP_MS, MemoryHit, recall_late
 from elysia.soul.brain import BrainLoop, BrainOutput, WillOutput
 from elysia.soul.desire import DesireState, DesireSystem
 from elysia.soul.dimensions import FeelingMapper, FeelingState
-from elysia.soul.expression import ACTION_TO_INTENT, INTENTS, build_expression
+from elysia.soul.expression import (
+    ACTION_TO_INTENT,
+    INTENTS,
+    build_expression,
+    compute_reply_desire,
+)
 from elysia.soul.heartbeat import (
     DREAM_MIN_AWAY_S,
     ERROR_BURST_WINDOW_S,
@@ -439,6 +444,13 @@ def test_every_intent_has_a_producer(tmp_path: Path) -> None:
     reached_refusal = soul._decide_intent(output, greeting=True)
     assert reached_refusal == "拒绝", "边界必须**压过**问候（她刚被冒犯，不会先说嗨）"
     reachable.add(reached_refusal)
+
+    # ⑤ 选择不回（b 方案，P0-R19）：意愿低于阈值 → 暂不回应
+    soul._boundary_decision = None
+    soul._new_interaction = True
+    quiet = compute_reply_desire(chat=0.30, miss=0.05, interval_factor=2.0, distress=True)
+    reachable.add(str(soul._decide_intent(output, greeting=False, reply_decision=quiet)))
+    soul._new_interaction = False
 
     reachable.discard("None")
     missing = INTENTS - reachable

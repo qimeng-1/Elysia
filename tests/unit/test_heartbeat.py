@@ -649,3 +649,73 @@ async def test_feel_memory_gaps_is_episodic(tmp_path: Path) -> None:
     finally:
         await state_store.close()
         await heartbeat_store.close()
+
+
+# ── P0-R19：选择不回复（b 方案）——reason 当场落库 + 决策确定性 ──────────
+# 取消测试：去掉 `_record_restraint` 落库 ⇒ 本用例红；`_decide_intent` 丢掉
+# reply_decision ⇒ 返回"回应"而不是"暂不回应" ⇒ 红。
+
+
+@pytest.mark.asyncio
+async def test_restraint_reason_is_logged_and_decision_is_deterministic(tmp_path: Path) -> None:
+    from elysia.soul.brain import BrainOutput, WillOutput
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+    from elysia.soul.expression import RESTRAINT_INTENT, compute_reply_desire
+
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        output = BrainOutput(
+            desire=DesireState(tr=46.0, cs=62.0, sa=20.0),
+            feelings=FeelingState(
+                chat=0.30, miss=0.05, explore=0.46, curiosity=0.0, rest=0.05, self_check=0.2
+            ),
+            will=WillOutput(direction="still", strength=0.54, thought_style=0.0, anim_bias=0.0),
+            action="none",
+        )
+        quiet = compute_reply_desire(chat=0.30, miss=0.05, interval_factor=2.0, distress=True)
+        assert quiet.speak is False
+        soul._new_interaction = True
+        assert soul._decide_intent(output, greeting=False, reply_decision=quiet) == RESTRAINT_INTENT
+
+        # 同一输入 + 同一状态 ⇒ 同一决策（不随机）
+        again = compute_reply_desire(chat=0.30, miss=0.05, interval_factor=2.0, distress=True)
+        assert again == quiet
+
+        await soul._record_restraint(T0, quiet)
+        rows = await heartbeat_store.execute_raw(
+            "SELECT intent, llm_text, validation FROM expression_log ORDER BY id DESC LIMIT 1"
+        )
+        assert rows, "选择不回必须有库内记录（最高验收标准）"
+        assert rows[0][0] == RESTRAINT_INTENT
+        assert rows[0][1] == ""
+        validation = json.loads(rows[0][2])
+        assert validation["restraint"] is True
+        assert validation["reason"] == quiet.reason
+        assert validation["reply_desire"] == pytest.approx(quiet.reply_desire)
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+# ── P0-R19 闭环接线：回不回决定社交满足（取消测试 #5 的接线部分）──────────
+@pytest.mark.asyncio
+async def test_social_pulse_settles_by_reply_choice(tmp_path: Path) -> None:
+    """选择不回 ⇒ silence（CS 降）；回应 ⇒ interaction（CS 升）。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        brain = soul._brain_loop
+        assert brain is not None
+        cs0 = brain.desire_system.state.cs
+        await soul._settle_social_pulse(restraint=True)
+        assert brain.desire_system.state.cs < cs0, "选择不回必须让社交落空（CS 下降）"
+        cs1 = brain.desire_system.state.cs
+        await soul._settle_social_pulse(restraint=False)
+        assert brain.desire_system.state.cs > cs1, "回应必须有社交满足（CS 上升）"
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()

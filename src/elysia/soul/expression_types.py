@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from elysia.llm.validator import ValidationResult
@@ -84,6 +84,11 @@ class ExpressionJob:
     # P4b 关系涌现：字数上限由**退缩量**决定（退缩 → 说得更短）。
     # 心跳在提交时算好装进来，worker 自包含地消费（不必回读心跳状态）。
     max_chars: int = 120
+    # P0-R19：这一次开口的"想不想回"（0-1）与选择不回的理由（可解释、可回放）
+    reply_desire: float = 1.0
+    restraint_reason: str | None = None
+    # True = "选择不回"的 reason 已由心跳在决定那一刻落库（persist 不再重复写）
+    restraint_logged: bool = False
 
     @property
     def order_key(self) -> JobOrder:
@@ -119,3 +124,8 @@ class ExpressionResult:
     # 带上它是因为落库在**另一拍**——不能拿落库拍的心情顶替她说这句话时的心情。
     feelings: Mapping[str, float] | None = None
     error: str | None = None
+    # P0-R19：意愿、拆句（多句回复 = 一次调用拆成 ≤3 句）
+    reply_desire: float = 1.0
+    restraint_reason: str | None = None
+    restraint_logged: bool = False
+    sentences: list[str] = field(default_factory=list)

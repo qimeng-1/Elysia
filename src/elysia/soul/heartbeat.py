@@ -64,6 +64,7 @@ from elysia.soul.boundary import STATE_PRESSURE_WORDS, BoundaryDecision, Boundar
 from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
+from elysia.soul.expression import RESTRAINT_INTENT, ReplyDecision
 from elysia.soul.expression_service import ExpressionService
 from elysia.soul.expression_types import (
     STATUS_FAILED,
@@ -235,6 +236,8 @@ class SoulHeartbeat:
         # 内部冲动（第七批）：她刚从"不在场"回到"在场" → 待问候（**边沿触发**，只问一次）
         self._greet_pending = False
         self._last_mode: Mode | None = None
+        # P0-R19：本拍收到的输入还没有结算"社交满足"——等意愿层决定后再给脉冲
+        self._pending_social_pulse = False
         # 睡眠整合＝做梦：上一次做梦的时刻（两次梦之间要有间隔，梦不该泛滥）
         self._last_dream_ts: float | None = None
         # P2：本拍是否发生新交互（驱动强制开口）；资源快照缓存（VRAM 读取）
@@ -428,6 +431,13 @@ class SoulHeartbeat:
                 except Exception:
                     self._stage_failed("E:persist_expressions")
 
+            # P0-R19：多句回复的后续句子按她的节奏逐句冒泡（不是一口气喷完）
+            if self._expression is not None and not frozen:
+                try:
+                    await self._expression.flush_utterances(now)
+                except Exception:
+                    self._stage_failed("E:flush_utterances")
+
             # ── 阶段 F（边界）：对方的话先过"工具化 / 越界"检测 ──────────
             # 拒绝需要一个"要求"作对象，而当前唯一的外部输入就是她刚收到的这句话。
             # ⚠️ 这不违背 T2：我们**不**把用户的话当指令执行，而是把它当**关系信号**读——
@@ -465,6 +475,23 @@ class SoulHeartbeat:
             # 但仍保持 force=False —— 队列满时它可以被丢（＝"她这次决定不说"）。
             try:
                 greeting = self._greet_pending and mode is Mode.PRESENT
+                restraint_this_turn = False
+                # P0-R19：收到你的话时先算"此刻多想回"（确定性 + 可解释）
+                reply_decision: ReplyDecision | None = None
+                if (
+                    self._new_interaction
+                    and self._expression is not None
+                    and brain_output is not None
+                ):
+                    reply_decision = self._expression.decide_reply(
+                        brain_output,
+                        interval_factor=tone.interval_factor(),
+                        distress=self._distress,
+                        boundary_refused=bool(
+                            self._boundary_decision is not None
+                            and self._boundary_decision.is_refusal
+                        ),
+                    )
                 if (
                     self._expression is not None
                     and worker is not None
@@ -481,8 +508,18 @@ class SoulHeartbeat:
                 ):
                     if greeting:
                         self._greet_pending = False
-                    # 决策层定意图：**边界优先** → 回应 → 内部冲动 → 呓语映射（见 _decide_intent）
-                    intent = self._decide_intent(brain_output, greeting=greeting)
+                    # 决策层定意图：**边界 > 选择不回 > 回应 > 内部冲动 > 呓语映射**
+                    intent = self._decide_intent(
+                        brain_output,
+                        greeting=greeting,
+                        reply_decision=reply_decision,
+                    )
+                    restraint_logged = False
+                    restraint_this_turn = intent == RESTRAINT_INTENT
+                    if intent == RESTRAINT_INTENT and reply_decision is not None:
+                        # b 方案：她开口说明"不太想说话"；reason 在决定那一刻落库
+                        await self._record_restraint(now, reply_decision)
+                        restraint_logged = True
                     worker.submit(
                         ExpressionJob(
                             job_id=make_job_id(self._heartbeat_seq, now),
@@ -495,12 +532,27 @@ class SoulHeartbeat:
                             user_message=self._pending_user_message,
                             force=self._new_interaction,
                             intent=intent,
+                            reply_desire=(
+                                reply_decision.reply_desire if reply_decision is not None else 1.0
+                            ),
+                            restraint_reason=(
+                                reply_decision.reason
+                                if intent == RESTRAINT_INTENT and reply_decision is not None
+                                else None
+                            ),
+                            restraint_logged=restraint_logged,
                             # 退缩 → 句子变短（可测量的关系效果，T1）
                             max_chars=tone.max_chars(),
                         )
                     )
             except Exception:
                 self._stage_failed("E:dispatch_expression")
+
+            # P0-R19（需求累积闭环）：收到你的话但**选择不回** ⇒ 社交落空（-CS）
+            # ⇒ chat 降、miss 升 ⇒ 下一次 reply_desire 更高（不是外挂兜底）。
+            if self._pending_social_pulse:
+                self._pending_social_pulse = False
+                await self._settle_social_pulse(restraint=restraint_this_turn)
 
             # ── 阶段 F（记忆）：用户输入 → 一次经历写入记忆（无论是否开口）──
             try:
@@ -901,7 +953,9 @@ class SoulHeartbeat:
             # P1：新交互事件 → 欲望系统
             if its > self._last_interaction_event_ts and self._brain_loop is not None:
                 self._last_interaction_event_ts = its
-                self._brain_loop.apply_event(DesireEvent(kind="interaction"))
+                # P0-R19：不在这里立刻给满足感——先记下来，等"回不回"决定后
+                # 再结算（回应 = interaction +CS；选择不回 = silence -CS）。
+                self._pending_social_pulse = True
                 # P2：新交互 → 强制开口回应
                 self._new_interaction = True
                 # P3 打字对话：提取用户输入文本（桌宠写入 interaction.text）
@@ -997,21 +1051,65 @@ class SoulHeartbeat:
             return "拒绝"
         return None
 
-    def _decide_intent(self, output: BrainOutput, *, greeting: bool) -> str | None:
+    def _decide_intent(
+        self,
+        output: BrainOutput,
+        *,
+        greeting: bool,
+        reply_decision: ReplyDecision | None = None,
+    ) -> str | None:
         """决策层定意图（T3：谁决定开口仍在她自己的循环里）。
 
-        优先级：**边界（拒绝）> 回应 > 内部冲动 > 呓语映射（None）**。
+        优先级：**边界（拒绝）> 选择不回（暂不回应）> 回应 > 内部冲动 > 呓语映射**。
         她刚被冒犯时不会先来一句"嗨，你回来啦"——所以拒绝排在最前。
 
-        这条链是 `soul/expression.py::INTENTS` 七个意图**全部**的产生者所在，
+        P0-R19：收到你的话时，`reply_decision` 给出"此刻多想回"；低于阈值时
+        她选择**说明"现在不太想说话"**（b 方案），理由在决定那一刻落库。
+        这条链是 `soul/expression.py::INTENTS` 八个意图**全部**的产生者所在，
         有单测（`test_t1_cancel.py::test_every_intent_has_a_producer`）把它钉住。
         """
         refusal = self._refusal_intent()
         if refusal is not None:
             return refusal
+        if reply_decision is not None and not reply_decision.speak:
+            return RESTRAINT_INTENT
         if self._new_interaction:
             return "回应"
         return self._pick_intent(output, greeting=greeting)
+
+    async def _settle_social_pulse(self, *, restraint: bool) -> None:
+        """P0-R19 需求累积闭环：收到话后按"回不回"结算社交满足。
+
+        回应 = `interaction`（CS 上升 = 满足）；选择不回 = `silence`（CS 下降 = 落空）。
+        于是"连续不回 ⇒ CS 降 ⇒ miss 升 ⇒ 下次更想开口"是欲望系统的自然结果，
+        **不是**任何"连续 N 次就强制回"的外挂兜底。
+        """
+        if self._brain_loop is None:
+            return
+        kind = "silence" if restraint else "interaction"
+        self._brain_loop.apply_event(DesireEvent(kind=kind))
+
+    async def _record_restraint(self, now: float, decision: ReplyDecision) -> None:
+        """P0-R19：把"她选择不说话"当场落库（含 reason），不等表达执行成功。
+
+        落 `expression_log`（intent=暂不回应、llm_text 为空），因此"她在几点几分
+        选择了不说话、理由是什么"可以从库里直接查出来——这是本卡最高验收标准。
+        """
+        await self._heartbeat_store.expression(
+            ts=now,
+            intent=RESTRAINT_INTENT,
+            instruction={},
+            llm_text="",
+            validation={
+                "ok": True,
+                "restraint": True,
+                "reason": decision.reason,
+                "reply_desire": decision.reply_desire,
+                "threshold": decision.threshold,
+                "parts": decision.parts,
+            },
+            level="",
+        )
 
     def _pick_intent(self, output: BrainOutput, *, greeting: bool) -> str | None:
         """内部冲动开口时，她"在说哪一类话"。返回 `None` = 交给 `brain_action` 映射。

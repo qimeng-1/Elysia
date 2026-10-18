@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any
 
 from elysia.soul.brain import BrainOutput, WillOutput
@@ -24,12 +26,114 @@ INTENTS = frozenset(
         "主动问候",
         "回应",
         "拒绝",
+        "暂不回应",
         "思念",
         "好奇提问",
         "自检报告",
         "发呆呓语",
     }
 )
+
+# ── P0-R19：表达意愿层（"选择权"必须可解释，不是抛硬币）──────────────
+# 收到你的话时她**总会开口**（b 方案）：要么回应，要么说明"现在不太想说话"。
+# 回不回由下面这个确定性公式决定；每一分量都会落库（reason），可回放。
+REPLY_THRESHOLD = 0.59
+W_REL = 0.30  # 关系：退缩量越低越愿意开口
+W_CHAT = 0.09  # 想聊天（比思念弱：错过交流会更多地累积为思念）
+W_MISS = 0.69  # 想她（P0-R16 已让 miss 分支可达；需求累积的主通道）
+W_DIST = 0.55  # 难受时不想开口（distress 语义沿用既有，不改）
+W_BOUND = 0.55  # 被当工具/被越界时可拒绝
+RESTRAINT_INTENT = "暂不回应"
+MAX_UTTERANCES_PER_TURN = 3  # 硬上限（多句靠拆句，不靠多次调用）
+UTTERANCE_GAP_MIN_S = 2.0
+UTTERANCE_GAP_MAX_S = 8.0
+
+
+@dataclass(frozen=True)
+class ReplyDecision:
+    """一次"要不要回应"的决策（确定性、可解释、可回放）。"""
+
+    reply_desire: float
+    threshold: float
+    speak: bool
+    reason: str
+    parts: dict[str, float]
+
+
+def compute_reply_desire(
+    *,
+    chat: float,
+    miss: float,
+    interval_factor: float = 1.0,
+    distress: bool = False,
+    boundary_refused: bool = False,
+    greeting: bool = False,
+) -> ReplyDecision:
+    """意愿公式（路线图 §7.3 的"选择权"）：分值越高越想开口。
+
+    `interval_factor` 是关系退缩导出的间隔倍数（1.0 = 关系好，2.0 = 退缩到底）；
+    `(2.0 - interval_factor)` 因此是"关系亲密"的 0-1 量。所有输入都来自她的真实
+    状态，没有任何随机项 —— 同一输入 + 同一状态必定得到同一决策。
+    """
+    intimacy = max(0.0, min(1.0, 2.0 - min(2.0, max(1.0, float(interval_factor)))))
+    parts = {
+        "关系亲密": round(W_REL * intimacy, 4),
+        "想聊天": round(W_CHAT * float(chat), 4),
+        "想她": round(W_MISS * float(miss), 4),
+        "难受": round(-W_DIST if distress else 0.0, 4),
+        "被越界": round(-W_BOUND if boundary_refused else 0.0, 4),
+    }
+    desire = max(0.0, min(1.0, sum(parts.values())))
+    speak = bool(greeting) or desire >= REPLY_THRESHOLD
+    if greeting:
+        reason = "问候：刚从不在场回到在场，值得一声"
+    elif speak:
+        reason = f"reply_desire={desire:.3f} ≥ {REPLY_THRESHOLD:.2f}，愿意开口"
+    else:
+        # 只有**负分量**才算"拖低"；全是正分量时指出最弱的一项（如实说清原因）
+        negative = [name for name, value in parts.items() if value < 0]
+        if negative:
+            worst = negative
+        else:
+            real_parts = {
+                name: value
+                for name, value in parts.items()
+                if name in ("关系亲密", "想聊天", "想她")
+            }
+            # 列出最弱的两项（一项往往不足以解释；具体分值随 parts 一起落库）
+            weakest_two = [item[0] for item in sorted(real_parts.items(), key=lambda kv: kv[1])[:2]]
+            labels = {
+                "关系亲密": "关系退缩",
+                "想聊天": "想聊天欲低",
+                "想她": "思念不足",
+            }
+            worst = [labels.get(name, name) for name in weakest_two]
+        reason = (
+            f"reply_desire={desire:.3f} < {REPLY_THRESHOLD:.2f}；拖低它的分量：{'、'.join(worst)}"
+        )
+    return ReplyDecision(
+        reply_desire=round(desire, 4),
+        threshold=REPLY_THRESHOLD,
+        speak=speak,
+        reason=reason,
+        parts=parts,
+    )
+
+
+def split_utterances(text: str) -> list[str]:
+    """一次 LLM 回复 → 最多 `MAX_UTTERANCES_PER_TURN` 句（她说什么由 LLM 定，上限由安全门定）。"""
+    raw = re.split(r"(?<=[。！？!?…～~])\s*|\n+", text or "")
+    parts = [piece.strip() for piece in raw if piece and piece.strip()]
+    return parts[:MAX_UTTERANCES_PER_TURN]
+
+
+def utterance_gap_s(reply_desire: float = 1.0) -> float:
+    """句间间隔（2–8s）：越不想开口，句子之间停得越久（不是固定值、不是一口气喷完）。"""
+    desire = max(0.0, min(1.0, float(reply_desire)))
+    return round(
+        UTTERANCE_GAP_MIN_S + (UTTERANCE_GAP_MAX_S - UTTERANCE_GAP_MIN_S) * (1.0 - desire), 2
+    )
+
 
 # 感受维度默认集合（与 dimensions.FeelingState 保持一致）
 FEELING_DIMS = ("chat", "miss", "explore", "curiosity", "rest", "self_check")

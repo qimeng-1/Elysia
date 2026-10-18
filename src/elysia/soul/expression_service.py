@@ -77,7 +77,13 @@ from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
 from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
-from elysia.soul.expression import build_expression
+from elysia.soul.expression import (
+    ReplyDecision,
+    build_expression,
+    compute_reply_desire,
+    split_utterances,
+    utterance_gap_s,
+)
 from elysia.soul.expression_types import (
     STATUS_FAILED,
     STATUS_SKIPPED,
@@ -182,6 +188,9 @@ class ExpressionService:
         # 记忆被唤起 → 感受回路（只推心情，不进入话语）
         self._on_recall = on_recall
         self._last_express_ts: float | None = None
+        # P0-R19：多句回复的待发队列（due_ts, text）；由心跳每拍 flush，
+        # 因此句间 2–8s 的停顿是真实时间，不是一口气写完。
+        self._pending_utterances: list[tuple[float, str]] = []
         # 降级 SA 增量（由 DesireSystem 消费方注入 on_degrade 时生效）
         self.llm_degrade_sa_delta = llm_degrade_sa_delta
         self.tts_degrade_sa_delta = tts_degrade_sa_delta
@@ -218,6 +227,8 @@ class ExpressionService:
         同一句话会在队列满的每一拍被重新判定、反复丢弃。
         """
         if force or greeting:
+            # P0-R19（b 方案）：收到你的话她**总会开口**——要么回应，要么说明
+            # "现在不太想说话"；到底哪种由 `decide_reply` 决定（确定性、落 reason）。
             self._last_express_ts = now
             return True
         interval = (
@@ -230,6 +241,25 @@ class ExpressionService:
             return False
         self._last_express_ts = now
         return True
+
+    def decide_reply(
+        self,
+        output: BrainOutput,
+        *,
+        interval_factor: float = 1.0,
+        distress: bool = False,
+        boundary_refused: bool = False,
+        greeting: bool = False,
+    ) -> ReplyDecision:
+        """P0-R19：收到你的话时，她"此刻多想回"（纯计算、无随机、可落库解释）。"""
+        return compute_reply_desire(
+            chat=output.feelings.chat,
+            miss=output.feelings.miss,
+            interval_factor=interval_factor,
+            distress=distress,
+            boundary_refused=boundary_refused,
+            greeting=greeting,
+        )
 
     async def run_job(self, job: ExpressionJob) -> ExpressionResult:
         """worker 的执行体：构造指令 → LLM → 校验 → TTS（**不落库**）。
@@ -305,6 +335,12 @@ class ExpressionService:
             feelings=dict(output.feelings.to_dict()),
         )
 
+        # P0-R19：多句回复 = **一次** LLM 调用后在句边界拆开（不许多调）
+        result.reply_desire = job.reply_desire
+        result.restraint_reason = job.restraint_reason
+        result.restraint_logged = job.restraint_logged
+        result.sentences = split_utterances(speak.text)
+
         # ── 3. TTS 出声（可选）───────────────────────────
         if self._tts is not None and speak.text:
             tts_params = payload.get("tts", {})
@@ -338,20 +374,39 @@ class ExpressionService:
             return
 
         # ── 4. 落库：thought_log（桌宠气泡）+ expression_log（取证）──
-        await self._store.think(now, "expression", result.text)
-        validation = (
+        # P0-R19：第一句立刻冒泡，其余按她状态的间隔排队（心跳每拍 flush）
+        sentences = result.sentences or ([result.text] if result.text else [])
+        if sentences:
+            await self._store.think(now, "expression", sentences[0])
+            gap = utterance_gap_s(result.reply_desire)
+            for index, sentence in enumerate(sentences[1:], start=1):
+                self._pending_utterances.append((now + gap * index, sentence))
+        validation: dict[str, object] = (
             {"ok": result.validation.ok, "reason": result.validation.reason}
             if result.validation is not None
             else {"ok": True, "reason": None}
         )
-        await self._store.expression(
-            ts=now,
-            intent=result.intent,
-            instruction=dict(result.instruction) if result.instruction is not None else {},
-            llm_text=result.text,
-            validation=validation,
-            level=result.level,
+        validation.update(
+            {
+                "reply_desire": result.reply_desire,
+                "restraint": result.restraint_reason is not None,
+                "restraint_reason": result.restraint_reason,
+                "utterance_count": len(sentences),
+            }
         )
+        if result.restraint_logged:
+            # "选择不回"的 reason 已在决定那一刻由心跳落库，这里不再重复写
+            log.debug("restraint 已落库 job_id=%s", result.job_id)
+        else:
+            await self._store.expression(
+                ts=now,
+                intent=result.intent,
+                instruction=dict(result.instruction) if result.instruction is not None else {},
+                llm_text=result.text,
+                validation=validation,
+                level=result.level,
+            )
+        await self.flush_utterances(now)
         # ── 4b. P3 运行时接线：她说的话成为经历 → 写入记忆 ──
         if result.text:
             feelings = dict(result.feelings or {})
@@ -375,6 +430,16 @@ class ExpressionService:
                     "certainty": CERTAINTY_CERTAIN,
                 },
             )
+
+    async def flush_utterances(self, now: float) -> int:
+        """把到点的后续句子逐句冒泡（P0-R19：多句不是一口气喷完）。返回本轮冒泡条数。"""
+        due = [item for item in self._pending_utterances if item[0] <= now]
+        if not due:
+            return 0
+        self._pending_utterances = [item for item in self._pending_utterances if item[0] > now]
+        for _, sentence in sorted(due):
+            await self._store.think(now, "expression", sentence)
+        return len(due)
 
     async def tick(
         self,

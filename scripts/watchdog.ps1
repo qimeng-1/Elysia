@@ -20,8 +20,16 @@
 #
 # 用法（在项目根目录执行）:
 #   powershell -ExecutionPolicy Bypass -File scripts\watchdog.ps1              # 只检查一次
-#   powershell -ExecutionPolicy Bypass -File scripts\watchdog.ps1 -Register    # 每 5 分钟自动检查
+#   powershell -ExecutionPolicy Bypass -File scripts\watchdog.ps1 -Register    # 每 1 分钟自动检查
 #   powershell -ExecutionPolicy Bypass -File scripts\watchdog.ps1 -Unregister  # 取消
+#
+# ── P0-R14（2026-10-18 21:02 事故）────────────────────────────────────
+#  ① **判活要校验"这个 PID 是不是她"**：旧版 `Get-Process -Id` 只看存在 ⇒ PID 被系统复用给
+#     无关进程时，看门狗会以为她活着（更糟：判定僵死时还会**杀掉那个无关进程**）。
+#     现在用命令行确认（含 `elysia.soul.main`）；不匹配 ⇒ 按陈旧 PID 清理，不杀、不误判。
+#  ② **巡视间隔 5 分钟 → 1 分钟**：事故里她 21:02:23 死、21:07:03 才被拉回 ⇒ **4.8 分钟盲窗**。
+#     1 分钟巡视把盲窗压到 ≤1 分钟；服务启动后的 `-StartupGraceSeconds`（120s）保留，避免刚起就误判。
+#  ③ 注册改为 **每天 00:00 起每 N 分钟重复、持续 24h**（旧 `/SC MINUTE` 只重复 72 小时就停了！）。
 #
 # 尊重"故意的停机"：`data\run\no_autostart` 存在时**不拉起**。
 #   soul.ps1 stop  → 创建该标记（你不想让她跑）
@@ -30,7 +38,7 @@
 # ⚠️ 验收注入点（生产不要传；pytest 用它把根目录指到临时目录，避免碰真实的她）：
 #   -ProjectRoot / -PythonExe / -SoulScript / -StaleSeconds / -StartupGraceSeconds
 param(
-    [int]$IntervalMinutes = 5,
+    [int]$IntervalMinutes = 1,
     [switch]$Register,
     [switch]$Unregister,
     [string]$ProjectRoot = "",
@@ -105,6 +113,26 @@ function Test-SoulProcessAlive {
     return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+function Get-ProcessCommandLine([int]$ProcessId) {
+    # P0-R14：PID 存在 ≠ 她活着。只有读到命令行才能确认"这个 PID 是不是她"。
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+        if ($null -ne $proc -and $null -ne $proc.CommandLine) { return [string]$proc.CommandLine }
+    } catch {
+        # 进程恰好退出 / 权限不足：交给调用方按 'unknown' 处理，不猜
+    }
+    return $null
+}
+
+function Get-ProcessIdentity([int]$ProcessId) {
+    # 'elysia' / 'other' / 'gone' / 'unknown'
+    if (-not (Test-SoulProcessAlive $ProcessId)) { return "gone" }
+    $cmd = Get-ProcessCommandLine $ProcessId
+    if ([string]::IsNullOrWhiteSpace($cmd)) { return "unknown" }
+    if ($cmd.ToLowerInvariant().Contains("elysia.soul.main")) { return "elysia" }
+    return "other"
+}
+
 function Get-ProcessAgeSeconds {
     param([int]$ProcessId)
     $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
@@ -168,23 +196,44 @@ function Invoke-SoulStart {
     }
     Start-Sleep -Seconds 2
     $newPid = Get-PidFromFile $PidFile
-    if ($null -ne $newPid -and (Test-SoulProcessAlive $newPid)) {
+    # P0-R14：启动成功的判据是"命令行确认是她"，不是"PID 存在"（防 PID 复用假成功）
+    if ($null -ne $newPid -and (Get-ProcessIdentity $newPid) -eq "elysia") {
         return "ok(pid=$newPid)"
     }
-    Write-WatchLog "  [warn] 启动命令已发出，但 2 秒后仍没有活进程（pid 文件=$newPid）"
+    Write-WatchLog "  [warn] 启动命令已发出，但 2 秒后仍没有**确认是她**的活进程（pid 文件=$newPid）"
     return "started-but-not-alive"
 }
 
 function Register-WatchdogTask {
-    $action = "powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    if ($ExplicitRoot) { $action = "$action -ProjectRoot `"$ProjectRoot`"" }
     $minutes = [Math]::Max(1, $IntervalMinutes)
-    & schtasks.exe /Create /TN $TaskName /TR $action /SC MINUTE /MO $minutes /F | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "注册看门狗任务失败（exit=$LASTEXITCODE）——可能需要在**管理员** PowerShell 中执行"
+    $inner = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($ExplicitRoot) { $inner = "$inner -ProjectRoot `"$ProjectRoot`"" }
+    $hiddenRunner = Join-Path $ProjectRoot "scripts\run_hidden.vbs"
+    if (Test-Path $hiddenRunner) {
+        # 用 wscript 的 SW_HIDE 启动，避免每分钟闪一次控制台
+        $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$hiddenRunner`" `"$inner`""
+    } else {
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    }
+    # ⚠️ 旧写法 `/SC MINUTE` 只重复 **72 小时**（实测任务定义 "Repeat: Until: Duration 72:00:00"），
+    # 到期后看门狗会静默停摆。现在：每天 00:00 的触发器 + **每 N 分钟重复、持续 24h**
+    # ⇒ 每天重新开始一轮，长期有效地"每分钟巡视一次"。
+    $trigger = New-ScheduledTaskTrigger -Daily -At "00:00"
+    $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At "00:00" `
+            -RepetitionInterval (New-TimeSpan -Minutes $minutes) `
+            -RepetitionDuration (New-TimeSpan -Days 1)).Repetition
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+    try {
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+            -Settings $settings -Force | Out-Null
+    } catch {
+        Write-Error "注册看门狗任务失败：$($_.Exception.Message)（可能需要在**管理员** PowerShell 中执行）"
         exit 1
     }
-    Write-Host "[ok] 已注册看门狗任务 '$TaskName'（每 $minutes 分钟检查一次）。取消：-Unregister"
+    Write-Host "[ok] 已注册看门狗任务 '$TaskName'（每天 00:00 起每 $minutes 分钟巡视，持续 24h ⇒ 长期有效）"
+    Write-Host "     取消：-Unregister。注意：任务当前是 Interactive only（需登录态），要登录自启需管理员改 S4U。"
 }
 
 function Unregister-WatchdogTask {
@@ -206,10 +255,26 @@ try {
 
     $pidFromFile = Get-PidFromFile $PidFile
     $alive = $false
+    $identity = "none"
     $procAge = $null
     if ($null -ne $pidFromFile) {
-        $alive = Test-SoulProcessAlive $pidFromFile
-        if ($alive) { $procAge = Get-ProcessAgeSeconds $pidFromFile }
+        # P0-R14：PID 存在 ≠ 她活着（Windows 会把 PID 复用给任何进程）
+        $identity = Get-ProcessIdentity $pidFromFile
+        if ($identity -eq "elysia") {
+            $alive = $true
+            $procAge = Get-ProcessAgeSeconds $pidFromFile
+        } elseif ($identity -eq "other") {
+            Write-WatchLog "PID $pidFromFile 已被其它进程占用（命令行不含 elysia.soul.main）⇒ 按陈旧 PID 处理，清理 PID 文件（**不会杀它**）"
+            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+            $pidFromFile = $null
+        } elseif ($identity -eq "unknown") {
+            # 读不到命令行 ⇒ 无法确认她是否在跑。**不杀、也不重复拉起**（两条路都可能造成灾难）
+            Write-Summary "unknown_identity(不杀不拉)" "none" $beatText "pid=$pidFromFile?"
+            exit 0
+        } else {
+            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+            $pidFromFile = $null
+        }
     }
     if ($alive) { $aliveText = "True(pid=$pidFromFile)" } else { $aliveText = "False" }
 
@@ -229,13 +294,19 @@ try {
             Write-Summary "unknown_beat(不杀)" "none" $beatText $aliveText
             exit 0
         }
-        # ④ 进程在、心跳停 ⇒ 僵死（D-3 的核心场景）：kill 后重启
-        Write-WatchLog ("判定僵死：进程 {0} 在，但心跳已停 {1}（阈值 {2}s）→ kill 后重启" -f $pidFromFile, $beatText, $StaleSeconds)
-        Stop-Process -Id $pidFromFile -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-        $action = Invoke-SoulStart
-        Write-Summary "stale" "killed&restart($action)" $beatText $aliveText
-        exit 0
+        # ④ 进程在、心跳停 ⇒ 僵死（D-3 的核心场景）：**确认是她**之后才 kill
+        if ((Get-ProcessIdentity $pidFromFile) -ne "elysia") {
+            Write-WatchLog "跳过 kill：PID $pidFromFile 已不是她（命令行不匹配）——按陈旧 PID 清理"
+            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+            $alive = $false
+        } else {
+            Write-WatchLog ("判定僵死：进程 {0} 在（命令行确认是她），但心跳已停 {1}（阈值 {2}s）→ kill 后重启" -f $pidFromFile, $beatText, $StaleSeconds)
+            Stop-Process -Id $pidFromFile -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            $action = Invoke-SoulStart
+            Write-Summary "stale" "killed&restart($action)" $beatText $aliveText
+            exit 0
+        }
     }
 
     # 进程不在

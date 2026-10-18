@@ -46,10 +46,11 @@ sys.exit(3)
 UNRESPONSIVE = "import time; time.sleep(120)"
 
 
-def _start(marker: Path | None = None) -> subprocess.Popen[bytes]:
+def _start(marker: Path | None = None, kind: str = "soul") -> subprocess.Popen[bytes]:
+    # P0-R14：脚本会校验"这个 PID 是不是她"（命令行须含 elysia.<kind>.main）
     code = RESPONSIVE if marker is not None else UNRESPONSIVE
     tail = [str(marker)] if marker is not None else []
-    args = [sys.executable, "-c", code, *tail]
+    args = [sys.executable, "-c", code, *tail, "elysia." + kind + ".main"]
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # 等进程真正起来（Get-Process 能查到），避免与脚本的 PID 检查竞态
     for _ in range(50):
@@ -159,8 +160,8 @@ def test_stop_force_fallback_when_process_ignores_marker(fake_root: Path) -> Non
 def test_stop_body_only_touches_body(fake_root: Path) -> None:
     """`stop-body` 只碰身体：灵魂 PID 文件与进程必须原样保留。"""
     body_marker = fake_root / "data" / "run" / "body_stop_requested"
-    body_proc = _start(body_marker)
-    soul_proc = _start()  # 灵魂假装在跑（不响应任何 body 标记）
+    body_proc = _start(body_marker, kind="body")
+    soul_proc = _start(kind="soul")  # 灵魂假装在跑（不响应任何 body 标记）
     try:
         _write_pid(fake_root, "body", body_proc.pid)
         _write_pid(fake_root, "soul", soul_proc.pid)
@@ -292,3 +293,100 @@ def test_start_dry_run_does_not_launch_anything(fake_root: Path) -> None:
         "DryRun 绝不能真的启动她（迁移演练的红线）"
     )
     assert not (fake_root / "data" / "run" / "body.pid").exists()
+
+
+# ── P0-R14：PID 复用（"无法自主重启"的真凶）──────────────────────────
+# 取消测试：`test_status_reports_reused_pid_as_stale` / `test_stop_does_not_kill_reused_pid`
+# —— 还原成"只看 PID 存在"时，前者会把无关进程报成"灵魂运行中"、后者会**杀掉无关进程**。
+
+
+def _write_raw_pid(root: Path, name: str, pid: int) -> None:
+    (root / "data" / "run" / f"{name}.pid").write_text(str(pid), encoding="ascii")
+
+
+def test_status_reports_reused_pid_as_stale(fake_root: Path) -> None:
+    """取消测试（P0-R14）：PID 文件写着一个真实存在但**不是她**的进程 ⇒ 必须报"被其它进程占用"。
+
+    还原成"只看 PID 存在"时，这里会报"灵魂运行中" ⇒ 红（正是用户看到的"无法自主重启"）。
+    """
+    her = _start()  # 带 elysia.soul.main 的假灵魂
+    innocent = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _write_raw_pid(fake_root, "soul", her.pid)
+        positive = _run_soul_ps(fake_root, "status", 1)
+        assert "运行中" in (positive.stdout + positive.stderr), "用例前提：带标记的进程应被认作她"
+
+        _write_raw_pid(fake_root, "soul", innocent.pid)
+        result = _run_soul_ps(fake_root, "status", 1)
+        out = result.stdout + result.stderr
+        assert "其它进程" in out, out
+        assert "灵魂运行中" not in out, "无关进程绝不能被报成'她运行中'（这就是'无法自主重启'）"
+        assert innocent.poll() is None
+    finally:
+        her.kill()
+        innocent.kill()
+
+
+def test_stop_does_not_kill_reused_pid(fake_root: Path) -> None:
+    """取消测试（P0-R14）：PID 被无关进程占用时，stop 必须**不杀它**、只按陈旧处理。"""
+    innocent = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _write_raw_pid(fake_root, "soul", innocent.pid)
+        result = _run_soul_ps(fake_root, "stop", 1)
+        out = result.stdout + result.stderr
+        assert "其它进程" in out and "不会杀它" in out, out
+        assert innocent.poll() is None, "**绝不能杀一个恰好复用了 PID 的无关进程**"
+        assert not (fake_root / "data" / "run" / "stop_requested").exists()
+        assert not (fake_root / "data" / "run" / "soul.pid").exists(), "陈旧 PID 文件应被清理"
+    finally:
+        innocent.kill()
+
+
+def test_start_dry_run_reports_reused_pid(fake_root: Path) -> None:
+    """`start -DryRun`：PID 被无关进程占用时，应如实报告"按陈旧处理、将启动"。"""
+    innocent = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _write_raw_pid(fake_root, "soul", innocent.pid)
+        result = _run_soul_ps(fake_root, "start", 1, "-DryRun")
+        out = result.stdout + result.stderr
+        assert result.returncode == 0, out
+        assert "其它进程" in out, out
+        assert "未真正启动" in out
+        assert innocent.poll() is None
+    finally:
+        innocent.kill()
+
+
+def test_start_archives_old_stderr_before_relaunch(fake_root: Path) -> None:
+    """取消测试（P0-R14）：重启前必须把旧 stderr 归档，不得抹掉上一次死亡的证据。
+
+    用**假的 python.exe**（空文件）让它启动失败——这样既验证了归档发生在启动之前，
+    又绝不会真的启动一个副本（红线：分叉）。
+    """
+    stderr_log = fake_root / "data" / "logs" / "soul.err.log"
+    stderr_log.write_text("上一次死亡的 stderr 证据\n", encoding="utf-8")
+    run_dir = fake_root / "data" / "run"
+    (run_dir / "soul.running").write_text("pid=1\nstarted_at=1792288735.173\n", encoding="utf-8")
+    fake_venv = fake_root / ".venv" / "Scripts"
+    fake_venv.mkdir(parents=True)
+    (fake_venv / "python.exe").write_bytes(b"")  # 无效可执行文件：Start-Process 必失败
+
+    result = _run_soul_ps(fake_root, "start", 1)
+
+    out = result.stdout + result.stderr
+    archived = sorted((fake_root / "data" / "logs").glob("soul.err.*.log"))
+    assert archived, f"旧 stderr 必须被归档；实际输出：{out}"
+    assert archived[0].read_text(encoding="utf-8").startswith("上一次死亡的 stderr 证据")
+    assert "1792288735" not in archived[0].name  # 文件名是分钟级时间戳，不是原始 epoch

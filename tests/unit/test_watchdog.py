@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -107,10 +108,17 @@ def _log_text(fake_root: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
 
 
-def _start_dummy_process() -> subprocess.Popen[bytes]:
-    """一个"活着但什么都不做"的进程，当作僵死的她（杀掉它不会伤到任何真实进程）。"""
+def _start_dummy_process(tag: str = "elysia.soul.main") -> subprocess.Popen[bytes]:
+    """一个"活着但什么都不做"的进程，当作僵死的她（杀掉它不会伤到任何真实进程）。
+
+    P0-R14：看门狗现在会校验命令行身份；`tag` 就是让它"被认作她"的标记。
+    `tag=""` 表示**无关进程**（模拟 PID 被系统复用）。
+    """
+    args = [sys.executable, "-c", "import time; time.sleep(120)"]
+    if tag:
+        args.append(tag)
     return subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)"],
+        args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -330,3 +338,113 @@ def test_watchdog_is_utf8_with_bom_and_parses() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PARSE OK" in result.stdout
+
+
+# ── P0-R14：PID 复用（不能杀无辜进程）+ 1 分钟巡视 + 退场哨兵 ──────────────
+
+
+def test_watchdog_does_not_kill_reused_pid(fake_root: Path) -> None:
+    """取消测试（P0-R14）：PID 被无关进程占用 ⇒ 只清理 PID 文件，**绝不杀它**。"""
+    innocent = _start_dummy_process(tag="")  # 命令行不含 elysia.soul.main
+    try:
+        _write_pid(fake_root, innocent.pid)
+        _make_heartbeat_db(fake_root / "data" / "heartbeat.db", age_s=3600.0)
+        (fake_root / "data" / "run" / "no_autostart").write_text("", encoding="utf-8")
+
+        result = _run_watchdog(fake_root, "-StaleSeconds", "60", "-StartupGraceSeconds", "0")
+
+        out = result.stdout + result.stderr
+        assert result.returncode == 0, out
+        log = _log_text(fake_root)
+        assert "其它进程占用" in log, log
+        assert innocent.poll() is None, "**绝不能杀掉恰好复用了 PID 的无关进程**"
+        assert not (fake_root / "data" / "run" / "soul.pid").exists(), "陈旧 PID 文件应被清理"
+        assert "killed" not in log
+    finally:
+        if innocent.poll() is None:
+            innocent.kill()
+
+
+def test_watchdog_default_interval_is_one_minute() -> None:
+    """取消测试（P0-R14）：巡视间隔必须是 1 分钟（旧值 5 分钟 = 4.8 分钟盲窗）。"""
+    text = WATCHDOG.read_text(encoding="utf-8", errors="replace")
+    assert "[int]$IntervalMinutes = 1" in text, "默认巡视间隔应为 1 分钟"
+    # 注册方式必须能**长期**重复：旧 /SC MINUTE 只重复 72 小时就停了；
+    # 现在用"每天 00:00 的触发器 + 每 N 分钟重复、持续 24h"（ScheduledTasks 模块）。
+    assert "New-ScheduledTaskTrigger -Daily" in text
+    assert "RepetitionInterval" in text and "RepetitionDuration" in text
+
+
+def test_exit_sentinel_records_exit_code(tmp_path: Path) -> None:
+    """P0-R14：退场哨兵必须写下退出码（区分"自己崩了 vs 被别人杀了"的最低成本证据）。"""
+    sentinel = REPO_ROOT / "scripts" / "soul_sentinel.py"
+    target = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    out_dir = tmp_path / "logs"
+    watcher = subprocess.Popen(
+        [
+            sys.executable,
+            str(sentinel),
+            "--pid",
+            str(target.pid),
+            "--out",
+            str(out_dir),
+            "--kind",
+            "soul",
+            "--started-ts",
+            str(time.time()),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(0.5)
+        target.kill()  # 模拟"被 TerminateProcess 杀掉"
+        target.wait(timeout=20)
+        assert watcher.wait(timeout=30) == 0
+    finally:
+        for proc in (target, watcher):
+            if proc.poll() is None:
+                proc.kill()
+
+    files = list(out_dir.glob("exit-*.json"))
+    assert files, "哨兵必须写下 exit-*.json"
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload["kind"] == "soul"
+    assert payload["pid"] == target.pid
+    assert payload["exit_code"] is not None, payload
+    assert payload["exit_code_hex"] is not None
+    assert payload["crash_logs_since_start"] == []
+    assert "watchdog.log" in "".join(p.name for p in out_dir.iterdir())
+
+
+def test_exit_sentinel_handles_missing_process(tmp_path: Path) -> None:
+    """进程本来就不在 ⇒ 哨兵也要写下证据并正常退出（不假装知道退出码）。"""
+    sentinel = REPO_ROOT / "scripts" / "soul_sentinel.py"
+    out_dir = tmp_path / "logs"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(sentinel),
+            "--pid",
+            "999999",
+            "--out",
+            str(out_dir),
+            "--kind",
+            "body",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    files = list(out_dir.glob("exit-*.json"))
+    assert files
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload["exit_code"] is None
+    assert payload["note"], "拿不到退出码时必须写明原因"

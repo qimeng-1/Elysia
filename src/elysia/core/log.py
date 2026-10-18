@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import logging.handlers
 import sys
@@ -19,6 +20,32 @@ import structlog
 _LOGGER_NAME = "elysia"
 
 
+def _harden_stream(stream: object) -> None:
+    """让日志控制台流**永不因编码失败而崩溃**（P0-R15）。
+
+    背景（2026-10-18 实测）：Windows 上 `soul.err.log` 被重定向时，Python 按
+    **cp936(GBK)** 编码写 stderr；而日志事件里含 `⇒`、emoji 等非 GBK 字符 ⇒
+    标准库 logging 在 emit 里抛 `UnicodeEncodeError`，于是 stderr 开头全是
+    `--- Logging error ---` + 它自己的 traceback，**她的真实死因反而被盖住**。
+    （R2/R14 的取证链就建立在 stderr 上，所以必须先保证"日志管道自身不报错"。）
+
+    做法：保留原编码，只把不可编码字符替换为 `?`（`errors="replace"`）。
+    安全边界：
+    - `pythonw.exe` 下 `sys.stdout`/`sys.stderr` 可能是 **None**
+      （本工程踩过：面板一启动就退出），先判空；
+    - 非 TextIOWrapper（pytest capture / 自定义流）没有 `reconfigure`，跳过；
+    - 流已关闭或重配失败：吞掉，绝不因"让日志更安全"而让进程起不来。
+    """
+    if stream is None:
+        return
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return
+    # 已关闭 / 不可重配：保持原样，日志另有文件通道兜底
+    with contextlib.suppress(ValueError, OSError, AttributeError):
+        reconfigure(errors="replace")
+
+
 def setup_logging(*, level: str = "INFO", log_dir: Path | None = None) -> None:
     """配置全局日志。
 
@@ -26,6 +53,11 @@ def setup_logging(*, level: str = "INFO", log_dir: Path | None = None) -> None:
         level: 日志级别（DEBUG/INFO/WARNING/ERROR）。
         log_dir: 文件日志目录（按天轮转）；None 时仅输出控制台。
     """
+    # P0-R15：先加固控制台流（保留编码、只放宽错误处理），再建 handler。
+    # 文件 handler 明确是 UTF-8，不受影响，保持既有格式不变。
+    _harden_stream(sys.stdout)
+    _harden_stream(sys.stderr)
+
     root = logging.getLogger()
     root.setLevel(level.upper())
 

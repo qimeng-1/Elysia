@@ -33,7 +33,7 @@ from elysia.core.timesense import (
     to_payload,
 )
 from elysia.memory.decay import decay_strength
-from elysia.memory.hooks import GAP_EVENT_KIND, detect_gap
+from elysia.memory.hooks import GAP_EVENT_KIND, detect_episodic_gap
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
     CERTAINTY_PROBABLE,
@@ -227,6 +227,9 @@ class SoulHeartbeat:
         # P3-U 记忆缺口 → 好奇心（T1）：最近一次检测到的缺口强度（0-1）。
         # 每 MEMORY_FEELING_EVERY_N 拍刷新一次，其间保持不变（由感受惯性负责平滑）。
         self._latest_memory_gap: float = 0.0
+        # P0-R16：缺口是**事件**——记录上一轮已"想不起来"的记忆，只对**新增**
+        # 丢失起反应。否则一旦有记忆跌破下限，好奇会永久保持高位（性格变形）。
+        self._lost_memory_ids: set[int] = set()
         # 「痛」的物理量（路线图 §7.6）：窗口内"真的出错了"的时刻（表达失败 / 循环异常）
         self._error_times: deque[float] = deque()
         # 内部冲动（第七批）：她刚从"不在场"回到"在场" → 待问候（**边沿触发**，只问一次）
@@ -667,15 +670,17 @@ class SoulHeartbeat:
                 continue
             created_by_mid[rec.id] = rec.created_ts
 
-        now = self._clock.now()
-        samples: list[tuple[float, float]] = []
+        # P0-R16：样本改成 (memory_id, strength)。缺口强度按"**本轮新增**跌破
+        # 检索下限的记忆条数"计（1 条 = 0.5，可越过 0.4）——她偶尔想起"有件事
+        # 想不起来了"，而不是长期背着一整片模糊。
+        samples: list[tuple[int, float]] = []
         for _, mid, strength, _ in rows:
-            created_ts = created_by_mid.get(mid)
-            if created_ts is None:
+            if mid not in created_by_mid:
                 continue
-            samples.append((strength, max(0.0, (now - created_ts) / 86400.0)))
+            samples.append((mid, strength))
 
-        gap = detect_gap(samples)
+        gap, lost_ids = detect_episodic_gap(samples, previously_lost=self._lost_memory_ids)
+        self._lost_memory_ids = lost_ids
         if gap is None:
             return
         # T1：好奇心吃**未封顶**的缺口强度（满量程 0-1，可越过消费阈值 0.4）；

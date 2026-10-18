@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from elysia.memory.decay import (
+    FUZZY_AGE_DAYS,
     LATENCY_30D_MS,
     LATENCY_90D_MS,
     LATENCY_365D_MS,
+    STRENGTH_RETRIEVE_FLOOR,
     STRENGTH_TAU_DAYS,
     decay_strength,
     effective_age_days,
@@ -115,3 +117,40 @@ def test_memory_gap_event_scale_with_intensity() -> None:
     ds1.apply_event(DesireEvent(kind=GAP_EVENT_KIND, intensity=0.1))
     ds2.apply_event(DesireEvent(kind=GAP_EVENT_KIND, intensity=0.4))
     assert ds1.state.tr < ds2.state.tr
+
+
+# ── P0-R16：缺口信号可达性（floor 从年龄推导 + 事件式缺口）───────────────
+# 取消测试：把 floor 改回 0.2 ⇒ `test_fuzzy_floor_crossed_within_a_month` 红；
+# 把事件式改回"任何丢失都报" ⇒ `test_episodic_gap_does_not_repeat_old_losses` 红。
+
+
+def test_fuzzy_floor_crossed_within_a_month() -> None:
+    """取消测试（P0-R16）：floor 必须能在 1 个月内被跨过（旧 0.2 要 72 天）。"""
+    assert FUZZY_AGE_DAYS <= 30.0
+    assert decay_strength(1.0, 30.0) < STRENGTH_RETRIEVE_FLOOR
+    assert decay_strength(1.0, 14.0) > STRENGTH_RETRIEVE_FLOOR
+
+
+def test_episodic_gap_counts_only_newly_lost() -> None:
+    from elysia.memory.hooks import detect_episodic_gap
+
+    samples = [(1, 0.5), (2, 0.9)]  # 1 号已模糊
+    gap, lost = detect_episodic_gap(samples, previously_lost=set())
+    assert gap is not None
+    assert gap.newly_lost == 1
+    assert gap.strength == pytest.approx(0.5)  # 1 条就能越过 0.4 消费阈值
+    assert lost == {1}
+
+    # 同一个旧丢失再扫 → 不再报（事件式，不是常驻背景噪声）
+    again, lost2 = detect_episodic_gap(samples, previously_lost={1})
+    assert again is None
+    assert lost2 == {1}
+
+
+def test_episodic_gap_caps_at_one() -> None:
+    from elysia.memory.hooks import detect_episodic_gap
+
+    gap, _ = detect_episodic_gap([(1, 0.1), (2, 0.2), (3, 0.3)], previously_lost=set())
+    assert gap is not None
+    assert gap.strength == pytest.approx(1.0)
+    assert gap.to_event_intensity() == pytest.approx(GAP_INTENSITY_MAX)

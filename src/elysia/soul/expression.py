@@ -154,7 +154,9 @@ def _tts_params(will: WillOutput, emotion: dict[str, float]) -> dict[str, Any]:
         e = "curious"
     elif emotion.get("chat", 0.0) > 0.4:
         e = "happy"
-    elif will.anim_bias < -0.3:
+    elif will.anim_bias < -0.15:
+        # P0-R16：真实 anim_bias 区间约 -0.18..+0.21（旧阈值 -0.3 恒不成立，
+        # "calm" 分支是死码）。-0.15 落在分布左侧尾部 ⇒ 只有真的收缩时才 calm。
         e = "calm"
     else:
         e = "neutral"

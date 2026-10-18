@@ -19,6 +19,10 @@ from elysia.memory.decay import STRENGTH_RETRIEVE_FLOOR
 
 # 单次缺口信号最大强度（避免连续缺口把 TR 顶满）
 GAP_INTENSITY_MAX = 0.4
+# 每"新想不起来一件事"给的缺口强度（1 条就越过消费阈值 0.4；多条封顶 1.0）。
+# P0-R16：缺口是**事件**（有些事刚刚变模糊），不是常驻背景——若用"平均模糊度"做常驻
+# 信号，她会永久处于高好奇，那不是机制可达，而是性格变形。
+GAP_PER_NEW_MEMORY = 0.5
 
 # 缺口事件映射到欲望系统的事件名（desire.py EVENT_PULSES 已注册）
 GAP_EVENT_KIND = "memory_gap"
@@ -40,6 +44,51 @@ class GapSignal:
     def to_event_intensity(self) -> float:
         """映射为 DesireEvent.intensity（0-1，封顶 GAP_INTENSITY_MAX）。"""
         return min(GAP_INTENSITY_MAX, self.strength)
+
+
+@dataclass(frozen=True)
+class EpisodicGap:
+    """一轮"刚刚想不起来"的缺口事件（P0-R16）。
+
+    - strength: 0-1 缺口强度（按**新增**丢失记忆计，1 条即 0.5）
+    - newly_lost: 本轮新跌破检索下限的记忆条数
+    - lost_total: 当前累计跌破下限的记忆条数
+    """
+
+    strength: float
+    newly_lost: int
+    lost_total: int
+
+    def to_event_intensity(self) -> float:
+        return min(GAP_INTENSITY_MAX, self.strength)
+
+
+def detect_episodic_gap(
+    samples: list[tuple[int, float]],
+    *,
+    previously_lost: set[int],
+    floor: float = STRENGTH_RETRIEVE_FLOOR,
+) -> tuple[EpisodicGap | None, set[int]]:
+    """检测"这一轮新增了哪些想不起来的事"（事件式缺口）。
+
+    Args:
+        samples: `[(memory_id, strength)]`（只含在册、可参与缺口的记忆）
+        previously_lost: 上一轮已跌破下限的 memory_id 集合
+        floor: 检索下限（默认按"3 周开始模糊"推导）
+
+    Returns:
+        (缺口事件或 None, 本轮最新的丢失集合)。调用方负责保存集合并让
+        `_latest_memory_gap` 在没有新事件时回落到 0（好奇心只对新缺口起反应）。
+    """
+    lost = {mid for mid, strength in samples if strength < floor}
+    newly = lost - previously_lost
+    if not newly:
+        return None, lost
+    strength = min(1.0, GAP_PER_NEW_MEMORY * len(newly))
+    return (
+        EpisodicGap(strength=round(strength, 3), newly_lost=len(newly), lost_total=len(lost)),
+        lost,
+    )
 
 
 def detect_gap(

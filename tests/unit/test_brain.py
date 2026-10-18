@@ -175,3 +175,100 @@ def test_thought_style_dual_mode() -> None:
     ds._state.tr = 35.0
     output_low = brain.step()
     assert output_low.will.thought_style < 0, "TR 低 → thought_style 应 < 0"
+
+
+# ── P0-R16：分支可达性（阈值 = 她自己的设定点，不是绝对刻度）────────────
+# 取消测试：把阈值改回绝对 0.5/0.6（或去掉余量）⇒ 这里的方向断言必红。
+
+
+class _NoJitter:
+    """恒返回 1.0 的随机源：关掉意志层噪声，只测确定性判定链。"""
+
+    def random(self) -> float:
+        return 1.0
+
+
+def _brain_with_setpoint(tr: float, cs: float) -> BrainLoop:
+    from elysia.soul.desire import DesireState
+
+    return BrainLoop(DesireSystem(initial=DesireState(tr=tr, cs=cs)), rng=_NoJitter())
+
+
+def test_will_is_still_at_her_own_setpoint() -> None:
+    """平衡点上 → still（旧实现 chat=cs/100 恒 >0.5 ⇒ 恒 reach，没有安静的时候）。"""
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+
+    brain = _brain_with_setpoint(45.0, 60.0)
+    feelings = FeelingState(chat=0.60, miss=0.40, explore=0.45)
+    will = brain._will_layer(DesireState(tr=45.0, cs=60.0), feelings, False, "present")
+    assert will.direction == "still"
+
+
+def test_will_explore_reachable_just_above_her_setpoint() -> None:
+    """探索欲只比常态高 2 个点时就能 explore（真实分布最大 0.577 < 旧阈值 0.6）。"""
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+
+    brain = _brain_with_setpoint(45.0, 60.0)
+    feelings = FeelingState(chat=0.52, miss=0.48, explore=0.48, curiosity=0.5)
+    will = brain._will_layer(DesireState(tr=48.0, cs=52.0), feelings, False, "present")
+    assert will.direction == "explore"
+
+
+def test_will_reach_reachable_from_chat_and_from_miss() -> None:
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+
+    brain = _brain_with_setpoint(45.0, 60.0)
+    chat_high = FeelingState(chat=0.63, miss=0.37, explore=0.45)
+    assert (
+        brain._will_layer(DesireState(tr=45.0, cs=63.0), chat_high, False, "present").direction
+        == "reach"
+    )
+    # 思念支：miss 只比常态高 2 点即可（旧阈值 0.6 在真实 miss 上限 0.465 之上 ⇒ 恒死）
+    miss_high = FeelingState(chat=0.55, miss=0.45, explore=0.45)
+    assert (
+        brain._will_layer(DesireState(tr=45.0, cs=55.0), miss_high, False, "present").direction
+        == "reach"
+    )
+
+
+def test_will_thresholds_track_setpoint_drift() -> None:
+    """设定点漂移后阈值跟着漂：同一个感受值，在旧基线下是"高于常态"，新基线下是"常态"。"""
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+
+    feelings = FeelingState(chat=0.66, miss=0.32, explore=0.45)
+    low = _brain_with_setpoint(45.0, 60.0)
+    assert (
+        low._will_layer(DesireState(tr=45.0, cs=66.0), feelings, False, "present").direction
+        == "reach"
+    )
+    drifted = _brain_with_setpoint(45.0, 68.0)
+    assert (
+        drifted._will_layer(DesireState(tr=45.0, cs=66.0), feelings, False, "present").direction
+        == "still"
+    )
+
+
+def test_thought_style_and_anim_bias_reachable() -> None:
+    """thought_style>0.3 与 anim_bias<-0.15 在真实取值区间内可达（旧式恒死）。"""
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+
+    brain = _brain_with_setpoint(45.0, 60.0)
+    active = brain._will_layer(
+        DesireState(tr=55.0, cs=60.0, sa=18.0),
+        FeelingState(chat=0.60, miss=0.40, explore=0.55),
+        False,
+        "present",
+    )
+    assert active.thought_style > 0.3
+    quiet = brain._will_layer(
+        DesireState(tr=38.0, cs=60.0, sa=30.0),
+        FeelingState(chat=0.60, miss=0.40, explore=0.38),
+        False,
+        "present",
+    )
+    assert quiet.anim_bias < -0.15

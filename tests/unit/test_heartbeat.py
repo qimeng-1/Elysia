@@ -616,3 +616,36 @@ async def test_stage_b_brain_failure_does_not_lose_the_beat(
         await heartbeat_store.close()
 
     assert "B:brain_step" in caplog.text
+
+
+# ── P0-R16：缺口事件化 —— 同一批丢失只报一次，新丢失才会再推 TR ──────────
+
+
+@pytest.mark.asyncio
+async def test_feel_memory_gaps_is_episodic(tmp_path: Path) -> None:
+    """取消测试（P0-R16）：去掉"只对新增丢失起反应"⇒ 第二轮仍推 TR ⇒ 红。"""
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        await _add_old_memory(heartbeat_store, age_days=100.0, recalled=True)
+        await soul._maintain_memories(T0)
+        brain = soul._brain_loop
+        assert brain is not None
+
+        tr0 = brain.desire_system.state.tr
+        await soul._feel_memory_gaps()  # 第一次：新丢失 → 好奇脉冲
+        tr1 = brain.desire_system.state.tr
+        assert tr1 > tr0
+
+        await soul._feel_memory_gaps()  # 第二轮：没有新增 → 不再推
+        assert brain.desire_system.state.tr == pytest.approx(tr1)
+
+        # 又老了一条 → 新的丢失出现 → 再推一次
+        await _add_old_memory(heartbeat_store, age_days=120.0, recalled=True)
+        await soul._maintain_memories(T0)
+        await soul._feel_memory_gaps()
+        assert brain.desire_system.state.tr > tr1
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()

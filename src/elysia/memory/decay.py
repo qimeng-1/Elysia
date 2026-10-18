@@ -24,8 +24,13 @@ STRENGTH_TAU_DAYS = 45.0
 # 珍贵记忆衰减减速系数
 PROTECTED_DECAY_SLOWDOWN = 3.0
 
-# 检索过滤阈值：strength 低于此值 → 记忆"找不到了"（数据仍在）
-STRENGTH_RETRIEVE_FLOOR = 0.2
+# 记忆"开始变模糊"的年龄（天）。P0-R16：
+# 旧硬编码 floor=0.2 在 τ=45d 下要 **72.4 天**才跨过，而她的第一段交互记忆距今只有 28 天
+# ⇒ 人生前 2.4 个月里，缺口信号（好奇心的唯一来源）在结构上不可能出现（curiosity 恒 0 的根因）。
+# 改成"3 周以上的记忆开始模糊"，与 R12 的遗忘温层（3–30 天）同量级，也符合"大部分事情可以遗忘"。
+FUZZY_AGE_DAYS = 21.0
+# 由年龄推导，不再手写魔数：floor = e^(-21/τ) ≈ 0.627
+STRENGTH_RETRIEVE_FLOOR = math.exp(-FUZZY_AGE_DAYS / STRENGTH_TAU_DAYS)
 
 
 def effective_age_days(age_days: float, protected: bool = False) -> float:

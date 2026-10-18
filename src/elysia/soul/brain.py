@@ -22,6 +22,18 @@ from elysia.soul.dimensions import FeelingMapper, FeelingState
 WILL_NOISE_AMP = 0.15  # 真随机抖动幅度
 NO_ACTION_WEIGHT = 0.10  # 无行动权保底 10%
 
+# ── 方向阈值（P0-R16：分支可达性）────────────────────────────────────
+# 旧实现用**绝对阈值**：explore 要 `feeling>0.6 and tr>50`、chat 要 `>0.5`、miss 要 `>0.6`。
+# 而她 40,000 拍真实分布是：chat 0.535–0.739、explore 0.378–0.577、miss 0.261–0.465 ——
+# explore/miss 的**结构上界**都低于阈值（机制永不触发，只剩噪声抖动），
+# chat 0.5 低于整段区间（恒成立 ⇒ direction 恒 reach）。
+# 根因不是感受映射错了：感受就是欲望的线性强度（她"想要多少"）；错在阈值拿**绝对刻度**
+# 去卡一个**因人而异、还会随经历漂移**的平衡点（她的 setpoints 已从 45/60 漂到 46.3/61.9）。
+# 修法：阈值 = 她自己的设定点 + 很小余量 ⇒ "比自己的常态更想要"才行动。
+# 阈值随设定点漂移自动重标定；不新增机制，也不改她的感受数值。
+WILL_DEVIATION_MARGIN = 0.02  # 0-1 量纲（≈2 个 TR/CS 点）；防在平衡点上抖动
+WILL_STYLE_SCALE = 10.0  # thought_style：每偏离设定点 1 点记 0.1（-1..1 量纲）
+
 
 class _CryptoRNG(random.Random):
     """真随机源：用 os.urandom 提供随机性，覆写 random() 保证不可预测。
@@ -170,17 +182,21 @@ class BrainLoop:
         力度 = TR/CS 加权
         抖动 = 随机（默认 os.urandom，测试可注入固定 rng）
         """
-        # 方向判定
+        # 方向判定（P0-R16：阈值 = 她自己的设定点 + 小余量，见文件头）
+        setpoints = self._desire.setpoints
+        sp_tr = setpoints.tr / 100.0
+        sp_cs = setpoints.cs / 100.0
+        sp_miss = 1.0 - sp_cs
         if distress:
             direction = "retreat"  # 难受 → 收缩
-        elif feelings.explore > 0.6 and desire.tr > 50:
-            direction = "explore"  # TR 高 + 探索欲 → 探索
-        elif feelings.chat > 0.5:
-            direction = "reach"  # 想聊天 → 接近
-        elif feelings.miss > 0.6:
-            direction = "reach"  # 思念 → 想接近
+        elif feelings.explore > sp_tr + WILL_DEVIATION_MARGIN and desire.tr > setpoints.tr:
+            direction = "explore"  # 探索欲高于自己的常态 → 探索
+        elif feelings.chat > sp_cs + WILL_DEVIATION_MARGIN:
+            direction = "reach"  # 亲近欲高于常态 → 接近
+        elif feelings.miss > sp_miss + WILL_DEVIATION_MARGIN:
+            direction = "reach"  # 思念高于常态 → 想接近
         else:
-            direction = "still"  # 默认：静止
+            direction = "still"  # 在/低于常态：静止
 
         # 力度 = TR/CS 加权（0-1）
         strength = (desire.tr / 100.0 + desire.cs / 100.0) / 2.0
@@ -193,13 +209,19 @@ class BrainLoop:
             direction = directions[int(self._rng.random() * len(directions)) % len(directions)]
 
         # 念头风格：正值 = 活跃/胡思乱想，负值 = 安静/虚无
-        thought_style = (desire.tr - 50.0) / 50.0  # -1 到 1
-        if feelings.miss > 0.6:
-            thought_style += 0.3  # 思念 → 活跃
+        # P0-R16：旧式 `(tr-50)/50` 在真实 TR（37.8–57.7）上只到 0.15，
+        # 使 `thought_style>0.3`（think_active）与离线 `>0.2` 都恒不成立；
+        # 改成以她的设定点为 0 点、每点 0.1 ⇒ 真实区间覆盖 -0.85..+1.14。
+        thought_style = (desire.tr - setpoints.tr) / WILL_STYLE_SCALE
+        if feelings.miss > sp_miss + WILL_DEVIATION_MARGIN:
+            thought_style += 0.3  # 思念高于常态 → 活跃
+        thought_style = max(-1.0, min(1.0, thought_style))
 
         # 动画基调偏置：负值 = 收缩，正值 = 舒展
-        anim_bias = (desire.tr - 50.0) / 100.0  # -0.5 到 0.5
-        anim_bias -= (desire.sa - 20.0) / 100.0  # SA 高 → 收缩
+        # P0-R16：以她的设定点为 0 点（原先以 50/20 为 0 点，随经历漂移后会长期偏一个方向）；
+        # 量纲仍是 ~±0.2 的温和偏置。
+        anim_bias = (desire.tr - setpoints.tr) / 100.0
+        anim_bias -= (desire.sa - setpoints.sa) / 100.0  # SA 高于常态 → 收缩
         anim_bias = max(-0.5, min(0.5, anim_bias))
 
         return WillOutput(

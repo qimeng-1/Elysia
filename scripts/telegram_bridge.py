@@ -47,6 +47,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -73,6 +74,7 @@ DEFAULT_HEARTBEAT_DB = Path("data") / "heartbeat.db"
 POLL_TIMEOUT_S = 25  # getUpdates 长轮询秒数（任务卡指定）
 HTTP_TIMEOUT_S = 35.0  # 必须大于长轮询，否则正常等待被自己掐断
 EXPRESSION_POLL_S = 2.0  # 她开口后最多 2 秒到达手机
+CARRY_TIMEOUT_S = 10.0  # 碎片等不到下一段时，最多挂多久再单独发（R19 句间隔上限 8s）
 MAX_BACKOFF_S = 60.0
 TELEGRAM_MAX_CHARS = 4096
 PENDING_CAP = 200  # 待发队列上限：断网很久也不会无限吃内存
@@ -223,16 +225,57 @@ class TelegramAPI:
         )
         return result if isinstance(result, list) else []
 
-    def send_message(self, chat_id: int, text: str) -> None:
-        self._call(
+    def send_message(self, chat_id: int, text: str) -> int | None:
+        """发一条消息，返回 message_id（后续把纯符号碎片"并入前一条"时要编辑它）。"""
+        result = self._call(
             "sendMessage",
             {"chat_id": int(chat_id), "text": text, "disable_web_page_preview": True},
+        )
+        if isinstance(result, dict):
+            mid = result.get("message_id")
+            if isinstance(mid, int):
+                return mid
+        return None
+
+    def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
+        """把纯符号碎片并进**已经发出的上一条**（不新增一个只有 `…`/`♪` 的气泡）。"""
+        self._call(
+            "editMessageText",
+            {
+                "chat_id": int(chat_id),
+                "message_id": int(message_id),
+                "text": text,
+                "disable_web_page_preview": True,
+            },
         )
 
 
 def next_backoff(current: float, *, cap: float = MAX_BACKOFF_S) -> float:
     """指数退避：1→2→4→…→cap。"""
     return min(float(cap), max(1.0, float(current) * 2.0))
+
+
+# ── 气泡碎片防御过滤（根因在 R19 的 split_utterances 下限，A 窗修；这里只保护自己）──
+# 为什么不是简单 `<2 实义字符就并`：她真实的一句话里有大量 1 字短句（真库 thought_log
+# 就有 `'嗯。'`、`'嗯'`）。若 1 字也算碎片，她正常的短回复会被吞进上一条气泡里。
+# 故分两种情况：
+#   · **0 个实义字符**（纯标点/符号：`…`、`♪`、`。`）⇒ 一定是碎片，绝不单独成气泡；
+#   · **多段回复里的 1 字段** ⇒ 按 R19 的下限语义并入相邻段（A 窗 splitter 已做，这里兜旧数据）；
+#   · **整条回复就是一个 1 字短句**（`'嗯。'`）⇒ 保留——那是她真实的一次开口。
+FRAGMENT_MEANINGFUL_MIN = 2
+
+
+def meaningful_len(text: str) -> int:
+    """实义字符数：字母/数字/CJK 才算（`♪`、`…`、标点、空白都不算）。"""
+    return sum(1 for ch in text if ch.isalnum())
+
+
+def is_bubble_fragment(part: str, *, multi: bool) -> bool:
+    """一段文本该不该单独成气泡。`multi` = 它是否属于一次回复里的多段。"""
+    count = meaningful_len(part)
+    if count == 0:
+        return True
+    return multi and count < FRAGMENT_MEANINGFUL_MIN
 
 
 def _clip_telegram(text: str) -> str:
@@ -284,6 +327,7 @@ class TelegramBridge:
         heartbeat_db: Path | None = None,
         chat_file: Path | None = None,
         pid_file: Path | None = None,
+        carry_timeout_s: float = CARRY_TIMEOUT_S,
     ) -> None:
         self._token = token
         self._api = api if api is not None else TelegramAPI(token)
@@ -298,6 +342,12 @@ class TelegramBridge:
         self._pending: list[str] = []
         self._send_fail_backoff = 1.0
         self.last_send_error: str | None = None
+        # 气泡碎片防御：暂存"没有前一条可并"的纯符号段，等下一段或并入上一条已发消息
+        self._carry: str = ""
+        self._carry_since: float = 0.0
+        self._carry_timeout_s = max(0.0, float(carry_timeout_s))
+        self._last_sent_id: int | None = None
+        self._last_sent_text: str | None = None
         # 接收侧：Telegram update_id 偏移
         self._offset: int | None = None
 
@@ -465,17 +515,38 @@ class TelegramBridge:
             return 0
         for row in rows:
             self._cursor = max(self._cursor or 0, int(row["id"]))
-            for part in split_utterances(str(row["text"])):
-                part = part.strip()
-                if not part:
-                    continue
-                if len(self._pending) >= PENDING_CAP:
-                    log.warning(
-                        "待发队列已满（%d 条），丢弃最早的气泡（不无限吃内存）", PENDING_CAP
-                    )
-                    self._pending.pop(0)
-                self._pending.append(part)
+            self._absorb_parts(self._row_parts(str(row["text"])))
+        sent = self._send_pending()
+        # 纯符号碎片：若没有"下一段"可挂，就直接并进**上一条已发消息**（编辑它），
+        # 绝不新增一个只有 `…`/`♪` 的气泡。
+        self._fold_carry_into_last()
+        return sent
 
+    def _row_parts(self, text: str) -> list[str]:
+        return [part.strip() for part in split_utterances(text) if part and part.strip()]
+
+    def _absorb_parts(self, parts: list[str]) -> None:
+        """把一次新气泡的若干段并入待发队列；纯符号碎片**并入相邻段**，绝不单独成条。"""
+        multi = len(parts) > 1
+        for part in parts:
+            if is_bubble_fragment(part, multi=multi):
+                if self._pending:
+                    self._pending[-1] += part  # 并入前一条（尚未发出）
+                else:
+                    if not self._carry:
+                        self._carry_since = time.monotonic()
+                    # 没有前一条：先挂起，等下一段，或并入上一条已发消息（见 _fold）
+                    self._carry += part
+                continue
+            if self._carry:
+                part = self._carry + part  # 开头碎片挂到下一段，不丢内容
+                self._carry = ""
+            if len(self._pending) >= PENDING_CAP:
+                log.warning("待发队列已满（%d 条），丢弃最早的气泡（不无限吃内存）", PENDING_CAP)
+                self._pending.pop(0)
+            self._pending.append(part)
+
+    def _send_pending(self) -> int:
         sent = 0
         while self._pending:
             chat_id = self.chat_id
@@ -483,9 +554,9 @@ class TelegramBridge:
                 # 还没绑定：气泡先留在内存（绑定后继续发；重启则丢，不补历史）
                 log.info("尚无白名单 chat，%d 条气泡暂缓发送", len(self._pending))
                 break
-            text = self._pending[0]
+            text = _clip_telegram(self._pending[0])
             try:
-                self._api.send_message(chat_id, _clip_telegram(text))
+                message_id = self._api.send_message(chat_id, text)
             except Exception as exc:
                 self.last_send_error = type(exc).__name__
                 self._send_fail_backoff = next_backoff(self._send_fail_backoff)
@@ -498,8 +569,42 @@ class TelegramBridge:
             self._pending.pop(0)
             self.last_send_error = None
             self._send_fail_backoff = 1.0
+            self._last_sent_id = message_id
+            self._last_sent_text = text
             sent += 1
         return sent
+
+    def _fold_carry_into_last(self) -> bool:
+        """把挂起的纯符号碎片**并进上一条已发消息**（editMessageText），不新增气泡。"""
+        if not self._carry:
+            return False
+        chat_id = self.chat_id
+        if chat_id is None or self._last_sent_id is None or self._last_sent_text is None:
+            return False
+        combined = _clip_telegram(self._last_sent_text + self._carry)
+        try:
+            self._api.edit_message_text(chat_id, self._last_sent_id, combined)
+        except Exception as exc:
+            self.last_send_error = type(exc).__name__
+            log.warning("碎片并入上一条失败（保留待重试）：%s", type(exc).__name__)
+            return False
+        self._last_sent_text = combined
+        self._carry = ""
+        self.last_send_error = None
+        return True
+
+    def _flush_carry_if_due(self) -> int:
+        """碎片一直等不到下一段：先试并入上一条；实在没有可并的才单独发出（不丢内容）。"""
+        if not self._carry or self.chat_id is None:
+            return 0
+        if self._fold_carry_into_last():
+            return 0
+        if time.monotonic() - self._carry_since < self._carry_timeout_s:
+            return 0
+        text = self._carry
+        self._carry = ""
+        self._pending.append(text)
+        return self._send_pending()
 
     # ── 常驻循环 ────────────────────────────────────────────────
     def _receiver_loop(self, stop: threading.Event) -> None:
@@ -525,6 +630,7 @@ class TelegramBridge:
         while not stop.is_set():
             try:
                 self.poll_expression_once()
+                self._flush_carry_if_due()
             except Exception as exc:  # 理论上不会到这里（poll 自己兜住），双保险
                 log.warning("发送侧异常（已静默降级）：%s", type(exc).__name__)
             stop.wait(self._send_fail_backoff if self.last_send_error else EXPRESSION_POLL_S)

@@ -57,6 +57,7 @@ class FakeTelegram:
     def __init__(self) -> None:
         self.updates: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []  # editMessageText：碎片并进上一条
         self.calls: list[str] = []
         self.fail_all = False
         self.fail_send = False
@@ -77,6 +78,9 @@ class FakeTelegram:
             return json.dumps({"ok": True, "result": {"message_id": len(self.sent)}}).encode(
                 "utf-8"
             )
+        if method == "editMessageText":
+            self.edits.append(dict(payload))
+            return json.dumps({"ok": True, "result": True}).encode("utf-8")
         return json.dumps({"ok": True, "result": True}).encode("utf-8")
 
 
@@ -318,6 +322,100 @@ def test_legacy_multi_sentence_row_is_split(
     _add_bubble(hb, "第一句。第二句！第三句？")
     assert b.poll_expression_once() == 3
     assert [m["text"] for m in fake.sent] == ["第一句。", "第二句！", "第三句？"]
+
+
+# ── 气泡碎片防御（根因在 R19 的 split_utterances，A 窗修；桥侧兜底）──
+def test_fragment_segments_never_sent_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """验收指定输入 `['…名字…','…','我有点想你了。']` ⇒ **只发 2 条**，`…` 并入前一条。
+
+    取消测试：去掉 `_absorb_parts` 的碎片判断（每段直接入队）⇒ 会发出独立的 `'…'`，
+    本用例必红（`texts == ['…名字…', '…', '我有点想你了。']`，3 条）。
+    """
+    b, fake, _state, _hb = _make_bridge(tmp_path, monkeypatch, chat_id=111)
+    b.initialize_cursor()
+    b._absorb_parts(["…名字…", "…", "我有点想你了。"])
+    assert b.poll_expression_once() == 2
+    texts = [str(m["text"]) for m in fake.sent]
+    assert texts == ["…名字……", "我有点想你了。"]
+    assert "…" not in texts, "发出了独立的纯符号碎片气泡"
+    assert all(bridge.meaningful_len(t) >= 1 for t in texts)
+
+
+def test_fragment_rows_merge_across_polls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R19 的真实形状：碎片是**独立 thought 行**（隔几秒到）——同样不许单独成气泡。"""
+    b, fake, _state, hb = _make_bridge(tmp_path, monkeypatch, chat_id=111)
+    b.initialize_cursor()
+    _add_bubble(hb, "…名字…")
+    _add_bubble(hb, "…")
+    _add_bubble(hb, "我有点想你了。")
+    assert b.poll_expression_once() == 2
+    assert [m["text"] for m in fake.sent] == ["…名字……", "我有点想你了。"]
+
+
+def test_trailing_fragment_folds_into_last_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """碎片到达时前一条**已经发出**（`…～` + `♪` 的真实情形）⇒ 编辑上一条，不新增气泡。
+
+    取消测试：让 `_fold_carry_into_last()` 不再并入 ⇒ `♪` 会作为独立气泡发出，本用例必红。
+    """
+    b, fake, _state, hb = _make_bridge(tmp_path, monkeypatch, chat_id=111)
+    b.initialize_cursor()
+    _add_bubble(hb, "我正闲着发呆呢。")
+    assert b.poll_expression_once() == 1
+    _add_bubble(hb, "♪")
+    assert b.poll_expression_once() == 0  # 不发新气泡
+    assert len(fake.sent) == 1
+    assert fake.edits, "碎片没有并入上一条（会单独发一个 ♪）"
+    assert fake.edits[-1]["text"] == "我正闲着发呆呢。♪"
+    assert fake.edits[-1]["message_id"] == 1
+    # 即使等过超时窗口，也不许退化成"单独发 ♪"（并入上一条是首选，内容不丢）
+    b._carry_since = time.monotonic() - 100.0
+    assert b._flush_carry_if_due() == 0
+    assert [m["text"] for m in fake.sent] == ["我正闲着发呆呢。"]
+
+
+def test_short_one_char_reply_is_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """她真实的一句话可能只有 1 个实义字符（真库有 `'嗯。'`）——**不能被吞进上一条**。"""
+    b, fake, _state, hb = _make_bridge(tmp_path, monkeypatch, chat_id=111)
+    b.initialize_cursor()
+    _add_bubble(hb, "嗯。")
+    assert b.poll_expression_once() == 1
+    assert [m["text"] for m in fake.sent] == ["嗯。"]
+    assert fake.edits == []
+
+
+def test_leading_fragment_waits_for_next_bubble(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有前一条可并时，开头碎片挂到**下一段**（不丢内容、不单独发）。"""
+    b, fake, _state, hb = _make_bridge(tmp_path, monkeypatch, chat_id=111)
+    b.initialize_cursor()
+    _add_bubble(hb, "…")
+    assert b.poll_expression_once() == 0
+    _add_bubble(hb, "我在呢。")
+    assert b.poll_expression_once() == 1
+    assert [m["text"] for m in fake.sent] == ["…我在呢。"]
+
+
+def test_carry_timeout_without_previous_sends_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """碎片既无上一条可并、下一段又一直不来 ⇒ 超时后单独发出（**内容不静默丢**）。
+
+    这条同时覆盖 `_flush_carry_if_due` 的两行 —— 此前 `time` 未 import 的 NameError
+    就在这里，而 17 个用例没走到。教训：**每条新分支都要有用例踩到**。
+    """
+    b, fake, _state, _hb = _make_bridge(tmp_path, monkeypatch, chat_id=111)
+    b.initialize_cursor()
+    b._carry = "…"
+    b._carry_since = time.monotonic()
+    assert b._flush_carry_if_due() == 0  # 未到超时：继续等下一段
+    b._carry_since = time.monotonic() - 100.0
+    assert b._flush_carry_if_due() == 1  # 超时且无前一条可并：内容仍要发出
+    assert [m["text"] for m in fake.sent] == ["…"]
 
 
 # ── 收：指令与校验 ─────────────────────────────────────────────────

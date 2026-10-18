@@ -124,11 +124,44 @@ def compute_reply_desire(
     )
 
 
+# 句边界：句末标点/波浪号/kaomoji 结尾后断句（换行也算）
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?…～~♪♡])\s*|\n+")
+# "实义字符"：CJK / 假名 / 拉丁字母 / 数字。标点、空白、kaomoji、emoji 都不算。
+_MEANINGFUL_CHAR = re.compile(r"[\u4e00-\u9fff\u3040-\u30ffA-Za-z0-9]")
+MIN_MEANINGFUL_CHARS = 2  # 去标点后少于 2 个实义字符的段，不单独成句
+
+
+def _meaningful_len(text: str) -> int:
+    return len(_MEANINGFUL_CHAR.findall(text))
+
+
 def split_utterances(text: str) -> list[str]:
-    """一次 LLM 回复 → 最多 `MAX_UTTERANCES_PER_TURN` 句（她说什么由 LLM 定，上限由安全门定）。"""
-    raw = re.split(r"(?<=[。！？!?…～~])\s*|\n+", text or "")
-    parts = [piece.strip() for piece in raw if piece and piece.strip()]
-    return parts[:MAX_UTTERANCES_PER_TURN]
+    """一次 LLM 回复 → 最多 `MAX_UTTERANCES_PER_TURN` 句。
+
+    上限由安全门定，**下限由语义定**：只有标点/kaomoji 的碎片（`…`、`♪`）会把发言切成结巴，
+    因此实义字符 < `MIN_MEANINGFUL_CHARS` 的段**并入前一段**（没有前一段则挂到下一段）；
+    整句都不足时仍保留原文（"嗯。"也是她的一句话，不能吞掉）。
+    """
+    raw = [
+        piece.strip() for piece in _SENTENCE_BOUNDARY.split(text or "") if piece and piece.strip()
+    ]
+    merged: list[str] = []
+    prefix = ""
+    for piece in raw:
+        if _meaningful_len(piece) < MIN_MEANINGFUL_CHARS:
+            if merged:
+                merged[-1] += piece
+            else:
+                prefix += piece  # 开头就是碎片：挂到下一段，不丢
+            continue
+        merged.append(prefix + piece)
+        prefix = ""
+    if not merged:
+        stripped = (text or "").strip()
+        return [stripped] if stripped else []
+    if prefix:
+        merged[-1] += prefix
+    return merged[:MAX_UTTERANCES_PER_TURN]
 
 
 def utterance_gap_s(reply_desire: float = 1.0) -> float:

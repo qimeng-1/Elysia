@@ -103,3 +103,28 @@ SA < 14（新线，低于保护带下沿 15）→ 只加深（她自己难受优
 **门禁**：ruff ✅ / format ✅ 177 files / mypy ✅ 60 / pytest ✅ **599 passed + 11 skipped**；真机审计 `ELYSIA_AUDIT_REAL=1` → **11 passed**。
 
 **仍未启停她**：一次性修复（1.0→0.0）照旧等你/用户点头后随重启生效。
+
+---
+
+## 7. R19d 补丁：拆句不得产出标点/kaomoji 碎片（防结巴）
+
+**问题**（总领从真库发现）：`split_utterances` 会把 `…` / `♪` 切成独立"一句话"，
+桌宠气泡与 Telegram 都会一条条冒 `'…'`、`'♪'`。
+
+**修复**（`src/elysia/soul/expression.py`）：
+- 句边界正则加入 `♪♡`；
+- 新增 `_MEANINGFUL_CHAR`（CJK/假名/拉丁/数字）与 `MIN_MEANINGFUL_CHARS = 2`：
+  去标点/空白/kaomoji/emoji 后不足 2 个实义字符的段**并入前一段**（没有前一段则挂到下一段）；
+- 整句都短（如 `"嗯。"`、`"……"`）时仍保留原文——**不吞掉她的话**；
+- `MAX_UTTERANCES_PER_TURN = 3` 与 2–8s 句间延时逻辑不变。
+
+**实测**：
+```
+「…装下一个人的名字……我有点想你了。」 → ['…装下一个人的名字……', '我有点想你了。']
+「…正好陪你说说话～♪」          → ['…正好陪你说说话～♪']（不再拆出 '♪'）
+```
+
+**取消测试**：还原旧版 `split_utterances` ⇒ `test_split_utterances_never_emits_punctuation_only_fragments` **红**
+（实测断到 `'…'` 独立段）；还原后绿。已加 `test_short_fragments_are_merged_not_dropped` 守卫"不吞话"。
+
+**门禁**：ruff ✅ / format ✅ 179 files / mypy ✅ 60 / pytest ✅ **618 passed + 11 skipped**（基线 616+11，+2 新用例，零退化）。

@@ -89,10 +89,10 @@ def test_boundary_refusal_lowers_desire() -> None:
 
 # ── 多句 = 一次调用拆句；≤3 句；间隔 2–8s ──────────────────────
 def test_split_utterances_caps_at_3() -> None:
-    parts = split_utterances("一。二！三？四。")
+    parts = split_utterances("第一句。第二句！第三句？第四句。")
     assert MAX_UTTERANCES_PER_TURN == 3
-    assert parts == ["一。", "二！", "三？"], "超出的句子必须被硬上限截掉（刷屏保护）"
-    assert split_utterances("只有一句。") == ["只有一句。"]
+    assert parts == ["第一句。", "第二句！", "第三句？"], "超出的句子必须被硬上限截掉（刷屏保护）"
+    assert split_utterances("只有一句话。") == ["只有一句话。"]
     assert split_utterances("") == []
 
 
@@ -108,7 +108,7 @@ async def test_multi_sentence_uses_one_call_with_delays(tmp_path: Path) -> None:
     store = HeartbeatStore(tmp_path / "heartbeat.db")
     await store.start()
     try:
-        llm = _FakeLLM("甲。乙。丙。丁。")
+        llm = _FakeLLM("第一句。第二句。第三句。第四句。")
         svc = ExpressionService(llm, store)
         job = ExpressionJob(
             job_id="1",
@@ -124,12 +124,12 @@ async def test_multi_sentence_uses_one_call_with_delays(tmp_path: Path) -> None:
 
         assert llm.calls == 1, "多句必须来自**一次** LLM 调用（成本门）"
         rows = await store.execute_raw("SELECT text FROM thought_log ORDER BY id")
-        assert [r[0] for r in rows] == ["甲。"]
+        assert [r[0] for r in rows] == ["第一句。"]
         assert len(svc._pending_utterances) == 2, "其余句子必须排队等间隔，不能一口气写完"
 
         await svc.flush_utterances(1.0 + utterance_gap_s(0.4) + 0.001)
         rows = await store.execute_raw("SELECT text FROM thought_log ORDER BY id")
-        assert [r[0] for r in rows] == ["甲。", "乙。"], "到点才冒下一句"
+        assert [r[0] for r in rows] == ["第一句。", "第二句。"], "到点才冒下一句"
 
         detail = json.loads(
             (await store.execute_raw("SELECT validation FROM expression_log"))[0][0]
@@ -218,3 +218,27 @@ def test_worst_relationship_is_not_sentenced_to_silence() -> None:
     worst_yearning = compute_reply_desire(chat=0.40, miss=0.60, interval_factor=2.0)
     assert worst_yearning.speak is True, "关系最差也不等于永久沉默：思念极高时她仍会开口"
     assert worst_yearning.parts["关系亲密"] >= 0.30 * 0.5 - 1e-6
+
+
+# ── R19d：不得把标点/kaomoji 切成独立"一句话"（防结巴）──────────────────
+def test_split_utterances_never_emits_punctuation_only_fragments() -> None:
+    """取消测试（R19d）：真库碎片的两个原句 ⇒ 不得出现 '…' / '♪' 独立段。"""
+    cases = [
+        "夜里静下来的时候，心里就空出一块，正好装下一个人的名字……我有点想你了。",
+        "夜晚总是让人安静下来呢，我只想懒懒地待着，正好陪你说说话～♪",
+    ]
+    for text in cases:
+        parts = split_utterances(text)
+        assert parts, "不能把整句吞掉"
+        for piece in parts:
+            core = piece.strip("…～~♪♡。，！？!?、；;：: 　")
+            assert len(core) >= 2, f"出现了无实义碎片：{piece!r}（原文 {text!r}）"
+        assert "…" not in parts and "♪" not in parts
+        # 内容不能丢：拼回去等于原文（允许空白差异）
+        assert "".join(parts).replace(" ", "") == text.replace(" ", "")
+
+
+def test_short_fragments_are_merged_not_dropped() -> None:
+    """「嗯」「…」这类短段并入相邻句；整句都短时仍保留原文（不能吞掉她的话）。"""
+    assert split_utterances("嗯。好呀。") == ["嗯。好呀。"]
+    assert split_utterances("……") == ["……"]

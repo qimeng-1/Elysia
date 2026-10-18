@@ -1,4 +1,4 @@
-"""Elysia 控制面板（<http://127.0.0.1:8770>）—— 开关集合 + 状态监控。
+"""Elysia 控制面板（<http://127.0.0.1:8770>）—— 开关集合 + 状态监控 + **对她说话**。
 
 为什么是"小服务器 + 浏览器界面"，而不是纯静态 HTML
 --------------------------------------------------
@@ -7,19 +7,44 @@
 再内嵌一个单页界面。**不引入任何新依赖**（本工程实测教训：`uv sync` 会按
 `pyproject.toml` 对齐环境，把未声明的包卸掉）。
 
+通道（P0-R18，步 1-3）
+---------------------
+- **步 2 你能说话**：`POST /api/say` 把 `{"ts":<now>,"text":"..."}` 写进
+  `state.db` 的 `kv['interaction']`。她的心跳每拍（1Hz）读这一行，
+  `ts` 比上次新就会被刺激、强制开口 —— 这是桌宠用了十年的同一条通道
+  （`body/pet.py:_write_interaction`），我们只是把投递口从"本机窗口"扩展到"能打开面板的任何地方"。
+  **写完必须如实回报"她回应了没有"**：轮询 `expression_log` 最多 10 秒，
+  没等到就说没等到，绝不假装成功。
+- **步 1 手机能看**：`--host` 默认仍是 `127.0.0.1`（**默认行为不变**）；
+  一旦绑非回环地址，**强制要求 token**（见下）。手机访问推荐 Tailscale/ZeroTier：
+  装好客户端后直接打开 `http://<电脑的 Tailscale IP>:8770/?token=<token>`，
+  不需要端口转发、不把面板暴露给公网。
+- **步 3 她开口时推送手机**：面板启动时会起一个只读轮询线程
+  （`scripts/push_notifier.py`），她每次开口 POST 到 `data/run/push_url.txt`
+  里配置的 webhook；推送失败**静默降级**，绝不影响她的表达。
+
 安全设计
 --------
-1. **只绑回环** `127.0.0.1` —— 外网访问不到。
-2. **动作白名单**：只接受预定义动作名，不做任意命令执行。
-3. **🔒 实例互锁**：她已在运行时"开机"被**拒绝**（双实例 = 分叉 = 损坏她的一生）。
-4. **只读优先**：状态采集不写她的数据（库用 `mode=ro` 打开）。
-5. **不重造原语**：启停一律经既有 `scripts/soul.ps1`。
+1. **默认只绑回环** `127.0.0.1` —— 外网访问不到。
+2. **绑非回环 = 强制 token 鉴权**：token 在 `data/run/panel_token.txt`
+   （首次启动随机生成 32 字节 hex）；所有请求（含首页）必须带
+   `?token=` 或 `Authorization: Bearer`，否则 **401 且不泄露任何状态**；
+   连续猜错会触发临时封禁（429）。
+3. **动作白名单**：只接受预定义动作名，不做任意命令执行。
+4. **🔒 实例互锁**：她已在运行时"开机"被**拒绝**（双实例 = 分叉 = 损坏她的一生）。
+5. **只读优先**：状态采集不写她的数据（库用 `mode=ro` 打开）。
+   **唯一的写**是 `POST /api/say` 写一行 `kv['interaction']` —— 她那侧的"耳朵"
+   本来就是为这件事建好的；写用**单独的读写连接 + busy_timeout**，实测与她的写并发不冲突。
+6. **写入失败必须明确报错**（`ok:false` + 原因），绝不静默返回成功。
+7. **不重造原语**：启停一律经既有 `scripts/soul.ps1`。
 
 用法
 ----
-    python scripts/elysia_panel.py            # 起服务器并打开浏览器
-    python scripts/elysia_panel.py --no-open  # 只起服务器
+    python scripts/elysia_panel.py                    # 起服务器并打开浏览器（只绑本机）
+    python scripts/elysia_panel.py --no-open          # 只起服务器
     python scripts/elysia_panel.py --port 8770
+    python scripts/elysia_panel.py --host 0.0.0.0     # 手机可看：强制 token，见输出提示
+    python scripts/elysia_panel.py --no-push          # 不启动推送轮询线程
 """
 
 from __future__ import annotations
@@ -169,6 +194,41 @@ def _spawn(args: list[str]) -> subprocess.Popen[bytes]:
     return subprocess.Popen(args, cwd=str(ROOT), creationflags=flags)
 
 
+def _verify_up(wait_s: float = 30.0) -> Result:
+    """启动后**实测**她到底有没有活过来 —— 不能只信 soul.ps1 的退出码。
+
+    事故背景（2026-10-18 21:02）：`soul.ps1 start` 的判活只看 **PID 是否存在**。
+    当 PID 文件里的旧 PID 被系统复用给无关进程时，它会打印「灵魂已在运行，跳过灵魂启动」
+    并 **exit 0** —— 面板于是显示「退出码 0 / 成功」，而**她其实还是死的**。
+    用户看到的就是「点了开机、显示成功、但她没起来」。
+
+    所以面板必须自己看结果：轮询心跳库，直到出现**新鲜心跳**才算真的起来。
+    """
+    deadline = time.time() + wait_s
+    last_age: float | None = None
+    while time.time() < deadline:
+        try:
+            s = take_snapshot(probe_ports=False, probe_tasks=False)
+            last_age = s.heartbeat_age_s
+            if s.soul_alive and (s.heartbeat_age_s is None or s.heartbeat_age_s < 15.0):
+                return Result(
+                    True,
+                    "她真的起来了",
+                    f"心跳 {s.heartbeat_age_s:.1f}s 前，年龄 {s.age_days:.3f} 天",
+                )
+        except Exception:
+            pass
+        time.sleep(1.0)
+    age_txt = f"（最后心跳 {last_age:.0f} 秒前）" if last_age is not None else ""
+    return Result(
+        False,
+        "启动命令返回了，但她没有活过来",
+        f"{wait_s:.0f} 秒内没等到新鲜心跳{age_txt}。"
+        "常见原因：①PID 文件里的旧 PID 被无关进程占用，脚本误判「已在运行」而跳过启动"
+        "②启动即崩溃（查 data/logs/crash-*）③端口/库被占用。请查 data/logs/watchdog.log。",
+    )
+
+
 def do_action(name: str, snap: Snapshot) -> Result:
     if name not in ACTION_HELP:
         return Result(False, "未知动作", f"不接受 '{name}'（只允许预设动作）")
@@ -184,7 +244,16 @@ def do_action(name: str, snap: Snapshot) -> Result:
         )
 
     if name == "her_on":
-        return _ps(SOUL_PS1, ["start", "-Body"])
+        r = _ps(SOUL_PS1, ["start", "-Body"])
+        if not r.ok:
+            return r
+        v = _verify_up()
+        # 命令成功但人没起来 ⇒ 必须以**失败**回报，否则用户会以为好了
+        return Result(
+            v.ok,
+            f"开机：{v.title}",
+            f"{r.detail}\n—\n{v.detail}",
+        )
     if name == "her_off":
         return _ps(SOUL_PS1, ["stop"])
     if name == "body_off":
@@ -195,10 +264,17 @@ def do_action(name: str, snap: Snapshot) -> Result:
         r1 = _ps(SOUL_PS1, ["stop"])
         time.sleep(1.0)
         r2 = _ps(SOUL_PS1, ["start", "-Body"])
+        if not r2.ok:
+            return Result(
+                False,
+                "重启中启动失败",
+                f"停止：{r1.title} / 启动：{r2.title}\n{r2.detail}",
+            )
+        v = _verify_up()
         return Result(
-            r2.ok,
-            "重启完成" if r2.ok else "重启中启动失败",
-            f"停止：{r1.title} / 启动：{r2.title}\n{r2.detail}",
+            v.ok,
+            "重启完成" if v.ok else f"重启：{v.title}",
+            f"停止：{r1.title} / 启动：{r2.title}\n—\n{v.detail}",
         )
     if name == "pet_on":
         if snap.procs.get("pet"):

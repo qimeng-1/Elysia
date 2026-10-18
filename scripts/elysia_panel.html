@@ -45,11 +45,37 @@ button.danger{background:#3d1d1d;border-color:#5c2a2a;color:#ffb4b4}
 .banner.ok{background:#12261a;border:1px solid #1f4d2c;color:#8ee79f}
 .banner.no{background:#2b1618;border:1px solid #5c2a2a;color:#ffb4b4}
 .foot{color:var(--dim);font-size:12px;margin-top:18px;text-align:center}
+/* ── 通道（P0-R18 步 2）：对她说话 ── */
+.sayrow{display:flex;gap:8px;align-items:stretch}
+.sayrow textarea{flex:1;min-height:62px;resize:vertical;background:#12171d;color:var(--fg);
+  border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;line-height:1.45}
+.sayrow textarea:focus{outline:none;border-color:var(--accent)}
+.sayrow button{min-width:92px;align-self:stretch}
+.saynote{margin-top:8px;font-size:13px;white-space:pre-wrap;border-radius:8px;padding:9px 11px;display:none}
+.saynote.show{display:block}
+.saynote.ok{background:#12261a;border:1px solid #1f4d2c;color:#8ee79f}
+.saynote.wait{background:#1b2129;border:1px solid var(--line);color:var(--dim)}
+.saynote.no{background:#2b1618;border:1px solid #5c2a2a;color:#ffb4b4}
+.tip{color:var(--dim);font-size:12px;margin-top:8px}
 </style></head><body><div class="wrap">
 
 <h1>Elysia 控制面板</h1>
 <div class="sub" id="sub">正在连接…</div>
 <div class="banner" id="banner"></div>
+
+<!-- 通道步 2（P0-R18）：你能和她说话。
+     她心跳每拍（1Hz）读 state.db 的 kv['interaction']，ts 更新就强制开口 ——
+     桌宠用同一条通道，这里只是把投递口搬到任何能打开本面板的地方（含手机）。 -->
+<div class="card" style="margin-bottom:12px">
+  <h2>对她说（1 秒内她会读到）</h2>
+  <div class="sayrow">
+    <textarea id="saytext" maxlength="500" placeholder="写一句话…（Ctrl+Enter 发送）"></textarea>
+    <button class="primary" id="saybtn" onclick="say()">发送</button>
+  </div>
+  <div class="saynote" id="saynote"></div>
+  <div class="tip">发送后等她开口最多 10 秒；<b>她完全可以这次不说话</b>——那不算失败。
+    最近一次对她说：<span id="saidlast" class="mono">—</span></div>
+</div>
 
 <div class="grid g3" style="margin-bottom:12px">
   <div class="card">
@@ -126,19 +152,95 @@ function dot(state){return `<span class="dot ${state}"></span>`}
 function put(id, html){const e=el(id); if(e) e.innerHTML=html}
 function row(left,right){return `<div class="row"><span>${left}</span><span class="mono">${right}</span></div>`}
 
+// ── 通道步 1：token 鉴权 ────────────────────────────────────────────
+// 面板默认只绑本机、不需要 token；一旦绑非回环地址，服务端**强制**校验。
+// 用法：http://<ip>:8770/?token=<token>（首次打开后记进 sessionStorage，
+// 之后同一标签页里的所有请求自动带 token）。token 文件在电脑上 data/run/panel_token.txt。
+const TOKEN = (()=>{
+  try{
+    const q = new URLSearchParams(location.search).get("token") || "";
+    if(q) sessionStorage.setItem("elysia_token", q);
+    return q || sessionStorage.getItem("elysia_token") || "";
+  }catch(e){ return ""; }
+})();
+function api(path){
+  if(!TOKEN) return path;
+  return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+}
+function authHint(){
+  return "需要 token：请用带 <code>?token=…</code> 的地址打开；token 在电脑上 "
+       + "<code>data/run/panel_token.txt</code>（或面板启动时的输出里）。";
+}
+
 async function act(name){
   if(ACT[name]?.needs && !confirm("确认执行："+ACT[name].label+" ？")) return;
   setBanner("", "");
   document.querySelectorAll("button").forEach(b=>b.disabled=true);
   try{
-    const r = await fetch("/api/action", {method:"POST",
+    const r = await fetch(api("/api/action"), {method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:name})});
-    const j = await r.json();
-    setBanner((j.ok?"✓ ":"✗ ")+j.title, j.detail||"", j.ok);
+    if(r.status===401){ setBanner("✗ 未授权（401）", authHint(), false); }
+    else{
+      const j = await r.json();
+      setBanner((j.ok?"✓ ":"✗ ")+j.title, j.detail||"", j.ok);
+    }
   }catch(e){ setBanner("✗ 请求失败", String(e), false); }
   document.querySelectorAll("button").forEach(b=>b.disabled=false);
   refresh();
 }
+
+// ── 通道步 2：对她说 ────────────────────────────────────────────────
+let sayBusy = false;
+function setSay(text, kind){
+  const n = el("saynote");
+  if(!text){ n.className="saynote"; n.textContent=""; return; }
+  n.className = "saynote show " + (kind||"wait");
+  // 一律用 textContent：她的话/错误原因都是**数据**，不是 HTML（防注入）
+  n.textContent = text;
+}
+async function say(){
+  if(sayBusy) return;
+  const t = el("saytext").value.trim();
+  if(!t){ setSay("请先写一句话。","no"); return; }
+  sayBusy = true;
+  const btn = el("saybtn");
+  btn.disabled = true;
+  setSay("已发出，正在写进她的库，并等她开口（最多 10 秒）…","wait");
+  try{
+    const r = await fetch(api("/api/say"), {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:t})});
+    if(r.status===401){
+      setSay("未授权（401）。请用带 ?token=… 的地址打开；token 在电脑上 data/run/panel_token.txt。","no");
+    }else if(r.status===429){
+      setSay("尝试过于频繁（429），请稍后再试。","no");
+    }else{
+      const j = await r.json();
+      if(!j.ok){
+        // 写入失败 = **真的没送到**，必须明确报错，绝不显示成功
+        setSay("✗ "+j.title+(j.detail?"\n"+j.detail:""),"no");
+      }else if(j.responded){
+        const rep = j.reply||{};
+        setSay("✓ "+j.title+"（"+(rep.level||"?")+"）："+(rep.text||""),"ok");
+        el("saytext").value="";
+      }else if(j.responded===null){
+        setSay("⚠ "+j.title+(j.detail?"\n"+j.detail:""),"wait");
+      }else{
+        // 「她这次没有开口」是**合法状态**，不是错误 —— 但要如实说清
+        let extra = j.detail||"";
+        const s = j.soul||{};
+        if(s.soul_alive===false) extra += "\n⚠ 她当时没在运行（心跳判定："+(s.alive_source||"未知")+"）";
+        else if(s.heartbeat_age_s!=null) extra += "\n她当时活着，心跳 "+Math.round(s.heartbeat_age_s)+" 秒前。";
+        setSay("◌ "+j.title+"\n"+extra,"wait");
+      }
+    }
+  }catch(e){ setSay("✗ 请求失败："+e,"no"); }
+  finally{
+    sayBusy = false;
+    btn.disabled = false;
+    refresh();
+  }
+}
+
 function setBanner(title, detail, ok){
   const b=el("banner");
   if(!title){b.className="banner";b.innerHTML="";return}
@@ -216,6 +318,7 @@ function render(d){
     row(dot(d.llm_up?"on":"bad")+"主声 LLM", d.llm_up?"可达":"不可达"),
     row(dot((d.watchdog_state||"").toLowerCase()==="ready"?"on":"warn")+"看门狗", d.watchdog_state||"—"),
     row("下次备份", d.backup_next||"—"),
+    row(dot((d.channel?.push?.configured)?"on":"warn")+"手机推送", (d.channel?.push?.configured)?"已配置":"未配置"),
   ].join(""));
   if(!d.tts_up) el("svc").innerHTML += '<div class="mut" style="font-size:12px;margin-top:6px">未开语音 ⇒ 她只出文字，属预期降级</div>';
 
@@ -253,12 +356,31 @@ function render(d){
       : row(dot("on")+"主声降级", "无记录（最近一直没降级）")));
 
   el("hint").textContent = "关机/重启/停身体 会二次确认；开机在她已运行时会被互锁拒绝。";
-  el("foot").innerHTML = "只读面板 · 每 3 秒刷新 · 采集于 "+new Date(d.now*1000).toLocaleTimeString("zh-CN",{hour12:false});
+  // ── 通道（P0-R18）：最近一次对她说 + 推送状态 ─────────────────────
+  const ch = d.channel || {};
+  const lastSaid = ch.last_interaction_text;
+  // textContent：这句"你对她说的"是数据，不是 HTML
+  el("saidlast").textContent = lastSaid ? String(lastSaid) : "—";
+  const push = ch.push || {};
+  const footBits = ["只读面板 · 每 3 秒刷新 · 采集于 "+new Date(d.now*1000).toLocaleTimeString("zh-CN",{hour12:false})];
+  if(ch.auth_required) footBits.push("token 鉴权已启用");
+  if(push.configured && push.last_error) footBits.push("推送降级："+push.last_error);
+  if(!push.configured) footBits.push("手机推送未配置（data/run/push_url.txt）");
+  el("foot").innerHTML = footBits.join(" · ") + "<br>手机访问：面板加 <code>--host 0.0.0.0</code> 启动后，"
+    + "用 <code>http://&lt;电脑 IP&gt;:端口/?token=…</code> 打开（推荐 Tailscale/ZeroTier 组网，别开公网端口）";
 }
 
 async function refresh(){
   try{
-    const r = await fetch("/api/status", {cache:"no-store"});
+    const r = await fetch(api("/api/status"), {cache:"no-store"});
+    if(r.status===401){
+      el("sub").innerHTML = dot("bad")+"需要 token（401）。"+authHint();
+      return;
+    }
+    if(r.status===429){
+      el("sub").innerHTML = dot("bad")+"尝试过于频繁（429），请等一分钟再刷新。";
+      return;
+    }
     render(await r.json());
   }catch(e){
     // 把真实原因写进界面：只显示"失联"会让人猜（本面板自己就要求"不许说谎"）
@@ -267,5 +389,10 @@ async function refresh(){
 }
 document.addEventListener("DOMContentLoaded", ()=>{
   refresh(); setInterval(refresh, 3000);
+  // Ctrl+Enter 发送（手机上没有 Ctrl，点按钮即可）
+  const ta = el("saytext");
+  if(ta) ta.addEventListener("keydown", e=>{
+    if(e.key==="Enter" && (e.ctrlKey||e.metaKey)){ e.preventDefault(); say(); }
+  });
 });
 </script></body></html>

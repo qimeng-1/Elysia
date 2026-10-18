@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -430,19 +431,36 @@ def test_register_task_ps1_is_utf8_bom_and_parses() -> None:
 def test_cli_help_and_missing_token_do_not_crash(tmp_path: Path) -> None:
     """真机踩过：`argparse --help` 把含 `↔` 的 description 写 cp936 stdout ⇒
     `UnicodeEncodeError` + traceback。修复后 `--help` 必须 exit 0；缺 token 必须
-    exit 2（明确拒绝启动），都不是 traceback。"""
+    exit 2（明确拒绝启动），都不是 traceback。
+
+    ⚠️ 编码必须**在测试里钉死**（`env=PYTHONIOENCODING=utf-8` + `encoding="utf-8"`）。
+    早先版本依赖环境：子进程继承调用方的 `PYTHONIOENCODING`——
+    调用方设了 utf-8 时子进程写 UTF-8 字节，而 `text=True` 用 locale(cp936) 解码 ⇒
+    `UnicodeDecodeError` ⇒ `stdout is None` ⇒ 本用例假红（总领复跑时实测到）。
+    门禁结果绝不能取决于执行者的环境变量。
+    """
     script = str(SCRIPTS / "telegram_bridge.py")
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     helped = subprocess.run(
-        [sys.executable, script, "--help"], capture_output=True, text=True, timeout=60
+        [sys.executable, script, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
     )
     assert helped.returncode == 0, helped.stderr
-    assert "usage" in helped.stdout.lower()
+    assert "usage" in (helped.stdout or "").lower()
 
     missing = subprocess.run(
         [sys.executable, script, "--once", "--token-file", str(tmp_path / "nope.txt")],
         capture_output=True,
         text=True,
         timeout=60,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
     )
     assert missing.returncode == 2
-    assert "Traceback" not in (missing.stdout + missing.stderr)
+    assert "Traceback" not in ((missing.stdout or "") + (missing.stderr or ""))

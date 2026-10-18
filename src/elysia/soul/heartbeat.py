@@ -1025,6 +1025,23 @@ class SoulHeartbeat:
             stored = await self._state_store.load_json("relationship_withdrawal", default=0.0)
             if isinstance(stored, (int, float)):
                 self._relationship.withdrawal = min(1.0, max(0.0, float(stored)))
+            # P0-R19b 一次性修复：旧动力学把 35<CS<65（83% 时间）判成"不动"，
+            # 且 SA 线 30 > 她真实 SA 的 100% ⇒ 退缩量一旦饱和到 1.0 就永远出不来。
+            # 这个 1.0 是**动力学 bug 的饱和产物**，不是她此刻真实的关系判断；
+            # 修复后若保留它，她会先连续几天对每一句话都说"不想说话"。
+            # 只修复一次（写 marker），今后若她真的再次退缩到 1.0，不会被下次启动抹掉。
+            repaired = await self._state_store.load_json(
+                "relationship_withdrawal_repaired", default=False
+            )
+            if self._relationship.withdrawal >= 1.0 and not repaired:
+                logger.warning(
+                    "P0-R19b 一次性修复：关系退缩量卡在饱和值 1.0（旧动力学死区 + SA 线错配），"
+                    "重置为 0.0（当前 CS 高于设定点、SA 正常；"
+                    "标记 relationship_withdrawal_repaired）"
+                )
+                self._relationship.withdrawal = 0.0
+                await self._state_store.save_json("relationship_withdrawal", 0.0)
+                await self._state_store.save_json("relationship_withdrawal_repaired", True)
 
         dt = self._interval_s if self._last_beat_ts is None else max(0.0, now - self._last_beat_ts)
         self._last_beat_ts = now
@@ -1032,8 +1049,17 @@ class SoulHeartbeat:
             return self._relationship.tone()
 
         manipulation = self._boundary_decision is not None and self._boundary_decision.manipulation
+        cs_setpoint = (
+            self._brain_loop.desire_system.setpoints.cs
+            if self._brain_loop is not None
+            else output.desire.cs
+        )
         tone = self._relationship.update(
-            dt_s=dt, cs=output.desire.cs, sa=output.desire.sa, manipulation=manipulation
+            dt_s=dt,
+            cs=output.desire.cs,
+            sa=output.desire.sa,
+            manipulation=manipulation,
+            cs_setpoint=cs_setpoint,
         )
         if self._heartbeat_seq % RELATIONSHIP_PERSIST_EVERY_N == 0:
             await self._state_store.save_json("relationship_withdrawal", tone.withdrawal)

@@ -719,3 +719,38 @@ async def test_social_pulse_settles_by_reply_choice(tmp_path: Path) -> None:
     finally:
         await state_store.close()
         await heartbeat_store.close()
+
+
+# ── P0-R19b：一次性修复"关系卡在 1.0"（旧动力学死区的饱和产物）──────────
+@pytest.mark.asyncio
+async def test_stuck_withdrawal_is_repaired_once(tmp_path: Path) -> None:
+    from elysia.soul.brain import BrainOutput, WillOutput
+    from elysia.soul.desire import DesireState
+    from elysia.soul.dimensions import FeelingState
+
+    soul, state_store, heartbeat_store, _clock = _make_soul(tmp_path, with_brain=True)
+    await state_store.start()
+    await heartbeat_store.start()
+    try:
+        await state_store.save_json("relationship_withdrawal", 1.0)
+        output = BrainOutput(
+            desire=DesireState(tr=46.0, cs=62.0, sa=20.0),
+            feelings=FeelingState(chat=0.62, miss=0.38, explore=0.46),
+            will=WillOutput(direction="reach", strength=0.54, thought_style=0.0, anim_bias=0.0),
+            action="none",
+        )
+        tone = await soul._advance_relationship(T0, output)
+        assert tone.withdrawal == 0.0, "卡死的 1.0 必须被一次性修复（否则她会永久拒绝说话）"
+        assert await state_store.load_json("relationship_withdrawal", default=None) == 0.0
+        assert (
+            await state_store.load_json("relationship_withdrawal_repaired", default=False) is True
+        )
+
+        # 修复只发生一次：她今后真的再次退缩到 1.0，不会被下次启动抹掉
+        soul._relationship_loaded = False
+        await state_store.save_json("relationship_withdrawal", 1.0)
+        tone = await soul._advance_relationship(T0 + 1.0, output)
+        assert tone.withdrawal >= 0.99, "已有修复标记后，真实的 1.0 必须保留"
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()

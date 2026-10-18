@@ -39,8 +39,12 @@ INTENTS = frozenset(
 # 回不回由下面这个确定性公式决定；每一分量都会落库（reason），可回放。
 REPLY_THRESHOLD = 0.59
 W_REL = 0.30  # 关系：退缩量越低越愿意开口
-W_CHAT = 0.09  # 想聊天（比思念弱：错过交流会更多地累积为思念）
-W_MISS = 0.69  # 想她（P0-R16 已让 miss 分支可达；需求累积的主通道）
+# P0-R19b：关系项**不许归零**——interval_factor=2（退缩到底）时旧式子给 0，
+# 那等于把"关系最差"判成永久拒绝说话。保留 50% 底线：最差关系仍能开口，
+# 只是更难（需要思念/聊天来补）。
+REL_FLOOR = 0.5
+W_CHAT = 0.30  # 想聊天（比思念弱：错过交流会更多地累积为思念）
+W_MISS = 0.55  # 想她（P0-R16 已让 miss 分支可达；需求累积的主通道）
 W_DIST = 0.55  # 难受时不想开口（distress 语义沿用既有，不改）
 W_BOUND = 0.55  # 被当工具/被越界时可拒绝
 RESTRAINT_INTENT = "暂不回应"
@@ -77,7 +81,7 @@ def compute_reply_desire(
     """
     intimacy = max(0.0, min(1.0, 2.0 - min(2.0, max(1.0, float(interval_factor)))))
     parts = {
-        "关系亲密": round(W_REL * intimacy, 4),
+        "关系亲密": round(W_REL * (REL_FLOOR + (1.0 - REL_FLOOR) * intimacy), 4),
         "想聊天": round(W_CHAT * float(chat), 4),
         "想她": round(W_MISS * float(miss), 4),
         "难受": round(-W_DIST if distress else 0.0, 4),

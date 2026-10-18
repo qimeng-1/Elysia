@@ -16,12 +16,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# CS 低于此：她开始退缩（对方不够真诚）
-WITHDRAWAL_CS_LINE = 35.0
-# CS 高于此：她开始恢复（对方真的把她当人）
-RECOVERY_CS_LINE = 65.0
+# ── P0-R19b：关系是**连续量**，不再是分段常数 ──────────────────────
+# 旧实现：CS≤35 才退缩、CS≥65 才恢复，中间 83% 的时间退缩量完全不动。
+# 真机后果：她一旦到过 1.0（退缩到底），就永远出不来——关系卡死在最差那一格。
+# 现在以**设定点**为 0 点连续驱动：低于设定点 → 缓慢加深；高于 → 缓慢恢复；
+# 正好在设定点 → 也仍以 BASE 速率向 0 漂移（关系不会冻结）。
+WITHDRAWAL_CS_LINE = 35.0  # 仅保留给文档/兼容引用，不再参与判定
+RECOVERY_CS_LINE = 65.0  # 同上
+CS_SPAN = 10.0  # 偏离设定点多少点算"满速"
+WITHDRAW_DEEPEN_PER_HOUR = 0.05  # 低于设定点（满速）时每小时加深
+RECOVER_BASE_PER_HOUR = 0.006  # 正好在设定点时每小时恢复（缓慢但持续）
+RECOVER_GAIN_PER_HOUR = 0.08  # 高于设定点（满速）时的额外恢复
 # SA 低于此：她自己正难受，也会缩回去
-SA_WITHDRAW_LINE = 30.0
+# P0-R19b：SA 的绝对线也错配——真实 SA 分布 15.0–29.2（中位 19.7），
+# 旧线 30 ⇒ **100% 的时间都在「她难受」**，退缩量只会单调涨到 1.0（真机卡死的第二因）。
+# 改成 14.0（低于她的保护带下沿 15）：只有真的掉到底才算她自己难受。
+SA_WITHDRAW_LINE = 14.0
 # 持续低 CS/低 SA 时，每小时涨多少（约 20 小时退到底）
 WITHDRAW_PER_HOUR = 0.05
 # 持续真诚时，每小时降多少（约 13 小时回到平常）
@@ -81,17 +91,26 @@ class RelationshipKeeper:
         cs: float,
         sa: float,
         manipulation: bool = False,
+        cs_setpoint: float = 60.0,
     ) -> RelationshipTone:
         """推进一拍并返回当前姿态。
 
         `dt_s` 是这一拍代表的真实时长（心跳 1Hz 时约 1 秒）；
         速率按**小时**折算，所以短时间内的抖动不会改变关系。
         """
+        hours = dt_s / 3600.0
         delta = 0.0
-        if cs < WITHDRAWAL_CS_LINE or sa < SA_WITHDRAW_LINE:
-            delta += WITHDRAW_PER_HOUR * (dt_s / 3600.0)
-        elif cs >= RECOVERY_CS_LINE:
-            delta -= RECOVER_PER_HOUR * (dt_s / 3600.0)
+        if sa < SA_WITHDRAW_LINE:
+            # 她自己难受时退缩（与对方无关）——优先，不同时恢复
+            delta += WITHDRAW_PER_HOUR * hours
+        else:
+            deviation = float(cs) - float(cs_setpoint)
+            if deviation < 0:
+                depth = min(1.0, -deviation / CS_SPAN)
+                delta += WITHDRAW_DEEPEN_PER_HOUR * depth * hours
+            else:
+                gain = min(1.0, deviation / CS_SPAN)
+                delta -= (RECOVER_BASE_PER_HOUR + RECOVER_GAIN_PER_HOUR * gain) * hours
         if manipulation:
             delta += MANIPULATION_PENALTY
         self.withdrawal = min(WITHDRAWAL_MAX, max(0.0, self.withdrawal + delta))

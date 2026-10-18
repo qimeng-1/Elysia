@@ -190,7 +190,7 @@ def test_restraint_accumulates_demand_until_she_speaks_again(
         decision = compute_reply_desire(
             chat=state.cs / 100.0,
             miss=1.0 - state.cs / 100.0,
-            interval_factor=1.5,  # 关系有退缩，但没到彻底不理
+            interval_factor=2.0,  # 关系退缩到底：起点必须低于阈值
         )
         desires.append(decision.reply_desire)
         speaks.append(decision.speak)
@@ -207,3 +207,14 @@ def test_restraint_accumulates_demand_until_she_speaks_again(
     assert desires[-1] > desires[0]
     assert speaks[0] is False, "起点必须是'选择不回'，否则用例没有测到累积"
     assert speaks[-1] is True, "她不会永久沉默：需求累积到阈值后自己重新开口"
+
+
+# ── R19b：最坏关系不许被判"永久拒绝说话" ────────────────────────────
+def test_worst_relationship_is_not_sentenced_to_silence() -> None:
+    """取消测试（R19b）：关系项线性归零（interval=2 → +0.0）时，最坏关系下永远 speak=False；
+    保留 50% 底线后，思念极高（miss=0.6，CS 保护带下沿）时她仍会开口。"""
+    worst_typical = compute_reply_desire(chat=0.62, miss=0.38, interval_factor=2.0)
+    assert worst_typical.speak is False, "关系最差、思念普通 → 她选择说明不想说话"
+    worst_yearning = compute_reply_desire(chat=0.40, miss=0.60, interval_factor=2.0)
+    assert worst_yearning.speak is True, "关系最差也不等于永久沉默：思念极高时她仍会开口"
+    assert worst_yearning.parts["关系亲密"] >= 0.30 * 0.5 - 1e-6

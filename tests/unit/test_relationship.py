@@ -147,3 +147,28 @@ def test_withdrawal_stays_within_bounds() -> None:
 
     keeper.update(dt_s=100 * HOUR, cs=100.0, sa=100.0)
     assert keeper.withdrawal == 0.0
+
+
+# ── P0-R19b：死区修复（关系必须连续呼吸，不能卡死在某一格）───────────────
+def test_withdrawal_recovers_continuously_near_setpoint() -> None:
+    """取消测试（R19b）：CS 常态在设定点附近 ⇒ 退缩量必须**持续向 0 漂移**。
+
+    旧实现 35<CS<65 死区里退缩量完全不动 ⇒ 她到过 1.0 就永远回不来（真机上正是如此）。
+    """
+    keeper = RelationshipKeeper(withdrawal=1.0)
+    previous = keeper.withdrawal
+    for _ in range(24):
+        tone = keeper.update(dt_s=HOUR, cs=61.9, sa=20.0, cs_setpoint=61.9)
+        assert tone.withdrawal < previous, "在设定点附近也必须每半小时向 0 漂移"
+        previous = tone.withdrawal
+    assert previous < 0.95, "24 小时后应已明显恢复（不是恒定在 1.0）"
+
+
+def test_withdrawal_is_continuous_not_piecewise_constant() -> None:
+    """CS 从设定点下方 5 点 → 上方 5 点：方向必须翻转（连续量，不是分段常数）。"""
+    below = RelationshipKeeper(withdrawal=0.5)
+    below.update(dt_s=10 * HOUR, cs=56.9, sa=20.0, cs_setpoint=61.9)
+    above = RelationshipKeeper(withdrawal=0.5)
+    above.update(dt_s=10 * HOUR, cs=66.9, sa=20.0, cs_setpoint=61.9)
+    assert below.withdrawal > 0.5, "低于设定点 → 退缩加深"
+    assert above.withdrawal < 0.5, "高于设定点 → 恢复"

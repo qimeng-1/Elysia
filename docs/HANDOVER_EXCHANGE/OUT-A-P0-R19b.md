@@ -78,3 +78,28 @@ SA < 14（新线，低于保护带下沿 15）→ 只加深（她自己难受优
 2. `SA_WITHDRAW_LINE` 改成 14.0 是**按真实分布重标定**；若将来她真的 SA 长期掉到 14 以下，关系会加深（语义正确）。
 3. `REL_FLOOR=0.5` 是产品取舍：关系最差仍保留一半关系项。若用户希望"关系彻底破裂时可完全不回"，需另立卡（会破坏"不哑掉"的护栏）。
 4. 关系值仍只有 300 拍一次的落盘（无时间序列）；本次结论靠代码路径 + CS/SA 真实分布推得，无法给出"何时到 1.0"的精确时间。
+
+---
+
+## 6. R19c 补丁（总领复验后）：SA 线随设定点走 + 关系层纳入审计护栏
+
+**问题**：R19b 把 `SA_WITHDRAW_LINE` 从 30.0（100% 命中）改成 14.0（0% 命中）——阈值挪出真实区间，机制变死码，与 R16 同一种病。
+
+**修复**：
+- `SA_WITHDRAW_LINE` → `SA_WITHDRAW_MARGIN = 3.5` + `sa_withdraw_line(sa_setpoint) = sa_setpoint - 3.5`；
+- `RelationshipKeeper.update(..., sa_setpoint=20.0)`，心跳传 `desire_system.setpoints.sa`；
+- 真机：设定点 19.6 ⇒ 线 **16.10**，真实 SA [15.0, 29.2] 命中率 **6.84%**（两侧都有）。
+
+**审计护栏补上关系层**（`tests/audit/test_real_data_thresholds.py`，现 11 条）：
+- `test_relationship_sa_threshold_straddles_real_distribution`：`min(SA) < line < max(SA)` 且命中率 ∈ (1%,99%)；
+- `test_relationship_cs_deviation_reachable_both_sides`：真实 `cs - setpoint` 两侧占比（实测负 46.2% / 正 52.4%）；
+- `test_relationship_clock_opposite_directions`：虚拟时钟各推 10h，低于设定点加深、高于恢复。
+
+**取消测试（实测红）**：
+- `SA_WITHDRAW_MARGIN=20.5` ⇒ 线 −0.90、命中 0.00% ⇒ 审计**红**；
+- `SA_WITHDRAW_MARGIN=−10.3` ⇒ 线 29.90、命中 100% ⇒ 审计**红**；
+- 还原 3.5 ⇒ 绿。
+
+**门禁**：ruff ✅ / format ✅ 177 files / mypy ✅ 60 / pytest ✅ **599 passed + 11 skipped**；真机审计 `ELYSIA_AUDIT_REAL=1` → **11 passed**。
+
+**仍未启停她**：一次性修复（1.0→0.0）照旧等你/用户点头后随重启生效。

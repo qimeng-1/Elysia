@@ -172,3 +172,19 @@ def test_withdrawal_is_continuous_not_piecewise_constant() -> None:
     above.update(dt_s=10 * HOUR, cs=66.9, sa=20.0, cs_setpoint=61.9)
     assert below.withdrawal > 0.5, "低于设定点 → 退缩加深"
     assert above.withdrawal < 0.5, "高于设定点 → 恢复"
+
+
+# ── P0-R19c：SA 线必须随设定点走，且在真实分布两侧都有命中 ──────────────
+def test_sa_withdraw_line_tracks_setpoint_and_is_reachable() -> None:
+    from elysia.soul.relationship import sa_withdraw_line
+
+    low, high = sa_withdraw_line(18.0), sa_withdraw_line(22.0)
+    assert high > low, "SA 线必须随她自己的设定点漂移（不是固定刻度）"
+    # 用她真实 SA 区间（15.0–29.2）的代表样本：阈值两侧都必须有命中
+    samples = [15.0, 16.0, 17.0, 19.0, 21.0, 25.0, 29.0]
+    for setpoint in (20.0, 22.0, 25.0):
+        line = sa_withdraw_line(setpoint)
+        below = [s for s in samples if s < line]
+        assert 0 < len(below) < len(samples), (
+            f"SA 线 {line} 在真实 SA 上不是死阈值（命中 {len(below)}/{len(samples)}）"
+        )

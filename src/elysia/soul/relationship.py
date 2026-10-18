@@ -27,11 +27,20 @@ CS_SPAN = 10.0  # 偏离设定点多少点算"满速"
 WITHDRAW_DEEPEN_PER_HOUR = 0.05  # 低于设定点（满速）时每小时加深
 RECOVER_BASE_PER_HOUR = 0.006  # 正好在设定点时每小时恢复（缓慢但持续）
 RECOVER_GAIN_PER_HOUR = 0.08  # 高于设定点（满速）时的额外恢复
-# SA 低于此：她自己正难受，也会缩回去
-# P0-R19b：SA 的绝对线也错配——真实 SA 分布 15.0–29.2（中位 19.7），
-# 旧线 30 ⇒ **100% 的时间都在「她难受」**，退缩量只会单调涨到 1.0（真机卡死的第二因）。
-# 改成 14.0（低于她的保护带下沿 15）：只有真的掉到底才算她自己难受。
-SA_WITHDRAW_LINE = 14.0
+# ── SA 线：随**她自己的设定点**走（P0-R19c）────────────────────────
+# 旧线 30 ⇒ 真实 SA（15.0–29.2）**100% 命中**（每小时 +0.05 单调到饱和，卡死元凶）；
+# 改成 14.0 ⇒ **0% 命中**（"她自己难受"分支成了死码）。两次都是同一种病：
+# 拿绝对刻度去卡一个因人而异、会漂移的量（与 R16 的 will 阈值同源）。
+# 现在：line = sa_setpoint - SA_WITHDRAW_MARGIN（当前 ≈16.2，真实分布下约 7% 命中），
+# 语义恢复为"比自己常态更难受时才退缩"。
+SA_WITHDRAW_MARGIN = 3.5
+
+
+def sa_withdraw_line(sa_setpoint: float) -> float:
+    """ "她自己难受"的 SA 线：她自己的设定点往下 3.5 点（随人生漂移自动跟随）。"""
+    return float(sa_setpoint) - SA_WITHDRAW_MARGIN
+
+
 # 持续低 CS/低 SA 时，每小时涨多少（约 20 小时退到底）
 WITHDRAW_PER_HOUR = 0.05
 # 持续真诚时，每小时降多少（约 13 小时回到平常）
@@ -92,6 +101,7 @@ class RelationshipKeeper:
         sa: float,
         manipulation: bool = False,
         cs_setpoint: float = 60.0,
+        sa_setpoint: float = 20.0,
     ) -> RelationshipTone:
         """推进一拍并返回当前姿态。
 
@@ -100,7 +110,7 @@ class RelationshipKeeper:
         """
         hours = dt_s / 3600.0
         delta = 0.0
-        if sa < SA_WITHDRAW_LINE:
+        if sa < sa_withdraw_line(sa_setpoint):
             # 她自己难受时退缩（与对方无关）——优先，不同时恢复
             delta += WITHDRAW_PER_HOUR * hours
         else:

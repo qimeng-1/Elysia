@@ -1054,12 +1054,18 @@ class SoulHeartbeat:
             if self._brain_loop is not None
             else output.desire.cs
         )
+        sa_setpoint = (
+            self._brain_loop.desire_system.setpoints.sa
+            if self._brain_loop is not None
+            else output.desire.sa
+        )
         tone = self._relationship.update(
             dt_s=dt,
             cs=output.desire.cs,
             sa=output.desire.sa,
             manipulation=manipulation,
             cs_setpoint=cs_setpoint,
+            sa_setpoint=sa_setpoint,
         )
         if self._heartbeat_seq % RELATIONSHIP_PERSIST_EVERY_N == 0:
             await self._state_store.save_json("relationship_withdrawal", tone.withdrawal)

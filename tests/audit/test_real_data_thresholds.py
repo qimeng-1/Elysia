@@ -337,3 +337,70 @@ def test_mode_values_are_reachable_with_virtual_clock() -> None:
     # 现实数据只能在 body 离线时才有后两态 ⇒ 审计只保证"机制可达"，不要求真实占比
     assert BODY_AWAY_THRESHOLD_S < LONG_AWAY_THRESHOLD_S
     _ = random  # 保持 import 稳定性（无抖动审计依赖）
+
+
+# ── 关系层阈值（P0-R19c 补进护栏：上一轮 14.0 就是从这里溜过去的）──────────
+def _load_sa_cs() -> tuple[list[float], list[float]]:
+    con = _ro(REAL_DB)
+    try:
+        rows = list(
+            con.execute(
+                "SELECT payload FROM heartbeats WHERE beat_type='soul' ORDER BY id DESC LIMIT 40000"
+            )
+        )
+    finally:
+        con.close()
+    sa, cs = [], []
+    for (payload,) in rows:
+        d = json.loads(payload).get("desire") or {}
+        sa.append(float(d.get("sa", 0.0)))
+        cs.append(float(d.get("cs", 0.0)))
+    return sa, cs
+
+
+def test_relationship_sa_threshold_straddles_real_distribution() -> None:
+    """取消测试（P0-R19c）：SA 退缩线必须随设定点走，并在真实 SA 上两侧都有命中。
+
+    旧 30.0 ⇒ 100%（恒命中）；14.0 ⇒ 0%（恒不命中）——两种都是"机制不可达"。
+    """
+    from elysia.soul.relationship import sa_withdraw_line
+
+    _, _, sp_sa = _load_setpoints()
+    sa, _ = _load_sa_cs()
+    if not sa:
+        pytest.skip("没有心跳样本")
+    line = sa_withdraw_line(sp_sa)
+    hits = sum(1 for v in sa if v < line) / len(sa)
+    print(
+        f"SA 线={line:.2f}（设定点 {sp_sa:.1f}）、"
+        f"真实 SA [{min(sa):.1f},{max(sa):.1f}]、命中率 {hits:.2%}"
+    )
+    assert min(sa) < line < max(sa), "阈值必须落在真实 SA 区间内"
+    assert 0.01 < hits < 0.99, f"SA 线命中率 {hits:.2%} ⇒ 死阈值（机制不可达）"
+
+
+def test_relationship_cs_deviation_reachable_both_sides() -> None:
+    """关系连续动力学的驱动量 = cs - 设定点：真实数据两侧都必须有。"""
+    _, cs = _load_sa_cs()
+    _, sp_cs, _ = _load_setpoints()
+    if not cs:
+        pytest.skip("没有心跳样本")
+    deviations = [c - sp_cs for c in cs]
+    below = sum(1 for d in deviations if d < 0) / len(deviations)
+    above = sum(1 for d in deviations if d > 0) / len(deviations)
+    print(f"CS 偏离设定点：负 {below:.1%} / 正 {above:.1%}")
+    assert min(deviations) < 0 < max(deviations)
+    assert below > 0.01 and above > 0.01, "关系只能单向漂移 ⇒ 连续动力学有一侧不可达"
+
+
+def test_relationship_clock_opposite_directions() -> None:
+    """阈值两侧时钟：低于设定点 → 加深；高于设定点 → 恢复（虚拟时钟各推一次）。"""
+    from elysia.soul.relationship import RelationshipKeeper
+
+    _, sp_cs, sp_sa = _load_setpoints()
+    below = RelationshipKeeper(withdrawal=0.5)
+    below.update(dt_s=10 * 3600.0, cs=sp_cs - 5.0, sa=sp_sa, cs_setpoint=sp_cs, sa_setpoint=sp_sa)
+    above = RelationshipKeeper(withdrawal=0.5)
+    above.update(dt_s=10 * 3600.0, cs=sp_cs + 5.0, sa=sp_sa, cs_setpoint=sp_cs, sa_setpoint=sp_sa)
+    assert below.withdrawal > 0.5, "低于设定点必须加深"
+    assert above.withdrawal < 0.5, "高于设定点必须恢复"

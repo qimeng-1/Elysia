@@ -92,7 +92,7 @@ from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
 from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
-from elysia.soul.dialogue import build_dialogue_context, record_her_bubble
+from elysia.soul.dialogue import recent_dialogue_window, record_her_bubble
 from elysia.soul.expression import (
     ReplyDecision,
     build_expression,
@@ -650,11 +650,32 @@ class ExpressionService:
         if job.user_message:
             payload["user_message"] = job.user_message
 
+        # ── 1a2. S1a/S1b：最近真实对话 + "进行中对话"的下限 ts ──────
+        # `dialogue_context` 给模型"接得上话"的上下文；`dialogue_since` 用于记忆检索：
+        # 还在最近 N 轮里的交互 = 正在进行中的对话，不该被当成"记忆"钩回来。
+        # 读失败给空表/None：绝不因为没有上下文而让她说不出话。
+        dialogue_context: list[dict[str, Any]] = []
+        dialogue_since: float | None = None
+        try:
+            dialogue_context, dialogue_since = await recent_dialogue_window(self._store, now=now)
+        except Exception:
+            log.warning("装配 dialogue_context 失败——本次不带近期对话", exc_info=True)
+
         # ── 1b. 记忆注入：只在"话题撞上"时（被唤起才浮现，不再每句都推）──
         if self.retriever is not None and job.user_message:
-            hooks = await self.retriever(
-                self._store, output.feelings.to_dict(), now=now, query=job.user_message
-            )
+            try:
+                hooks = await self.retriever(
+                    self._store,
+                    output.feelings.to_dict(),
+                    now=now,
+                    query=job.user_message,
+                    recent_dialogue_since_ts=dialogue_since,
+                )
+            except TypeError:
+                # 注入的 retriever 可能是不认识新参数的旧实现（测试替身/外部接线）
+                hooks = await self.retriever(
+                    self._store, output.feelings.to_dict(), now=now, query=job.user_message
+                )
             if hooks:
                 # 「记忆越旧越难想起」的物理体现：等待时长**由她自己记忆的年龄决定**
                 # （`decay.retrieve_latency_ms` 的曲线，越旧越慢）。
@@ -672,13 +693,8 @@ class ExpressionService:
         payload[IDENTITY_FIELD] = await self._identity_lines()
 
         # ── 1c2. S1a：最近真实对话（接得上话的物理基础）─────────
-        # 与 `memory_hooks`（撞上的旧记忆）语义不同、两者并存；读失败给空表，
-        # 绝不因为没有上下文而让她说不出话。
-        try:
-            payload["dialogue_context"] = await build_dialogue_context(self._store, now=now)
-        except Exception:
-            log.warning("装配 dialogue_context 失败——本次不带近期对话", exc_info=True)
-            payload["dialogue_context"] = []
+        # 与 `memory_hooks`（撞上的旧记忆）语义不同、两者并存。
+        payload["dialogue_context"] = dialogue_context
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)

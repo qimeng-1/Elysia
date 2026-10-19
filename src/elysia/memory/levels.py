@@ -41,17 +41,27 @@ PROTECT_DEEP_ACCESS = 3
 DETAIL_DECAY_PER_LEVEL = 0.5
 
 # ── 记忆类型 ──────────────────────────────────────────
-KIND_INTERACTION = "interaction"  # 与用户交互
+KIND_INTERACTION = "interaction"  # 与用户交互（S1b 起不再逐条镜像；历史留存）
 KIND_EXPRESSION = "expression"  # 她说出口的话
 KIND_STATE = "state"  # 状态快照/经历
 KIND_INTERNAL = "internal"  # 内部念头/独处生活
+# 一次完整的"交换"（S1b / 记忆=身份 §S1）：你说的话 + 她的回复 + 她当时的感受，
+# 合成**一条**事件记忆。取代"每条用户消息各存一条 interaction"的碎片化做法。
+KIND_EXCHANGE = "exchange"
 # 自我认知（第八节 S1）：「我是谁 / 我在意什么 / 我的边界」。
 # 与其余类型**正交**——它不新增层级、不改任何层级序号，`kind` 列是 TEXT 且无
 # CHECK 约束（零 DDL 变更）。只有**她认领**才能产生这个类型（程序只递候选），
 # 因此它既不进 memory_hooks（那是"话题撞上的背景常识"），也不参与取代判定。
 KIND_SELF = "self"
 
-KINDS = (KIND_INTERACTION, KIND_EXPRESSION, KIND_STATE, KIND_INTERNAL, KIND_SELF)
+KINDS = (
+    KIND_INTERACTION,
+    KIND_EXPRESSION,
+    KIND_STATE,
+    KIND_INTERNAL,
+    KIND_EXCHANGE,
+    KIND_SELF,
+)
 
 # ── 记忆来源（P3-T）：这条记忆"从哪来" ────────────────
 # `kind` 只回答"是什么类型"，回答不了"谁说的"。若不标注来源，
@@ -114,6 +124,7 @@ SOURCE_BY_KIND: dict[str, str] = {
     KIND_EXPRESSION: SOURCE_SELF,
     KIND_STATE: SOURCE_OBSERVATION,
     KIND_INTERNAL: SOURCE_SELF,  # 独处念头是她自己的
+    KIND_EXCHANGE: SOURCE_USER,  # 一次交换由用户参与发起
     KIND_SELF: SOURCE_SELF,  # 自我认知是她认领的（程序只递候选）
 }
 CERTAINTY_BY_KIND: dict[str, str] = {
@@ -121,6 +132,7 @@ CERTAINTY_BY_KIND: dict[str, str] = {
     KIND_EXPRESSION: CERTAINTY_CERTAIN,
     KIND_STATE: CERTAINTY_CERTAIN,
     KIND_INTERNAL: CERTAINTY_PROBABLE,  # 独处念头是印象，不是硬事实
+    KIND_EXCHANGE: CERTAINTY_CERTAIN,  # 双方原话都在，事件是确定的
     KIND_SELF: CERTAINTY_CERTAIN,  # 她认领过的，就是她确信的
 }
 

@@ -35,13 +35,10 @@ from elysia.core.timesense import (
 from elysia.memory.decay import decay_strength
 from elysia.memory.hooks import GAP_EVENT_KIND, detect_episodic_gap
 from elysia.memory.levels import (
-    CERTAINTY_CERTAIN,
     CERTAINTY_PROBABLE,
     KIND_EXPRESSION,
-    KIND_INTERACTION,
     KIND_SELF,
     LEVEL_DEEP,
-    LEVEL_SHALLOW,
     PROTECT_DEEP_ACCESS,
     RETENTION_DORMANT,
     RETENTION_DORMANT_AGE_DAYS,
@@ -49,12 +46,10 @@ from elysia.memory.levels import (
     RETENTION_FADED,
     RETENTION_PRESENT,
     SOURCE_INFERENCE,
-    SOURCE_USER,
     MemoryRecord,
 )
 from elysia.memory.promote import promote_batch
 from elysia.memory.retrieve import recall_for_feeling
-from elysia.memory.scorer import importance
 from elysia.memory.sediment import SEDIMENT_EVENT_KIND, PatternSignal, find_candidate
 from elysia.memory.sleep import synthesize_dream
 from elysia.memory.supersede import find_superseded
@@ -63,7 +58,7 @@ from elysia.soul.away_life import AwayLife
 from elysia.soul.boundary import STATE_PRESSURE_WORDS, BoundaryDecision, BoundaryKeeper
 from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
-from elysia.soul.dialogue import record_user_message
+from elysia.soul.dialogue import record_user_message, seal_pending
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
 from elysia.soul.expression import RESTRAINT_INTENT, ReplyDecision
 from elysia.soul.expression_service import ExpressionService
@@ -285,6 +280,11 @@ class SoulHeartbeat:
         ｜ D 离线生活 + 做梦 ｜ E 表达派发 + 结果落库 ｜ F 边界/关系/维护
         """
         self._running = True
+        # S1b：进程重启时把**未封存的那次交换**直接封存（幂等；失败只记日志，不挡心跳）
+        try:
+            await seal_pending(self._heartbeat_store, self._state_store, self._clock.now())
+        except Exception:
+            self._stage_failed("startup:seal_exchange")
         while self._running:
             self._heartbeat_seq += 1
             now = self._clock.now()
@@ -555,43 +555,16 @@ class SoulHeartbeat:
                 self._pending_social_pulse = False
                 await self._settle_social_pulse(restraint=restraint_this_turn)
 
-            # ── 阶段 F（记忆）：用户输入 → 一次经历写入记忆（无论是否开口）──
+            # ── 阶段 F（记忆）：S1b 起**不再逐条镜像用户消息**──────────
+            # 一次交换 = 一条 `kind='exchange'` 记忆，在"下一条用户消息到来时"封存
+            # （见 `_sync_body_status` 的 seal_pending 与启动时的封存）；这里只做清理。
+            # 历史 130 条 interaction 记忆不动（仍可追溯）。
             try:
-                if (
-                    self._expression is not None
-                    and not frozen
-                    and brain_output is not None
-                    and self._pending_user_message
-                ):
-                    msg = self._pending_user_message
-                    feelings = brain_output.feelings.to_dict()
-                    # 重要性按内容信号评估（不再是固定值）：闲聊留浅层，事实才沉淀
-                    new_id = await self._heartbeat_store.add_memory(
-                        now,
-                        {
-                            "level": LEVEL_SHALLOW,
-                            "kind": KIND_INTERACTION,
-                            "content": msg,
-                            "emotion_vector": feelings,
-                            "importance": importance(
-                                kind=KIND_INTERACTION,
-                                emotion_vector=feelings,
-                                content=msg,
-                                user_related=True,
-                            ),
-                            "protected": False,
-                            "narrative": msg,
-                            # P3-T 来源标注：这是用户告知，不是她自己的话
-                            "source": SOURCE_USER,
-                            "certainty": CERTAINTY_CERTAIN,
-                        },
-                    )
-                    # 修正/覆盖：同话题的新事实取代旧事实（准确率保障）
-                    await self._supersede_conflicts(new_id, msg, now)
+                if self._pending_user_message:
                     self._pending_user_message = None
                     self._boundary_decision = None  # 这句话处理完了，边界判定随之清空
             except Exception:
-                self._stage_failed("F:memory_write")
+                self._stage_failed("F:memory_write_cleanup")
 
             # ── 阶段 F（维护）：记忆生命周期晋升（浅层→工作→深层）──────
             try:
@@ -967,6 +940,8 @@ class SoulHeartbeat:
                 # `record_user_message` 内部吞异常并记日志）。这是"接得上话"的起点。
                 # 注意：这条**不依赖** brain_loop 是否存在——对话归档是基础设施。
                 if self._pending_user_message is not None:
+                    # S1b：新消息到来 = 上一次交换结束 ⇒ 先封存上一条（幂等）
+                    await seal_pending(self._heartbeat_store, self._state_store, now)
                     await record_user_message(
                         self._heartbeat_store, now, self._pending_user_message
                     )

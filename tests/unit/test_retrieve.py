@@ -363,10 +363,15 @@ def test_cluster_boost_can_lift_a_representative() -> None:
 
 # ── 时间锚点（她能分辨新旧、说得出"你上个月告诉我的"）──────
 def test_age_phrase_buckets() -> None:
-    """相对时间分档：刚刚 / 今天 / 昨天 / N天前 / 上个月 / N个月前 / 去年 / N年前。"""
+    """相对时间分档（S1b ④）：刚刚(≤10min) / 不久前(≤2h) / 今天 / 昨天 / N天前 / …"""
     assert age_phrase(None) == ""  # 没给时间参考 → 不提时间
     assert age_phrase(0.0) == "刚刚"
-    assert age_phrase(1.0 / 24.0 - 1e-6) == "刚刚"  # 一小时内
+    assert age_phrase(10.0 / 1440.0 - 1e-9) == "刚刚"
+    # 52 分钟前不能说「刚刚」（延迟回声就是从这里长出来的）——如实说「不久前」
+    assert age_phrase(52.0 / 1440.0) == "不久前"
+    assert age_phrase(1.0 / 24.0 - 1e-6) == "不久前"  # 约 1 小时
+    assert age_phrase(2.0 / 24.0) == "不久前"
+    assert age_phrase(2.0 / 24.0 + 1e-6) == "今天"
     assert age_phrase(0.5) == "今天"
     assert age_phrase(1.0) == "昨天"
     assert age_phrase(1.9) == "昨天"
@@ -390,7 +395,7 @@ def test_select_hooks_carries_relative_time_anchor() -> None:
     ]
     hooks = select_hooks(recs, {"chat": 0.5}, now=now)
     labels = {h.memory_id: h.label for h in hooks}
-    assert labels[1] == "（刚刚）刚发生的事"
+    assert labels[1] == "（不久前）刚发生的事"
     assert labels[2] == "（3天前）三天前的事"
 
 
@@ -542,12 +547,12 @@ async def test_retrieve_touches_access_count(tmp_path: Path) -> None:
             "narrative": "昨天的经历",
         },
     )
-    hooks = await retrieve_from_store(store, {"chat": 1.0}, now=10.0)
+    hooks = await retrieve_from_store(store, {"chat": 1.0}, now=1000.0)
     rec = await store.get_memory(mid)
     assert hooks  # 有命中
     assert rec is not None
     assert rec["access_count"] == 1  # 命中一次 → 计数 +1
-    assert rec["last_access_ts"] == 10.0
+    assert rec["last_access_ts"] == 1000.0
     await store.close()
 
 
@@ -596,11 +601,11 @@ async def test_retrieve_uses_index_strength(tmp_path: Path) -> None:
         memory_id=mid, path_key="main", strength=1.0, emotions=0.0
     )
     # 未衰减：默认可用性 1.0
-    hooks = await retrieve_from_store(store, {"chat": 1.0}, now=10.0)
+    hooks = await retrieve_from_store(store, {"chat": 1.0}, now=1000.0)
     assert hooks[0].score > 0.8
     # 索引衰减到 floor 以下：可用性被拉低
     await store.decay_memory_index([(idx_id, 0.1)])
-    hooks2 = await retrieve_from_store(store, {"chat": 1.0}, now=10.0)
+    hooks2 = await retrieve_from_store(store, {"chat": 1.0}, now=1000.0)
     assert hooks2[0].score < hooks[0].score
     await store.close()
 

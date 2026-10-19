@@ -17,6 +17,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from elysia.memory.levels import (
+    CERTAINTY_CERTAIN,
+    KIND_EXCHANGE,
+    LEVEL_SHALLOW,
+    SOURCE_USER,
+)
+from elysia.memory.scorer import importance
+
 log = logging.getLogger("elysia.soul.dialogue")
 
 # ── 注入预算（S1 细则：20 条 / 单条 200 字 / 总长 2000 字）─────────────
@@ -68,24 +76,25 @@ async def record_her_bubble(
         log.warning("写对话轮次（her）失败——不影响她说话", exc_info=True)
 
 
-async def build_dialogue_context(
+async def recent_dialogue_window(
     store: Any,
     *,
     now: float,
     limit: int = MAX_CONTEXT_TURNS,
-) -> list[dict[str, Any]]:
-    """最近 `limit` 条轮次（时间升序）→ `[{"role","text","age_s"}]`。
+) -> tuple[list[dict[str, Any]], float | None]:
+    """最近 `limit` 条轮次 → `(dialogue_context, oldest_ts)`。
 
-    - 单条 `text` 截断 `CONTEXT_TEXT_CHARS`；
-    - 整段总长 ≤ `CONTEXT_MAX_CHARS`，超了**从最旧的开始丢**（最近一条永远保留）；
-    - 读失败返回 `[]`（不影响她说话）。
+    `oldest_ts` = 真正**还在上下文里**的最旧一条轮次的 ts（按字符预算裁剪之后）；
+    上下文为空时为 None。记忆检索用它判"这条交互是不是还在正在进行的对话里"
+    （S1b ②：在上下文里 ⇒ 是"现在"，不该当记忆钩子）。
     """
     try:
         turns = await store.dialogue_turns(limit=limit)
     except Exception:
         log.warning("读对话轮次失败——本次不带 dialogue_context", exc_info=True)
-        return []
+        return [], None
     items: list[dict[str, Any]] = []
+    kept_ts: list[float] = []
     for turn in turns:
         text = str(turn.get("text") or "").strip()
         if not text:
@@ -97,6 +106,117 @@ async def build_dialogue_context(
                 "age_s": round(max(0.0, float(now) - float(turn.get("ts") or 0.0)), 1),
             }
         )
+        kept_ts.append(float(turn.get("ts") or 0.0))
     while items and sum(len(item["text"]) for item in items) > CONTEXT_MAX_CHARS:
         items.pop(0)
+        kept_ts.pop(0)
+    oldest = min(kept_ts) if kept_ts else None
+    return items, oldest
+
+
+async def build_dialogue_context(
+    store: Any,
+    *,
+    now: float,
+    limit: int = MAX_CONTEXT_TURNS,
+) -> list[dict[str, Any]]:
+    """最近 `limit` 条轮次（时间升序）→ `[{"role","text","age_s"}]`。
+
+    等价于 `recent_dialogue_window` 的第一项；保留给只需要上下文的调用方。
+    """
+    items, _oldest = await recent_dialogue_window(store, now=now, limit=limit)
     return items
+
+
+# ── S1b ③：一次交换 = 一条 `kind='exchange'` 记忆 ─────────────────
+# 不再把用户每条消息逐条镜像成 `kind='interaction'`（"一定"这种碎片不该单独成记忆）；
+# 交换在"下一条用户消息到来时"封存，进程重启时把未封存的直接封存。
+EXCHANGE_TEXT_CHARS = 120
+SEALED_EXCHANGE_KEY = "dialogue_sealed_exchange_id"
+
+
+def build_exchange_text(turns: list[dict[str, Any]]) -> tuple[str, dict[str, float]]:
+    """把一次交换的轮次压成一条事件记忆的正文 + 她当时的感受（纯函数，可单测）。
+
+    形如：`你："<原话截断120字>"／我（当时 miss=0.33）："<她的回复截断120字>"`。
+    """
+    user_text = " ".join(
+        str(turn.get("text") or "").strip() for turn in turns if turn.get("role") == ROLE_USER
+    ).strip()
+    her_text = " ".join(
+        str(turn.get("text") or "").strip() for turn in turns if turn.get("role") == ROLE_HER
+    ).strip()
+    her_turns = [turn for turn in turns if turn.get("role") == ROLE_HER]
+    emotion: dict[str, float] = {}
+    for turn in reversed(her_turns):
+        payload = turn.get("emotion_vector") or {}
+        if payload:
+            emotion = {str(k): float(v) for k, v in payload.items() if isinstance(v, (int, float))}
+            break
+    miss = float(emotion.get("miss", 0.0))
+    content = (
+        f'你："{user_text[:EXCHANGE_TEXT_CHARS]}"／'
+        f'我（当时 miss={miss:.2f}）："{her_text[:EXCHANGE_TEXT_CHARS]}"'
+    )
+    return content, emotion
+
+
+async def seal_exchange(
+    store: Any,
+    state_store: Any,
+    exchange_id: int,
+    *,
+    now: float,
+) -> int | None:
+    """封存一次交换为一条记忆（幂等：同一 exchange_id 只写一次）。返回记忆 id。
+
+    只由 **下一条用户消息到来 / 进程重启** 触发（确定性、可测）。
+    没有用户轮次的交换不算"交换"（纯独白不进记忆）；写失败向上抛，由 `seal_pending` 兜。
+    """
+    exchange_id = int(exchange_id)
+    if exchange_id <= 0:
+        return None
+    sealed = int(await state_store.load_json(SEALED_EXCHANGE_KEY, 0) or 0)
+    if exchange_id <= sealed:
+        return None
+    turns = [
+        t for t in await store.dialogue_turns() if int(t.get("exchange_id") or 0) == exchange_id
+    ]
+    if not turns:
+        await state_store.save_json(SEALED_EXCHANGE_KEY, exchange_id)
+        return None
+    if not any(t.get("role") == ROLE_USER for t in turns):
+        await state_store.save_json(SEALED_EXCHANGE_KEY, exchange_id)
+        return None
+    content, emotion = build_exchange_text(turns)
+    memory_id = await store.add_memory(
+        now,
+        {
+            "level": LEVEL_SHALLOW,
+            "kind": KIND_EXCHANGE,
+            "content": content,
+            "emotion_vector": emotion,
+            "importance": importance(
+                kind=KIND_EXCHANGE,
+                emotion_vector=emotion,
+                content=content,
+                user_related=True,
+            ),
+            "protected": False,
+            "narrative": content,
+            "source": SOURCE_USER,
+            "certainty": CERTAINTY_CERTAIN,
+        },
+    )
+    await state_store.save_json(SEALED_EXCHANGE_KEY, exchange_id)
+    return int(memory_id)
+
+
+async def seal_pending(store: Any, state_store: Any, now: float) -> int | None:
+    """封存当前**未封存**的那次交换（重启/新消息时调用；任何失败只记日志，不抛）。"""
+    try:
+        current = int(await store.max_exchange_id())
+        return await seal_exchange(store, state_store, current, now=now)
+    except Exception:
+        log.warning("封存交换失败——不影响她说话", exc_info=True)
+        return None

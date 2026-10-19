@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 from elysia.memory.levels import (
+    KIND_EXCHANGE,
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_INTERNAL,
@@ -30,6 +31,7 @@ from elysia.memory.levels import (
 # 各类型基础权重（用户参与度越高权重越大）
 _KIND_BASE: dict[str, float] = {
     KIND_INTERACTION: 0.20,  # 与用户交互
+    KIND_EXCHANGE: 0.20,  # 一次完整交换（S1b）：与 interaction 同权重口径
     KIND_EXPRESSION: 0.15,  # 她说出口的话
     KIND_INTERNAL: 0.10,  # 独处念头
     KIND_STATE: 0.10,  # 普通状态

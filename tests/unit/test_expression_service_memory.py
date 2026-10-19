@@ -327,7 +327,8 @@ async def test_recall_pushes_feeling_not_words(store: HeartbeatStore) -> None:
 
         llm = FakeToolLLM(call_recall=True)
         svc = ExpressionService(llm, store, retriever=retrieve_from_store, on_recall=_on_recall)
-        await svc.tick(_make_output(), now=2.0, force=True)
+        # S1b ②：用真实量级的时间——1.0s 的"记忆"在 now=2.0 下会被判为"最近交互"而跳过
+        await svc.tick(_make_output(), now=10_000.0, force=True)
         assert desire.state.tr > tr_before
         assert desire.state.cs > cs_before
     finally:

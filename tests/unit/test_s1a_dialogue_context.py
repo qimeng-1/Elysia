@@ -295,6 +295,71 @@ async def test_heartbeat_records_user_turn_from_interaction_kv(tmp_path: Path) -
         await heartbeat_store.close()
 
 
+# ── 补：一条消息只记一次 turn；无 brain_loop 也照记 ──────────
+@pytest.mark.asyncio
+async def test_same_interaction_is_recorded_exactly_once(tmp_path: Path) -> None:
+    """同一 ts 的 interaction 被多拍读到也只能记一条 turn（不许双写）。"""
+    from elysia.core.clock import SimulatedClock
+    from elysia.core.mode import ModeManager
+    from elysia.core.state_store import StateStore
+    from elysia.core.timesense import TimeSense
+    from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state
+
+    state = StateStore(tmp_path / "state.db")
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await state.start()
+    await store.start()
+    clock = SimulatedClock(start_ts=T0, speed=1.0)
+    soul = SoulHeartbeat(
+        state_store=state,
+        heartbeat_store=store,
+        timesense=TimeSense(make_soul_state(T0), clock),
+        mode_mgr=ModeManager(clock=clock),
+        clock=clock,
+    )
+    try:
+        await state.save_json("interaction", {"ts": T0 + 5, "text": "只此一条"})
+        await soul._sync_body_status(T0 + 6)
+        await soul._sync_body_status(T0 + 7)  # 同一 interaction 再读一拍
+        turns = await store.dialogue_turns()
+        assert [t["text"] for t in turns] == ["只此一条"], f"重复写入：{turns}"
+    finally:
+        await state.close()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_no_brain_loop_records_turn_but_no_social_pulse(tmp_path: Path) -> None:
+    """行为分界：无 brain_loop 的装置 → 对话轮次照记、社会脉冲不触发。"""
+    from elysia.core.clock import SimulatedClock
+    from elysia.core.mode import ModeManager
+    from elysia.core.state_store import StateStore
+    from elysia.core.timesense import TimeSense
+    from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state
+
+    state = StateStore(tmp_path / "state.db")
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await state.start()
+    await store.start()
+    clock = SimulatedClock(start_ts=T0, speed=1.0)
+    soul = SoulHeartbeat(
+        state_store=state,
+        heartbeat_store=store,
+        timesense=TimeSense(make_soul_state(T0), clock),
+        mode_mgr=ModeManager(clock=clock),
+        clock=clock,
+        brain_loop=None,
+    )
+    try:
+        await state.save_json("interaction", {"ts": T0 + 5, "text": "你在吗"})
+        await soul._sync_body_status(T0 + 6)
+        assert len(await store.dialogue_turns()) == 1, "无 brain_loop 也必须记对话轮次"
+        assert soul._pending_social_pulse is False, "没有 brain_loop 时不该触发社会脉冲"
+    finally:
+        await state.close()
+        await store.close()
+
+
 # ── 写失败不得影响她说话 ─────────────────────────────────────
 @pytest.mark.asyncio
 async def test_write_failure_does_not_break_speaking(tmp_path: Path) -> None:

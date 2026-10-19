@@ -48,6 +48,7 @@ from elysia.memory.levels import (
     CERTAINTY_SPECULATIVE,
     CLAIM_REJECTED,
     KIND_EXPRESSION,
+    KIND_INTERACTION,
     KIND_SELF,
     LEVEL_DEEP,
     LEVEL_WORKING,
@@ -73,6 +74,10 @@ FUZZY_DETAIL_THRESHOLD = 0.7
 # 单次回忆的等待上限（毫秒）：衰减曲线本身随年龄继续增长，这里只做体验兜底，
 # 防止极老的记忆把一次开口拖得过久（上限内仍然"越旧越慢"）。
 RECALL_LATENCY_CAP_MS = 2500.0
+
+# S1b ②：最近交互不进 hooks 的窗口（秒）。"你 50 分钟前说的话"不该被当记忆钩子回喂
+# ⇒ 延迟回声。必须与 S1a 的对话上下文同批上线（否则会抽走她仅有的短期上下文）。
+DIALOGUE_RECALL_GUARD_S = 900.0
 
 # ── 来源闸门（P3-T）：程序推断/系统注入不是"她的记忆"，不进她的话 ──
 # 若放行，程序的一次猜测就会被她当成自己的事实说出口——那是程序替她认定世界，
@@ -190,14 +195,20 @@ def is_related(query: str, content: str, *, loose: bool = False) -> bool:
 # 她需要能分辨新旧、说得出"你上个月告诉我的"；但不需要精确到分钟——
 # 精确时间戳不像人的记忆，相对说法才是。锚点是**能力**，用不用由她定。
 def age_phrase(age_days: float | None) -> str:
-    """把"距今多少天"翻成人话：刚刚 / 今天 / 昨天 / N天前 / 上个月 / N个月前 / 去年 / N年前。
+    """把"距今多少天"翻成人话（S1b ④ 档位修正）。
+
+    ≤10 分钟：刚刚｜≤2 小时：不久前｜当天：今天｜昨天｜N天前｜上个月｜N个月前｜去年｜N年前。
+    旧版把**一小时内**都叫「刚刚」——52 分钟前的对话被标「（刚刚）」是延迟回声的一部分，
+    现在如实说「不久前」。纯展示层，不改检索得分。
 
     age_days 为 None（调用方没给 now）时返回空串 → 退化为纯叙事（不硬编时间）。
     """
     if age_days is None:
         return ""
-    if age_days < 1.0 / 24.0:  # 一小时内
+    if age_days <= 10.0 / 1440.0:  # 10 分钟内
         return "刚刚"
+    if age_days <= 2.0 / 24.0:  # 2 小时内
+        return "不久前"
     if age_days < 1.0:
         return "今天"
     if age_days < 2.0:
@@ -396,6 +407,7 @@ def select_hooks(
     now: float | None = None,
     query: str | None = None,
     query_loose: bool = False,
+    recent_dialogue_since_ts: float | None = None,
 ) -> list[MemoryHit]:
     """从候选记忆挑选要注入表达的 hooks（按得分降序）。
 
@@ -406,6 +418,9 @@ def select_hooks(
         话题撞上的记忆**——记忆被唤起才浮现，无关的话不把往事带到嘴边；
         为 None 时不做话题门槛（情绪化联想场景，由调用方决定是否使用）。
     query_loose：话题门槛宽严（见 is_related）——程序推记忆用严，她自己查用宽。
+    recent_dialogue_since_ts：她**当前对话上下文里最旧一条轮次的 ts**（S1b ②）。
+        正在进行的对话（还在最近 20 轮里）不该被当成"记忆"回喂；已经滑出上下文的
+        交互才自然变成记忆。为空时退回 `DIALOGUE_RECALL_GUARD_S` 兜底。
     返回前做**批内去重**（见 _dedupe）：措辞高度重叠的碎片只留最高分的一条；
     同簇的兄弟数（第十五节 A2）随后计入簇加分并重排，截取 max_hooks 在重排之后。
 
@@ -418,13 +433,38 @@ def select_hooks(
     由调用方落回 present）——时间造成的失去可以被"你一提"逆转。
     S0 独白闸门：她自己的独白（`kind=expression`，未 `protected`）一律不进主动
     检索——独白不是"经历"，不该被当成记忆钩子回喂；`protected` 的独白例外。
+    S1b 进行中对话闸门：`kind=interaction` 且落在当前对话窗口（或 900s 兜底窗口）
+    内、未 `protected` 的交互不进 hooks——否则是"延迟回声"。
     """
     hits: list[MemoryHit] = []
+    # S1b ②：进行中对话的判定下限（按语义实现：上下文存在时**整段长谈都算"现在"**，
+    # 900s 只是上下文为空时的兜底窗口）。
+    guard_floor: float | None
+    if now is not None:
+        fallback = now - DIALOGUE_RECALL_GUARD_S
+        guard_floor = (
+            fallback
+            if recent_dialogue_since_ts is None
+            else min(float(recent_dialogue_since_ts), fallback)
+        )
+    else:
+        guard_floor = (
+            float(recent_dialogue_since_ts) if recent_dialogue_since_ts is not None else None
+        )
     for rec in records:
         # S0（2026-10-20）：排除她自己的独白回声——hooks 用于"记起你/世界"，
         # 不应复述她自己的话（原来的"无条件排除"保留；protected 独白例外，见
         # `_is_self_talk` 与 S2「这条我想留着」）。
         if _is_self_talk(rec):
+            continue
+        # S1b ②：还在**进行中的对话**里的交互不进 hooks（延迟回声的病根）。
+        # 已滑出对话上下文的交互才自然变成"记忆"，此时不挡（它已经不该是"现在"）。
+        if (
+            rec.kind == KIND_INTERACTION
+            and not rec.protected
+            and guard_floor is not None
+            and rec.created_ts >= guard_floor
+        ):
             continue
         # 排除自我认知（第八节 S1）：hooks 是"话题撞上的背景常识"，而"我是谁"
         # 走**身份段**、每句都在场——若同时进 hooks 段，就是每句复述自己（重犯 P3-P）
@@ -533,6 +573,7 @@ async def retrieve_from_store(
     query: str | None = None,
     query_loose: bool = False,
     touch: bool = True,
+    recent_dialogue_since_ts: float | None = None,
 ) -> list[MemoryHit]:
     """从记忆存储检索几条待注入表达的记忆（异步）。
 
@@ -541,6 +582,8 @@ async def retrieve_from_store(
 
     query：当下话题（给出时只召回话题撞上的记忆，见 select_hooks）。
     query_loose：话题门槛宽严——程序推记忆用严（防违和），她自己查用宽。
+    recent_dialogue_since_ts：当前对话上下文最旧一条轮次的 ts（S1b ②）——
+        还在进行中的对话里的 interaction 不当记忆回喂；为空时用 900s 兜底。
     touch：命中是否计一次"被想起"（默认是）。静默感受路径应传 False——
         那只是心情的底色，不是"她想着这件事"，不该污染 access_count。
 
@@ -572,6 +615,7 @@ async def retrieve_from_store(
         query=query,
         query_loose=query_loose,
         index_strengths=index_strengths,
+        recent_dialogue_since_ts=recent_dialogue_since_ts,
     )
 
     # 检索命中 → 触碰记忆（访问计数递增，被想起的次数是晋升依据）

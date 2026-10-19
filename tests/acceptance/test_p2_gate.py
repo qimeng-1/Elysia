@@ -4,7 +4,7 @@
 1. 降级链测试——断 API → 微声，全程不"死"，且降级写感受层 SA
 2. 词汇表测试——虚构状态无法说出未授权生理词（越权 100% 拦截）
 3. 表达服务集成——表达指令 → LLM → 校验 → 落库（thought_log + expression_log）
-4. 触发节流——外部交互强制开口；内部冲动按双模态节流
+4. 触发节流——外部交互强制开口；内部冲动按意愿连续映射节流（W2 起不再有固定档）
 5. TTS 熔断——高 VRAM 时只输出文本不阻塞
 """
 
@@ -225,12 +225,18 @@ async def test_internal_impulse_throttled(tmp_path: Path) -> None:
         chain = LLMChain(main=_FixedTextBackend("嗯嗯"), fallback=None)
         svc = ExpressionService(chain, store)
 
+        # W2：间隔由她的状态**连续**映射（60–1800s），不再是 180/600 两档常量。
+        # 用例只钉"节流语义"：不到间隔不开口、到了就开口——具体秒数由映射自己算。
+        output = _brain_output(action="think_quiet")
+        interval = svc.rhythm_interval_s(output, now=T0)
+        assert 60.0 <= interval <= 1800.0
+
         # 第一次内部冲动：开口
-        first = await svc.tick(_brain_output(action="think_quiet"), now=T0)
-        # 600s 内再次内部冲动：节流不开口
-        second = await svc.tick(_brain_output(action="think_quiet"), now=T0 + 100)
+        first = await svc.tick(output, now=T0)
+        # 间隔一半时再次内部冲动：节流不开口
+        second = await svc.tick(output, now=T0 + interval * 0.5)
         # 超过间隔：重新开口
-        third = await svc.tick(_brain_output(action="think_quiet"), now=T0 + 601)
+        third = await svc.tick(output, now=T0 + interval + 1.0)
 
         assert first is not None
         assert second is None

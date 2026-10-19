@@ -49,6 +49,11 @@ W1（2026-10-19，罐装句改造）：LLM 链路降到微声时**同 prompt 再
 服务维护的进程内环形缓冲（`_recent_micro`）保证连续两条不同。失败原因归成固定代码
 （`llm_timeout` / `llm_http` / `llm_empty` / `validate_word_block` / `retry_exhausted`）
 写进 `expression_log.validation.reason`，原始原因进 `validation.degrade_detail`。
+
+W2（2026-10-19，说话节奏）：`should_speak` 不再用 `180s / 600s` 二选一常量，而是把她的
+真实维度（chat/miss/explore/rest/thought_style/关系退缩）连续算成"意愿"，几何映射到
+60–1800s，并对意愿做 τ=60s 的一阶平滑（压掉逐拍抖动、无方向偏置）。`force` 与
+`greeting` 两条立即开口的路径、队列满丢弃语义都保持不变。
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -126,9 +132,40 @@ FORGET_DOMINANCE = 2.0
 # 即可。并列/模糊时宁可如实回"没找到"，也不抓错——认错了她还能用 `disclaim` 收回。
 ADOPT_DOMINANCE = 2.0
 
-# 内部冲动表达节流：与发呆双模态同节奏（3min / 10min）
-EXPRESS_ACTIVE_INTERVAL_S = 180.0
-EXPRESS_QUIET_INTERVAL_S = 600.0
+# ── W2（说话节奏）：由意愿**连续**推导的最小开口间隔 ───────────────────
+# 旧实现是"常量 × 倍数"的节拍器：think_* 且 thought_style>0 → 180s，否则 600s，
+# 再 × 退缩倍数。她真实状态窄（chat 中位 0.642、thought_style 中位 0.08），因此
+# 开口间隔长期卡在 181–194s 的窄带（真机中位 194s）——违和感的来源。
+#
+# 现在：意愿 w ∈ [0,1] 由她的真实维度连续算出，再按**几何级数**映射到 60–1800s：
+#   interval = 60 * (1800/60)**(1-w)
+# w=0.5（常态）≈329s、w=1 → 60s、w=0 → 1800s。几何映射让"意愿每降一档、间隔乘
+# 固定倍数"，两端都不会被线性映射挤成窄带。
+#
+# 常态参考取自她自己的设定点经 FeelingMapper 的线性映射（CS 设定点 60 → chat 0.60 /
+# miss 0.40；TR 设定点 45 → explore 0.45），因此"高于常态"与"低于常态"都以她为尺。
+EXPRESS_INTERVAL_MIN_S = 60.0
+EXPRESS_INTERVAL_MAX_S = 1800.0
+RHYTHM_NEUTRAL_EXPLORE = 0.45
+RHYTHM_NEUTRAL_REST = 0.05
+# "想说话的火花线"：chat/miss 只有**明显高于常态**才算额外驱动。
+# 2026-10-19 真机 40000 拍：chat 中位 0.642 / p90 0.677，miss 中位 0.358 / p90 0.395——
+# 取 ≈p85–p90，避免把"她本来就一直偏 chat"误读成"一直很想说"（那会退回另一种节拍器）。
+RHYTHM_SPARK_CHAT = 0.65
+RHYTHM_SPARK_MISS = 0.40
+# 偏离常态多少记满一档（±0.15 约等于她真实分布的 2 个 σ；由 2026-10-19 真机标定）
+RHYTHM_SPAN = 0.15
+# 权重：各维度对"此刻多想开口"的贡献（可解释、可调，全部来自她的状态字段）
+RHYTHM_W_SOCIAL = 0.30  # 想聊/思念（高于常态的部分）
+RHYTHM_W_EXPLORE = 0.10  # 探索欲
+RHYTHM_W_STYLE = 0.40  # thought_style（负=安静，正=活跃）
+RHYTHM_W_REST = 0.10  # 歇着（难受时 rest→0.5，压低意愿）
+RHYTHM_W_RELUCTANCE = 0.35  # 关系退缩（1.0→2.0 的倍数连续折算成意愿折扣）
+# 意愿的一阶指数平滑时间常数（秒）：τ=60 时 1 分钟走完 63%、5 分钟走完 99%。
+# 用来压掉逐拍抖动；对称平滑不会有方向偏置（不会让"安静/活跃"中的哪一边占便宜）。
+RHYTHM_SMOOTH_TAU_S = 60.0
+
+# --- W1 常量（保持不变）---
 
 # ── W1（罐装句改造）：LLM 重试 + 降级留痕 ────────────────────────────
 # 整条链（主声→次声）都降到微声 = 这次开口失败了；**同 prompt 再试一次**才放弃，
@@ -205,6 +242,85 @@ def _reason_of(speak: SpeakResult) -> str | None:
     return validation.reason if validation is not None else None
 
 
+# ── W2：意愿 → 间隔（纯函数，可单测）────────────────────────────────
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _span_deviation(value: float, neutral: float, span: float = RHYTHM_SPAN) -> float:
+    """偏离常态多少（-1..1）：±span 记满档，超出截断。"""
+    return max(-1.0, min(1.0, (float(value) - neutral) / span))
+
+
+def expression_willingness(
+    *,
+    chat: float,
+    miss: float,
+    explore: float,
+    rest: float,
+    thought_style: float,
+    reluctance: float = 1.0,
+) -> float:
+    """她此刻"多想开口"（0–1，纯函数，确定性、无随机）。
+
+    输入全部是她的真实状态字段（W2 要求）：`output.feelings` 的 chat/miss/explore/rest、
+    `output.will.thought_style`、关系退缩量导出的 `reluctance`（1.0 亲近 → 2.0 退缩到底）。
+
+    设计要点（不是"看着像"）：
+    - **社交驱动是 V 形**：`想聊`（chat 越过火花线 0.65）与`思念`（miss 越过火花线
+      0.40）都是想开口的理由；两端高、正好平衡时最平静。两者各自单调（越高越想说），
+      但在真实物理里 chat+miss≈1（互补），所以合成后不会互相抵消。
+    - **活跃度**：thought_style 正 → 更愿意出声（与旧实现用 thought_style>0 判"活跃"同向，
+      但这里是连续量）；探索欲同向；rest（难受时 0.05→0.5）压低意愿。
+    - **关系退缩**：退缩越深（reluctance→2），意愿被连续折扣得越低（不是 ×2 秒数，
+      避免把 1800s 的上限顶穿）。
+    """
+    social = min(
+        1.0,
+        max(0.0, (float(chat) - RHYTHM_SPARK_CHAT) / RHYTHM_SPAN)
+        + max(0.0, (float(miss) - RHYTHM_SPARK_MISS) / RHYTHM_SPAN),
+    )
+    willingness = 0.5
+    willingness += RHYTHM_W_SOCIAL * social
+    willingness += RHYTHM_W_EXPLORE * _span_deviation(explore, RHYTHM_NEUTRAL_EXPLORE)
+    willingness += RHYTHM_W_STYLE * max(-1.0, min(1.0, float(thought_style)))
+    willingness -= RHYTHM_W_REST * max(
+        0.0, min(1.0, (float(rest) - RHYTHM_NEUTRAL_REST) / (0.5 - RHYTHM_NEUTRAL_REST))
+    )
+    willingness -= RHYTHM_W_RELUCTANCE * max(0.0, min(1.0, float(reluctance) - 1.0))
+    return _clamp01(willingness)
+
+
+def interval_from_willingness(willingness: float) -> float:
+    """意愿 → 最小开口间隔（几何映射：60s ↔ 1800s，w=0.5 ≈ 329s）。"""
+    ratio = EXPRESS_INTERVAL_MAX_S / EXPRESS_INTERVAL_MIN_S
+    return EXPRESS_INTERVAL_MIN_S * math.exp((1.0 - _clamp01(willingness)) * math.log(ratio))
+
+
+def expression_interval_s(
+    *,
+    chat: float,
+    miss: float,
+    explore: float,
+    rest: float,
+    thought_style: float,
+    reluctance: float = 1.0,
+) -> float:
+    """纯函数版：状态 → 间隔（不做平滑，供审计与单测）；运行时走 `rhythm_interval_s`。"""
+    return interval_from_willingness(
+        expression_willingness(
+            chat=chat,
+            miss=miss,
+            explore=explore,
+            rest=rest,
+            thought_style=thought_style,
+            reluctance=reluctance,
+        )
+    )
+
+
 async def ensure_identity_seeds(store: HeartbeatStore, now: float) -> int:
     """幂等种入身份种子（第八节 S5）：出生设定 + 边界的**过渡**脚手架。
 
@@ -277,6 +393,10 @@ class ExpressionService:
         # W1：最近说出口的微声句子（进程内环形缓冲）——`pick_variant` 用它做连续去重。
         # 不落库、不新增表：它是"这一两分钟里她刚说过什么"的运行时上下文，不是档案。
         self._recent_micro: deque[str] = deque(maxlen=RECENT_MICRO_MAX)
+        # W2：意愿平滑器（一阶 EMA）——`_rhythm_w` 是平滑后的意愿，`_rhythm_ts` 是上次更新时刻。
+        # 初值 None = 第一次判定时直接采用当时的状态（重启后不会带着旧节奏爬起来）。
+        self._rhythm_w: float | None = None
+        self._rhythm_ts: float | None = None
         # 降级 SA 增量（由 DesireSystem 消费方注入 on_degrade 时生效）
         self.llm_degrade_sa_delta = llm_degrade_sa_delta
         self.tts_degrade_sa_delta = tts_degrade_sa_delta
@@ -284,6 +404,46 @@ class ExpressionService:
     @property
     def last_express_ts(self) -> float | None:
         return self._last_express_ts
+
+    def rhythm_interval_s(
+        self,
+        output: BrainOutput,
+        now: float,
+        *,
+        reluctance: float = 1.0,
+    ) -> float:
+        """她此刻的**最小开口间隔**（W2：意愿连续映射 + 一阶 EMA 平滑）。
+
+        由心跳每拍调用一次（廉价、非阻塞、O(1)）：算出当前意愿 → 与上一拍的平滑值
+        按真实经过时长做指数平滑 → 几何映射到 60–1800s。
+
+        为什么用 EMA（而不是迟滞阈值）：旧实现的抖动源是"180/600 二选一"的**阈值**
+        本身；改成连续映射后，状态的小幅抖动只带来间隔的小幅变化。再叠一层 τ=60s 的
+        一阶平滑，把 `thought_style` 这类逐拍变量的噪声压掉，同时保留分钟级的真实起伏
+        （τ=60 时 1 分钟走完 63%、5 分钟走完 99%）。选 EMA 而非二值迟滞，是因为它
+        **没有方向偏置**：不会让"变安静"比"变活跃"更容易（迟滞会留下状态记忆）。
+
+        `dt` 取真实经过时长（心跳 1Hz 时≈1s；停机后重启的第一拍 dt 很大 ⇒ 直接采用
+        当前状态，不会用几小时前的旧节奏慢慢爬）。
+        """
+        raw = expression_willingness(
+            chat=output.feelings.chat,
+            miss=output.feelings.miss,
+            explore=output.feelings.explore,
+            rest=output.feelings.rest,
+            thought_style=output.will.thought_style,
+            reluctance=reluctance,
+        )
+        if self._rhythm_w is None:
+            self._rhythm_w = raw
+        else:
+            last = self._rhythm_ts if self._rhythm_ts is not None else now
+            dt = max(0.0, min(float(now) - last, 3600.0))
+            if dt > 0.0:
+                alpha = 1.0 - math.exp(-dt / RHYTHM_SMOOTH_TAU_S)
+                self._rhythm_w += (raw - self._rhythm_w) * alpha
+        self._rhythm_ts = float(now)
+        return interval_from_willingness(self._rhythm_w)
 
     def should_speak(
         self,
@@ -294,35 +454,36 @@ class ExpressionService:
         greeting: bool = False,
         reluctance: float = 1.0,
     ) -> bool:
-        """触发判断（20.6 的 1.3）：外部交互立即开口；内部冲动按双模态节流。
+        """触发判断（20.6 的 1.3）：外部交互立即开口；内部冲动按**意愿连续驱动**的间隔。
 
         由**心跳拍**调用（廉价、非阻塞）——「谁决定开口」因此仍在生命循环里，
         worker 只管执行，不判断该不该说。
+
+        W2（2026-10-19）：间隔不再由 `brain_action + thought_style>0` 二选一常量决定，
+        而是 `rhythm_interval_s` 给出的连续值（60–1800s）。旧实现的两个问题——
+        「想不想说」只有两档、以及阈值本身造成窄带节拍——都随之消失。
 
         `greeting`（阶段 5 第七批）：她**刚从"不在场"回到"在场"**——这一声问候
         **越过节流**（刚回来值得说一句）；但仍按内部冲动的入队语义走
         （队列满时可被丢＝"她这次决定不说"）。
 
-        `reluctance`（P4b 关系涌现）：退缩量导出的**间隔倍数**（1.0 → 2.0）。
-        关系不好时她不会突然不说话，而是**越来越少主动开口**——这是可测量的
-        表达变化（T1），也是"关系从状态里长出来"的出口。用户主动说话（`force`）
-        与问候不受它影响：**她对关系的退缩，不等于对你不理不睬**。
+        `reluctance`（P4b 关系涌现）：退缩量导出的倍数（1.0 → 2.0）。W2 起它不再是
+        "把秒数乘 2"，而是折成**意愿折扣**参与同一条连续映射——退缩越深，间隔越长，
+        但不会越过 1800s 的上限。用户主动说话（`force`）与问候不受它影响：
+        **她对关系的退缩，不等于对你不理不睬**。这两条路径 W2 前后语义完全不变。
 
         判定为真即**记下开口时刻**（节流基线），不等 worker 真的说出口：提交被队列
         丢弃时也照样推进——丢弃＝「她这次决定不说」（D1），若等到执行成功才推进，
         同一句话会在队列满的每一拍被重新判定、反复丢弃。
         """
+        # 先推进节奏（force/greeting 也推进）：她的状态在这两种路径上同样真实变化，
+        # 下一拍的内部间隔应当接着当前状态走，而不是停在上次内部冲动时的旧值。
+        interval = self.rhythm_interval_s(output, now, reluctance=reluctance)
         if force or greeting:
             # P0-R19（b 方案）：收到你的话她**总会开口**——要么回应，要么说明
             # "现在不太想说话"；到底哪种由 `decide_reply` 决定（确定性、落 reason）。
             self._last_express_ts = now
             return True
-        interval = (
-            EXPRESS_ACTIVE_INTERVAL_S
-            if output.action in ("think_active", "think_quiet") and output.will.thought_style > 0
-            else EXPRESS_QUIET_INTERVAL_S
-        )
-        interval *= max(1.0, reluctance)
         if self._last_express_ts is not None and now - self._last_express_ts < interval:
             return False
         self._last_express_ts = now

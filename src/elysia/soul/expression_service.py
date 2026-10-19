@@ -109,6 +109,7 @@ from elysia.soul.expression_types import (
     ExpressionResult,
     make_job_id,
 )
+from elysia.soul.tools.keep_moment import MomentKeeper
 from elysia.soul.tools.read_url import ReadResult, read_url
 from elysia.soul.tools.writing import WritingError, WritingWorkspace
 from elysia.tts.chain import TTSChain, TTSRequest
@@ -386,6 +387,7 @@ class ExpressionService:
         on_recall: Callable[[float], Awaitable[None]] | None = None,
         url_reader: ReadUrlFn | None = None,
         writing_workspace: WritingWorkspace | None = None,
+        moment_keeper: MomentKeeper | None = None,
     ) -> None:
         self._llm = llm_chain
         self._store = heartbeat_store
@@ -397,6 +399,10 @@ class ExpressionService:
         self._read_url: ReadUrlFn = url_reader if url_reader is not None else read_url
         self._writing: WritingWorkspace = (
             writing_workspace if writing_workspace is not None else WritingWorkspace()
+        )
+        # S2：她的"这条我想留着"（默认直接在 heartbeat 库上工作；单测可注入假时钟/上限）
+        self._moment_keeper: MomentKeeper = (
+            moment_keeper if moment_keeper is not None else MomentKeeper(self._store)
         )
         # 记忆被唤起 → 感受回路（只推心情，不进入话语）
         self._on_recall = on_recall
@@ -930,6 +936,8 @@ class ExpressionService:
           **读不到就明确回"读不到"**，外部文本按数据返回、不当指令
         - `write_note`（W3）：把这段经历写进她自己的 `data/her_writing/`
           （**她的动作**：写不写由她决定，程序只保证路径/容量安全）
+        - `keep_this_moment`（S2）：把**最近一次交换**定格成她自己的重要记忆
+          （**她的动作**：必须给出她的理由；程序只保证上限与生效）
         """
 
         async def _run(name: str, args: dict[str, Any]) -> str:
@@ -952,9 +960,15 @@ class ExpressionService:
                     str(args.get("text") or ""),
                     str(raw_filename) if raw_filename else None,
                 )
+            if name == "keep_this_moment":
+                return await self._tool_keep_this_moment(str(args.get("reason") or ""))
             return ""
 
         return _run
+
+    async def _tool_keep_this_moment(self, reason: str) -> str:
+        """S2：她留住最近一次交换。任何失败都返回明确原因（不抛给表达链路）。"""
+        return await self._moment_keeper.keep_this_moment(reason)
 
     async def _tool_read_url(self, url: str) -> str:
         """只读外部资料（W3）：网络/落盘都在线程里跑，不阻塞事件循环。

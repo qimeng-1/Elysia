@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS dialogue_turns (
     intent         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_dialogue_turns_ts ON dialogue_turns (ts);
+CREATE TABLE IF NOT EXISTS kept_moments (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        REAL NOT NULL,
+    memory_id INTEGER NOT NULL,
+    reason    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kept_moments_memory ON kept_moments (memory_id);
+CREATE INDEX IF NOT EXISTS idx_kept_moments_ts ON kept_moments (ts);
 CREATE TABLE IF NOT EXISTS memories (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     created_ts     REAL NOT NULL,
@@ -102,7 +110,8 @@ CREATE TABLE IF NOT EXISTS memories (
     source         TEXT NOT NULL DEFAULT '{FALLBACK_SOURCE}',
     certainty      TEXT NOT NULL DEFAULT '{FALLBACK_CERTAINTY}',
     claim_status   TEXT NOT NULL DEFAULT '{FALLBACK_CLAIM}',
-    retention_state TEXT NOT NULL DEFAULT '{FALLBACK_RETENTION}'
+    retention_state TEXT NOT NULL DEFAULT '{FALLBACK_RETENTION}',
+    keep_reason    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_memories_level ON memories (level);
@@ -350,6 +359,8 @@ class HeartbeatStore(_AsyncSQLite):
                 "ALTER TABLE memories ADD COLUMN certainty TEXT",
                 "ALTER TABLE memories ADD COLUMN claim_status TEXT",
                 "ALTER TABLE memories ADD COLUMN retention_state TEXT",
+                # S2（她的"这条我想留着"）：她给出的理由，旧行 NULL
+                "ALTER TABLE memories ADD COLUMN keep_reason TEXT",
                 # 旧数据回填（P3-T）：按 kind 推导；只填 NULL，幂等
                 _backfill_sql("source", SOURCE_BY_KIND, FALLBACK_SOURCE),
                 _backfill_sql("certainty", CERTAINTY_BY_KIND, FALLBACK_CERTAINTY),
@@ -382,6 +393,8 @@ class HeartbeatStore(_AsyncSQLite):
             "certainty": row[14],
             "claim_status": row[15],
             "retention_state": row[16],
+            # S2：她留住这条记忆时给的理由（旧行为 NULL）
+            "keep_reason": row[17] if len(row) > 17 else None,
         }
 
     async def append(self, ts: float, beat_type: str, payload: dict[str, Any]) -> None:
@@ -491,6 +504,50 @@ class HeartbeatStore(_AsyncSQLite):
                 }
             )
         return out
+
+    async def latest_memory(self, kind: str) -> dict[str, Any] | None:
+        """最近一条指定 kind 的记忆（S2："最近一条已封存的 exchange"）。"""
+        rows = await self.execute_raw(
+            "SELECT * FROM memories WHERE kind = ? ORDER BY id DESC LIMIT 1", (kind,)
+        )
+        return self._memory_row_to_dict(rows[0]) if rows else None
+
+    async def keep_moment(
+        self,
+        memory_id: int,
+        reason: str,
+        *,
+        now: float,
+        importance_floor: float,
+    ) -> bool:
+        """把一条记忆标记为"她留住的"（S2）；返回是否**首次**留住（幂等）。
+
+        原子生效：`protected=1`、`level='deep'`、`importance=max(旧值, floor)`、
+        `keep_reason=理由`，并记一行 `kept_moments`（memory_id 唯一 ⇒ 重复留不计数，
+        也用于"当天已留几条"的跨重启统计）。
+        """
+
+        def _keep(conn: sqlite3.Connection) -> bool:
+            conn.execute(
+                "UPDATE memories SET protected = 1, level = 'deep',"
+                " importance = MAX(importance, ?), keep_reason = ? WHERE id = ?",
+                (float(importance_floor), reason, int(memory_id)),
+            )
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO kept_moments (ts, memory_id, reason) VALUES (?, ?, ?)",
+                (float(now), int(memory_id), reason),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+        return bool(await self.submit_ret(_keep))
+
+    async def kept_moment_count_since(self, since_ts: float) -> int:
+        """`since_ts` 之后她留住的数量（本地日界统计用，S2 上限）。"""
+        rows = await self.execute_raw(
+            "SELECT COUNT(*) FROM kept_moments WHERE ts >= ?", (float(since_ts),)
+        )
+        return int(rows[0][0]) if rows else 0
 
     async def expression(
         self,

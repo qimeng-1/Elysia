@@ -47,6 +47,7 @@ from elysia.memory.decay import retrieve_latency_ms
 from elysia.memory.levels import (
     CERTAINTY_SPECULATIVE,
     CLAIM_REJECTED,
+    KIND_EXCHANGE,
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_SELF,
@@ -433,8 +434,9 @@ def select_hooks(
     由调用方落回 present）——时间造成的失去可以被"你一提"逆转。
     S0 独白闸门：她自己的独白（`kind=expression`，未 `protected`）一律不进主动
     检索——独白不是"经历"，不该被当成记忆钩子回喂；`protected` 的独白例外。
-    S1b 进行中对话闸门：`kind=interaction` 且落在当前对话窗口（或 900s 兜底窗口）
-    内、未 `protected` 的交互不进 hooks——否则是"延迟回声"。
+    S1b 进行中对话闸门：`kind=interaction / exchange` 且落在当前对话窗口（或 900s
+    兜底窗口）内、未 `protected` 的不进 hooks——否则是"延迟回声"。
+    S2 联动：她亲手留住的记忆 `protected=1`，**绕过**上面这道闸（否则"留住"看不见）。
     """
     hits: list[MemoryHit] = []
     # S1b ②：进行中对话的判定下限（按语义实现：上下文存在时**整段长谈都算"现在"**，
@@ -457,10 +459,11 @@ def select_hooks(
         # `_is_self_talk` 与 S2「这条我想留着」）。
         if _is_self_talk(rec):
             continue
-        # S1b ②：还在**进行中的对话**里的交互不进 hooks（延迟回声的病根）。
-        # 已滑出对话上下文的交互才自然变成"记忆"，此时不挡（它已经不该是"现在"）。
+        # S1b ② + S2 联动：还在**进行中的对话**里的交互/交换不进 hooks（延迟回声的病根）。
+        # 已滑出对话上下文的才自然变成"记忆"，此时不挡；
+        # `protected`（她亲手"留住"的，S2）永远绕过这道闸——否则"她留住"看不见。
         if (
-            rec.kind == KIND_INTERACTION
+            rec.kind in (KIND_INTERACTION, KIND_EXCHANGE)
             and not rec.protected
             and guard_floor is not None
             and rec.created_ts >= guard_floor

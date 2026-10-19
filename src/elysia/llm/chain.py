@@ -240,6 +240,32 @@ WRITE_NOTE_TOOL: dict[str, Any] = {
     },
 }
 
+# 她的"这条我想留着"（S2）：把**最近一次交换**定格成她自己的重要记忆。
+# 必须给出她自己的理由（1–120 字）——这是"她给权重"与"程序标重要"的根本区别；
+# 上限 13 次/天（实现见 `soul/tools/keep_moment.py`，常量可配）。
+KEEP_THIS_MOMENT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "keep_this_moment",
+        "description": (
+            "把最近一次已经结束的对话（交换）留作你很重要的记忆。"
+            "必须给出**你自己的理由**（1–120 字）：为什么这一次值得留下。"
+            "留住后它会成为受保护的深层记忆，以后还能被你想起来。"
+            "每天最多 13 次——不是每件事都要留下，只留真正想留的。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "你留住它的理由（一句话，1–120 字）",
+                }
+            },
+            "required": ["reason"],
+        },
+    },
+}
+
 
 @dataclass
 class SpeakResult:
@@ -290,7 +316,7 @@ class LLMChain:
                 await self._on_degrade(reason)
 
     async def _main_speak(self, instruction: dict[str, Any]) -> str | None:
-        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的七个工具。"""
+        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的八个工具。"""
         main = self._main
         if main is None:
             return None
@@ -306,6 +332,7 @@ class LLMChain:
                     RESTORE_TOOL,
                     READ_URL_TOOL,
                     WRITE_NOTE_TOOL,
+                    KEEP_THIS_MOMENT_TOOL,
                 ],
                 run_tool=self._tool_runner,
             )

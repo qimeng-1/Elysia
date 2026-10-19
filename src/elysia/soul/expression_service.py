@@ -43,6 +43,12 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起）+ `restore`�
   （D2：单一事实源＝心跳）。
 
 `tick` 是三者的**同步一站式**，只供离线探针与单测使用；运行时走上面三步（心跳 → worker）。
+
+W1（2026-10-19，罐装句改造）：LLM 链路降到微声时**同 prompt 再试一次**，仍失败才用
+微声；微声由 `llm/micro.py` 的 `pick_variant` **按她的真实感受维度分档选句**，并用本
+服务维护的进程内环形缓冲（`_recent_micro`）保证连续两条不同。失败原因归成固定代码
+（`llm_timeout` / `llm_http` / `llm_empty` / `validate_word_block` / `retry_exhausted`）
+写进 `expression_log.validation.reason`，原始原因进 `validation.degrade_detail`。
 """
 
 from __future__ import annotations
@@ -50,13 +56,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
-from elysia.llm.chain import LLMChain
+from elysia.llm.chain import LLMChain, SpeakResult
 from elysia.llm.identity import IDENTITY_FIELD, IDENTITY_SEEDS, MAX_IDENTITY_LINES
-from elysia.llm.validator import ExpressionValidator
+from elysia.llm.micro import micro_speak
+from elysia.llm.validator import ExpressionValidator, ValidationResult
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
     CLAIM_REJECTED,
@@ -120,6 +129,80 @@ ADOPT_DOMINANCE = 2.0
 # 内部冲动表达节流：与发呆双模态同节奏（3min / 10min）
 EXPRESS_ACTIVE_INTERVAL_S = 180.0
 EXPRESS_QUIET_INTERVAL_S = 600.0
+
+# ── W1（罐装句改造）：LLM 重试 + 降级留痕 ────────────────────────────
+# 整条链（主声→次声）都降到微声 = 这次开口失败了；**同 prompt 再试一次**才放弃，
+# 一次开口因此最多两次 LLM 往返（每次仍受后端自身超时约束）。重试跑在表达 worker
+# 的独立任务里（阶段 1 的三段切分），心跳拍不等它 ⇒ 不会让一拍卡死。
+LLM_RETRY_TIMES = 1
+# 反重复用的进程内环形缓冲：只记"她最近说出口的微声句子"，不落库、不新增表。
+RECENT_MICRO_MAX = 8
+
+# `expression_log.validation.reason` 的降级原因代码（面板/查询按整词聚合）。
+# 旧版这里常常是 null（真机 153 条 `(无记录)`）——"她为什么只发罐装话"因此查不到。
+DEGRADE_LLM_TIMEOUT = "llm_timeout"
+DEGRADE_LLM_HTTP = "llm_http"
+DEGRADE_LLM_EMPTY = "llm_empty"
+DEGRADE_LLM_CONFIG = "llm_config"
+DEGRADE_VALIDATE_WORD_BLOCK = "validate_word_block"
+DEGRADE_RETRY_EXHAUSTED = "retry_exhausted"
+DEGRADE_UNKNOWN = "llm_unknown"
+
+_TIMEOUT_TOKENS = ("timeout", "timed out", "超时", "10060")
+_HTTP_TOKENS = (
+    "网络层",
+    "urlerror",
+    "httperror",
+    "10061",
+    "10054",
+    "connection",
+    "refused",
+    "连接",
+    "代理",
+    "getaddrinfo",
+    "unreachable",
+)
+
+
+@dataclass
+class DegradedValidation(ValidationResult):
+    """带取证细节的校验结果：`reason` 是固定代码，`detail` 是后端/校验器原话。
+
+    代码让人能按词聚合（"这段时间为什么全是罐装话"），原话留住"到底哪一步坏了"
+    （网络层异常原文、哪个保护词被拦）。两者都随 `expression_log.validation` 落库。
+    """
+
+    detail: str = ""
+
+
+def classify_degrade_reason(reason: str | None) -> str:
+    """把后端/校验器的原始失败原因归成一个可聚合的降级代码（纯函数，可单测）。
+
+    代码表：`llm_timeout` / `llm_http` / `llm_empty` / `llm_config` /
+    `validate_word_block` / `llm_unknown`；重试两次仍失败时由调用方改写成
+    `retry_exhausted`。分类只看原因原文，**不改动任何拦截语义**（T2 护栏原样）。
+    """
+    raw = (reason or "").strip()
+    if not raw:
+        return DEGRADE_UNKNOWN
+    lowered = raw.lower()
+    if "被校验拦截" in raw or "word_block" in lowered:
+        return DEGRADE_VALIDATE_WORD_BLOCK
+    if any(token in lowered for token in _TIMEOUT_TOKENS):
+        return DEGRADE_LLM_TIMEOUT
+    if "api_key" in lowered:
+        return DEGRADE_LLM_CONFIG
+    if "正文为空" in raw or "empty" in lowered or "无返回" in raw:
+        return DEGRADE_LLM_EMPTY
+    if any(token in lowered for token in _HTTP_TOKENS):
+        return DEGRADE_LLM_HTTP
+    return DEGRADE_UNKNOWN
+
+
+def _reason_of(speak: SpeakResult) -> str | None:
+    """取一次开口的原始降级原因（chain 写在 ValidationResult.reason 里）。"""
+    validation = speak.validated
+    return validation.reason if validation is not None else None
 
 
 async def ensure_identity_seeds(store: HeartbeatStore, now: float) -> int:
@@ -191,6 +274,9 @@ class ExpressionService:
         # P0-R19：多句回复的待发队列（due_ts, text）；由心跳每拍 flush，
         # 因此句间 2–8s 的停顿是真实时间，不是一口气写完。
         self._pending_utterances: list[tuple[float, str]] = []
+        # W1：最近说出口的微声句子（进程内环形缓冲）——`pick_variant` 用它做连续去重。
+        # 不落库、不新增表：它是"这一两分钟里她刚说过什么"的运行时上下文，不是档案。
+        self._recent_micro: deque[str] = deque(maxlen=RECENT_MICRO_MAX)
         # 降级 SA 增量（由 DesireSystem 消费方注入 on_degrade 时生效）
         self.llm_degrade_sa_delta = llm_degrade_sa_delta
         self.tts_degrade_sa_delta = tts_degrade_sa_delta
@@ -261,6 +347,97 @@ class ExpressionService:
             greeting=greeting,
         )
 
+    # ── W1：开口（含 LLM 失败重试 + 降级留痕）─────────────────────────
+
+    async def _speak_with_retry(self, payload: dict[str, Any]) -> SpeakResult:
+        """整条 LLM 链开口一次；若降到微声 ⇒ **同 prompt 再试一次**，仍失败才用微声。
+
+        判定：只有"整条链都降到 micro"才算这次开口失败（次声接住 = 她已经说出了
+        真话，没有重试的必要，也不该把一句好好的话再生成一遍）。
+
+        留痕（`expression_log.validation`）：
+        - 次声接住 → `reason` = 主声失败的原因代码；
+        - 重试接住 → `reason` = 首次失败的原因代码，`detail` 注明"重试由 X 接住"；
+        - 两次都失败 → 微声 + `reason` = `retry_exhausted`，`detail` 记两次尝试。
+
+        重试**不重复计"降级感受"**：第一次已经触发过 `on_degrade`（降级即感受），
+        重试是同一个开口的第二次尝试，再触发一次等于一次失败记成两次 SA 增量。
+        故重试期间临时摘掉回调（finally 恢复）——表达 worker 是单执行器，
+        同一 `ExpressionService` 不会并发跑到这里。
+        """
+        first = await self._llm.speak(payload)
+        if first.level != "micro":
+            return self._annotate_degrade(first)
+
+        first_reason = _reason_of(first)
+        # 重试次数由常量给出（W1：1 次）；重试接住就用它的结果，用尽仍是微声才认输。
+        retry = first
+        for _ in range(LLM_RETRY_TIMES):
+            retry = await self._retry_speak(payload)
+            if retry.level != "micro":
+                return SpeakResult(
+                    text=retry.text,
+                    level=retry.level,
+                    validated=DegradedValidation(
+                        ok=True,
+                        reason=classify_degrade_reason(first_reason),
+                        sanitized=retry.validated.sanitized if retry.validated else None,
+                        detail=(
+                            f"首次降级到微声（{first_reason or '无原因'}）；"
+                            f"同 prompt 重试由 {retry.level} 接住"
+                        ),
+                    ),
+                )
+
+        # 重试用尽仍是微声：用**状态选句 + 反重复**的微声兜底（比 chain 的无状态模板更贴她此刻）。
+        retry_reason = _reason_of(retry)
+        text = micro_speak(payload, recent=tuple(self._recent_micro))
+        self._recent_micro.append(text)
+        return SpeakResult(
+            text=text,
+            level="micro",
+            validated=DegradedValidation(
+                ok=True,
+                reason=DEGRADE_RETRY_EXHAUSTED,
+                sanitized=text,
+                detail=(
+                    f"attempt1={classify_degrade_reason(first_reason)}"
+                    f"（{first_reason or '无原因'}）；"
+                    f"attempt2={classify_degrade_reason(retry_reason)}"
+                    f"（{retry_reason or '无原因'}）"
+                ),
+            ),
+        )
+
+    async def _retry_speak(self, payload: dict[str, Any]) -> SpeakResult:
+        """同 prompt 再调一次整条链（重试期间不重复触发降级感受）。"""
+        callback = getattr(self._llm, "_on_degrade", None)
+        if callback is None:
+            return await self._llm.speak(payload)
+        self._llm._on_degrade = None
+        try:
+            return await self._llm.speak(payload)
+        finally:
+            self._llm._on_degrade = callback
+
+    @staticmethod
+    def _annotate_degrade(result: SpeakResult) -> SpeakResult:
+        """把 chain 写下的原始降级原因归成代码（落库后 `reason` 可聚合、细节不丢）。"""
+        reason = _reason_of(result)
+        if not reason:
+            return result
+        validation = result.validated
+        return SpeakResult(
+            text=result.text,
+            level=result.level,
+            validated=DegradedValidation(
+                ok=validation.ok if validation is not None else True,
+                reason=classify_degrade_reason(reason),
+                sanitized=validation.sanitized if validation is not None else None,
+                detail=reason,
+            ),
+        )
+
     async def run_job(self, job: ExpressionJob) -> ExpressionResult:
         """worker 的执行体：构造指令 → LLM → 校验 → TTS（**不落库**）。
 
@@ -270,6 +447,9 @@ class ExpressionService:
 
         时间口径：一律用 `job.created_ts`（她决定开口的那一刻）——记忆新鲜度与
         工具检索的 now 都以它为参照，与"落库晚 ≤1 次表达耗时"无关。
+
+        W1：LLM 链路失败时**同 prompt 再试一次**（见 `_speak_with_retry`）；仍失败
+        才降级微声，并把降级原因代码写进 `persist` 的 `expression_log.validation`。
         """
         output = job.output
         now = job.created_ts
@@ -320,8 +500,8 @@ class ExpressionService:
         if self.retriever is not None and callable(set_runner):
             set_runner(self._make_tool_runner(output, now, job.user_message))
 
-        # ── 2. LLM 翻译 → 校验 ───────────────────────────
-        speak = await self._llm.speak(payload)
+        # ── 2. LLM 翻译 → 校验（W1：失败重试 1 次，仍失败才降级微声）──
+        speak = await self._speak_with_retry(payload)
         result = ExpressionResult(
             job_id=job.job_id,
             status=STATUS_SUCCESS if speak.text else STATUS_SKIPPED,
@@ -386,6 +566,10 @@ class ExpressionService:
             if result.validation is not None
             else {"ok": True, "reason": None}
         )
+        # W1：降级原因留痕——`reason` 是代码（llm_timeout/llm_http/.../retry_exhausted），
+        # `degrade_detail` 是后端/校验器原话（不把"为什么"简化成一个词就丢掉证据）。
+        if isinstance(result.validation, DegradedValidation) and result.validation.detail:
+            validation["degrade_detail"] = result.validation.detail
         validation.update(
             {
                 "reply_desire": result.reply_desire,

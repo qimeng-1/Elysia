@@ -248,7 +248,11 @@ def _brain_output() -> BrainOutput:
 
 @pytest.mark.asyncio
 async def test_micro_reason_is_persisted_into_expression_log(tmp_path: Any) -> None:
-    """端到端：主声失联 ⇒ 她仍说罐装话，但库里能查出**为什么**（此前 reason=null）。"""
+    """端到端：主声失联 ⇒ 她仍说罐装话，但库里能查出**为什么**（此前 reason=null）。
+
+    W1 起 `reason` 是固定代码（这里是 `retry_exhausted`：同 prompt 重试一次仍失败），
+    后端/校验器原话进 `degrade_detail`——代码可聚合，原话留证据，两样都不丢。
+    """
     store = HeartbeatStore(tmp_path / "heartbeat.db")
     await store.start()
     try:
@@ -276,5 +280,5 @@ async def test_micro_reason_is_persisted_into_expression_log(tmp_path: Any) -> N
     assert level == "micro"
     validation = json.loads(raw_validation)
     assert validation["ok"] is True
-    assert validation["reason"], "降级原因不得再是 null"
-    assert "10061" in validation["reason"]
+    assert validation["reason"] == "retry_exhausted", "两次都失败 ⇒ 代码写清（可聚合）"
+    assert "10061" in validation["degrade_detail"], "原始原因不得丢（到底哪一步坏了）"

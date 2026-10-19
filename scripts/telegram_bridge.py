@@ -28,12 +28,20 @@
       不冒异常到主循环；发送失败的气泡留在内存待发队列里下次重试。
     · **游标只在内存**：首次启动只建立基线，**不补推历史**（重启不刷屏）。
 
+语音气泡（O1，2026-10-19 用户批准 TTS）
+    `data/run/tts.json` 存在且 `enabled=true` 时，每条气泡先走
+    GPT-SoVITS -> wav -> ffmpeg **ogg/opus** -> Telegram `sendVoice`；
+    **任何一步失败（配置/服务/ffmpeg/上传）都自动降级发文本，绝不丢消息**。
+    合成结果按文本+配置缓存（`data/cache/tts_voice/`），同一句不重复合成。
+    长文本按句切成 <= `max_chars_per_voice` 的几段语音。< 配置改了 mtime 会自动重载。
+
 用法
 ----
     python scripts/telegram_bridge.py            # 常驻（收 + 发，Ctrl+C 退出）
     python scripts/telegram_bridge.py --once     # 只跑一轮（收 + 发）后退出，便于联调
     python scripts/telegram_bridge.py --token-file D:\\tmp\\token.txt
 token 由用户从 @BotFather 取得后放进 `data/run/telegram_token.txt`。
+语音配置见 `scripts/tts_voice.py`（`python scripts/tts_voice.py --init/--check`）。
 计划任务见 `scripts/register_telegram_task.ps1`（**建但不注册**）。
 """
 
@@ -45,6 +53,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -59,6 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elysia_dash import ro_connect, take_snapshot  # noqa: E402
 from elysia_panel import SayError, sanitize_say_text, write_interaction  # noqa: E402
+from tts_voice import TTSConfig, load_config, split_for_voice, synthesize_ogg  # noqa: E402
 
 from elysia.soul.expression import split_utterances  # noqa: E402
 
@@ -78,6 +88,7 @@ CARRY_TIMEOUT_S = 10.0  # 碎片等不到下一段时，最多挂多久再单独
 MAX_BACKOFF_S = 60.0
 TELEGRAM_MAX_CHARS = 4096
 PENDING_CAP = 200  # 待发队列上限：断网很久也不会无限吃内存
+DEFAULT_VOICE_MAX_CHARS = 120  # 一条语音最多多少字（配置里可覆盖；避免一个 2MB 语音）
 TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 
 HELP_TEXT = (
@@ -192,6 +203,12 @@ class TelegramAPI:
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"}, method="POST"
         )
+        return self._parse(method, req, timeout_s)
+
+    def _parse(
+        self, method: str, req: urllib.request.Request, timeout_s: float | None = None
+    ) -> Any:
+        """发请求并解析 Telegram 的 `{"ok": ...}`（JSON 与 multipart 共用）。"""
         try:
             raw = _open_telegram(req, timeout_s if timeout_s is not None else self._timeout_s)
         except urllib.error.HTTPError as exc:
@@ -248,6 +265,38 @@ class TelegramAPI:
                 "disable_web_page_preview": True,
             },
         )
+
+    def send_voice(self, chat_id: int, ogg: bytes, *, filename: str = "voice.ogg") -> None:
+        """发一条 Telegram 语音气泡（multipart 上传 ogg/opus）。失败抛 TelegramError。"""
+        boundary = "----ElysiaVoice" + secrets.token_hex(8)
+        parts: list[bytes] = []
+
+        def field(name: str, value: str) -> None:
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode()
+            )
+
+        field("chat_id", str(int(chat_id)))
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="voice"; filename="{filename}"\r\n'
+                "Content-Type: audio/ogg\r\n\r\n"
+            ).encode()
+        )
+        parts.append(ogg)
+        parts.append(f"\r\n--{boundary}--\r\n".encode())
+        req = urllib.request.Request(
+            f"{API_BASE}/bot{self._token}/sendVoice",
+            data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        self._parse("sendVoice", req)
 
 
 def next_backoff(current: float, *, cap: float = MAX_BACKOFF_S) -> float:
@@ -327,6 +376,8 @@ class TelegramBridge:
         heartbeat_db: Path | None = None,
         chat_file: Path | None = None,
         pid_file: Path | None = None,
+        tts_config_path: Path | None = None,
+        voice: Any = None,
         carry_timeout_s: float = CARRY_TIMEOUT_S,
     ) -> None:
         self._token = token
@@ -342,6 +393,16 @@ class TelegramBridge:
         self._pending: list[str] = []
         self._send_fail_backoff = 1.0
         self.last_send_error: str | None = None
+        # 语音气泡（O1）：配置外置在 data/run/tts.json；失败一律降级发文本
+        self._tts_config_path = (
+            Path(tts_config_path)
+            if tts_config_path is not None
+            else ROOT / "data" / "run" / "tts.json"
+        )
+        self._voice = voice  # 测试注入：text -> ogg bytes；None = 从配置加载
+        self._tts_cfg: TTSConfig | None = None
+        self._tts_mtime: float | None = None
+        self.last_voice_error: str | None = None
         # 气泡碎片防御：暂存"没有前一条可并"的纯符号段，等下一段或并入上一条已发消息
         self._carry: str = ""
         self._carry_since: float = 0.0
@@ -446,6 +507,12 @@ class TelegramBridge:
         lines.append(f"今天开口：{self._today_utterances()} 句")
         if snap.mode:
             lines.append(f"模式：{snap.mode}")
+        if self._ensure_voice() is None:
+            lines.append("语音：关（只发文本）")
+        elif self.last_voice_error:
+            lines.append(f"语音：开（最近失败：{self.last_voice_error}）")
+        else:
+            lines.append("语音：开")
         return "\n".join(lines)
 
     # ── 发：她 → Telegram ───────────────────────────────────────
@@ -546,6 +613,73 @@ class TelegramBridge:
                 self._pending.pop(0)
             self._pending.append(part)
 
+    # ── 语音气泡（O1）───────────────────────────────────────────
+    def _ensure_voice(self) -> Any:
+        """懒加载 data/run/tts.json（配置改了 mtime 会重新读）；失败只影响语音、不影响文本。"""
+        if self._voice is not None:
+            return self._voice
+        try:
+            mtime = self._tts_config_path.stat().st_mtime
+        except OSError:
+            return None  # 还没配：静默走文本（不刷日志）
+        if mtime != self._tts_mtime:
+            self._tts_mtime = mtime
+            try:
+                cfg: TTSConfig | None = load_config(self._tts_config_path)
+            except Exception as exc:
+                cfg = None
+                self.last_voice_error = type(exc).__name__
+                log.warning("语音配置不可用（继续只发文本）：%s", exc)
+            if cfg is not None and cfg.enabled:
+                self._tts_cfg = cfg
+                log.info("语音气泡已启用：%s（api_style=%s）", cfg.api_url, cfg.api_style)
+            elif cfg is not None:
+                self._tts_cfg = None
+                log.info("语音气泡在配置里被关闭（enabled=false）：只发文本")
+        cfg = self._tts_cfg
+        if cfg is None:
+            return None
+        self._voice = lambda text, emotion=None: synthesize_ogg(cfg, text, emotion=emotion)
+        return self._voice
+
+    def _send_voice_chunks(self, chat_id: int, text: str) -> bool:
+        """尝试把一条气泡发成语音；**任何一步失败返回 False**，由调用方降级发文本。"""
+        voice = self._ensure_voice()
+        if voice is None:
+            return False
+        cfg = self._tts_cfg
+        max_chars = cfg.max_chars_per_voice if cfg is not None else DEFAULT_VOICE_MAX_CHARS
+        chunks = split_for_voice(text, max_chars)
+        if not chunks:
+            return False
+        # 先全部合成（缓存命中很快），再发；避免"发了一半再失败"造成内容重复
+        oggs: list[bytes] = []
+        for chunk in chunks:
+            try:
+                ogg = voice(chunk)
+            except Exception as exc:
+                reason = str(getattr(exc, "reason", type(exc).__name__))
+                self.last_voice_error = reason
+                log.warning("语音合成失败，降级发文本：%s", reason)
+                return False
+            if not ogg:
+                self.last_voice_error = "empty_ogg"
+                return False
+            oggs.append(ogg)
+        for ogg in oggs:
+            try:
+                self._api.send_voice(chat_id, ogg)
+            except Exception as exc:
+                self.last_voice_error = type(exc).__name__
+                log.warning("sendVoice 失败，重试一次：%s", type(exc).__name__)
+                try:
+                    self._api.send_voice(chat_id, ogg)
+                except Exception as exc2:
+                    self.last_voice_error = type(exc2).__name__
+                    log.warning("sendVoice 仍失败，降级发文本：%s", type(exc2).__name__)
+                    return False
+        return True
+
     def _send_pending(self) -> int:
         sent = 0
         while self._pending:
@@ -555,6 +689,14 @@ class TelegramBridge:
                 log.info("尚无白名单 chat，%d 条气泡暂缓发送", len(self._pending))
                 break
             text = _clip_telegram(self._pending[0])
+            if self._send_voice_chunks(chat_id, text):
+                self._pending.pop(0)
+                self.last_send_error = None
+                self._send_fail_backoff = 1.0
+                self._last_sent_id = None  # 语音消息没有 message_id 记录（碎片并入走文本路径）
+                self._last_sent_text = None
+                sent += 1
+                continue
             try:
                 message_id = self._api.send_message(chat_id, text)
             except Exception as exc:

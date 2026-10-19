@@ -58,6 +58,15 @@ $BodyStopIntentional = Join-Path $RunDir "body_stopped_intentionally"
 # "故意停机"标记：watchdog.ps1 见到它就**不自动拉起**（尊重你的 stop）。
 # start 会清掉它，stop 会创建它 —— 于是看门狗不会跟你抢方向盘。
 $NoAutoStart = Join-Path $RunDir "no_autostart"
+
+# 2026-10-19（用户批准补漏）：no_autostart 的"是否对当次开机会话有效"统一走共用模块。
+# JSON 标记含 boot_id；跨一次重启自动失效；旧 0 字节标记按 mtime 兼容。
+$NoAutoStartModule = Join-Path $PSScriptRoot "no_autostart.ps1"
+if (-not (Test-Path -LiteralPath $NoAutoStartModule)) {
+    Write-Error "缺少共用模块：$NoAutoStartModule"
+    exit 1
+}
+. $NoAutoStartModule
 # P0-R13（迁移防分叉，红线 #2）：旧机器**退役**标记。存在即拒绝启动——
 # 她已搬到别处，两头同时活 = 分叉 = 把同一段人生写成两份。
 $RetiredMarker = Join-Path $RunDir "RETIRED"
@@ -353,8 +362,9 @@ switch ($Action) {
     }
     "stop" {
         # 记录"这是你**故意**停的"——watchdog.ps1 据此不再自动拉起（下次 start 会清掉它）
+        # 2026-10-19：标记改成 JSON（含 boot_id）⇒ 只抑制当次开机；跨重启自动失效。
         New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
-        New-Item -ItemType File -Force -Path $NoAutoStart | Out-Null
+        Set-NoAutostartMarker -Path $NoAutoStart -Reason "soul.ps1 stop"
         # 始终停 body（如果存在）
         $bodyResult = Stop-OneGracefully -Label "身体" -Kind "body" -PidFilePath $BodyPid `
             -StopMarkerPath $BodyStopRequest -IntentionalMarkerPath $BodyStopIntentional `

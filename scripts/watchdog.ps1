@@ -58,6 +58,15 @@ $RunDir      = Join-Path $ProjectRoot "data\run"
 $LogDir      = Join-Path $ProjectRoot "data\logs"
 $PidFile     = Join-Path $RunDir "soul.pid"
 $NoAutoStart = Join-Path $RunDir "no_autostart"
+
+# 2026-10-19（用户批准补漏）：no_autostart 的有效性判断统一走共用模块
+# （JSON boot_id + 旧格式 mtime 兼容；跨重启自动失效）。
+$NoAutoStartModule = Join-Path $PSScriptRoot "no_autostart.ps1"
+if (-not (Test-Path -LiteralPath $NoAutoStartModule)) {
+    Write-Error "缺少共用模块：$NoAutoStartModule"
+    exit 1
+}
+. $NoAutoStartModule
 $HeartbeatDb = Join-Path $ProjectRoot "data\heartbeat.db"
 $WatchLog    = Join-Path $LogDir "watchdog.log"
 $TaskName    = "Elysia-Watchdog"
@@ -310,9 +319,15 @@ try {
     }
 
     # 进程不在
-    if (Test-Path $NoAutoStart) {
-        Write-Summary "stopped_by_user" "none" $beatText $aliveText
+    # 2026-10-19：只看"对**当次开机**是否有效"——跨重启的旧标记自动失效，
+    # 否则机器重启后看门狗会永远报 stopped_by_user / action=none 而不拉起她。
+    $stopState = Get-NoAutostartState -Path $NoAutoStart
+    if ($stopState.Active) {
+        Write-Summary ("stopped_by_user(" + $stopState.State + ")") "none" $beatText $aliveText
         exit 0
+    }
+    if ($stopState.State -ne "absent") {
+        Write-WatchLog ("stale_marker_ignored | state=" + $stopState.State + " | boot_id=" + $stopState.BootId + " | marker_boot_id=" + $stopState.MarkerBootId)
     }
     if ($null -ne $pidFromFile) {
         Write-WatchLog "清理陈旧 PID 文件：$pidFromFile 已不存在"

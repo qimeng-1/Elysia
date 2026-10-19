@@ -30,6 +30,11 @@ P3-V 认领闸门：默认所有记忆都是"她的"（claimed）；若她用自
 P3-W 保留闸门（可及性）：`suppressed`（她主动说"我不想再想起"）一律不进话语；
 `dormant`/`faded`（时间造成的失去）本身不参与检索，**只有被话题明确提起才唤醒**
 （唯一唤醒路径）——被唤醒即回 `present` 并 `touch` 重新计时，"你一提，它又活过来了"。
+
+S0（2026-10-20，记忆=身份 · 止血）：她自己的**独白**（`kind='expression'`）不再进入
+**主动检索**（`select_hooks`）——独白照旧写入、历史一条不删，但它不再被当成"经历"
+钩回话语（"我两分钟前说过的话"不该被当成"我想起的事"）。唯一例外：她把它
+`protected`（S2「这条我想留着」的通道）。
 """
 
 from __future__ import annotations
@@ -368,6 +373,20 @@ def _cluster_factor(siblings: int) -> float:
     return round(min(CLUSTER_COEF * math.log(1 + siblings), CLUSTER_MAX), 3)
 
 
+def _is_self_talk(record: MemoryRecord) -> bool:
+    """S0：她自己的**独白**（未被 protected）不进主动检索。
+
+    只挡"主动检索"这一条路——独白照旧写入 `memories`（历史不丢），感受路径
+    （`recall_for_feeling`，只影响心情、不进话语）也不受这里的改动影响。
+    `protected` 的独白放行：那是 S2「这条我想留着」给她的越级通道（她亲自留的
+    才有资格被当成记忆钩子），不是程序替她加权。
+
+    单独成函数是为了让**取消测试**能"只去掉这一条过滤"而复现回喂（见
+    `tests/unit/test_s0_expression_not_retrieved.py`）。
+    """
+    return record.kind == KIND_EXPRESSION and not record.protected
+
+
 def select_hooks(
     records: list[MemoryRecord],
     current_mood: dict[str, float],
@@ -397,11 +416,15 @@ def select_hooks(
     P3-W 保留闸门：她主动抑制（suppressed）的一律不进话语；沉睡（dormant）与
     淡化（faded）**只有被话题明确提起**才放行（并在命中上标记 `woke_from`，
     由调用方落回 present）——时间造成的失去可以被"你一提"逆转。
+    S0 独白闸门：她自己的独白（`kind=expression`，未 `protected`）一律不进主动
+    检索——独白不是"经历"，不该被当成记忆钩子回喂；`protected` 的独白例外。
     """
     hits: list[MemoryHit] = []
     for rec in records:
-        # 排除她自己的发言回声：hooks 用于"记起你/世界"，不应复述刚说过的自己
-        if rec.kind == KIND_EXPRESSION:
+        # S0（2026-10-20）：排除她自己的独白回声——hooks 用于"记起你/世界"，
+        # 不应复述她自己的话（原来的"无条件排除"保留；protected 独白例外，见
+        # `_is_self_talk` 与 S2「这条我想留着」）。
+        if _is_self_talk(rec):
             continue
         # 排除自我认知（第八节 S1）：hooks 是"话题撞上的背景常识"，而"我是谁"
         # 走**身份段**、每句都在场——若同时进 hooks 段，就是每句复述自己（重犯 P3-P）

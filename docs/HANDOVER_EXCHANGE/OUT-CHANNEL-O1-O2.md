@@ -2,7 +2,7 @@
 
 > **来源**：`docs/LEAD_DAY2_PLAN_2026-10-19.md` §O 窗（用户 2026-10-19 晚批准 "TTS 开"）。
 > **写作窗**：channel-ops；写作用域 `scripts/`（+ 本交接单）。
-> **总领验收**：待验收（真机语音气泡因 Telegram 网络不可达，见 §6）。
+> **总领验收**：待验收（真机语音气泡需桥重启加载新代码；Telegram 经系统代理 7890 可达，直连不通，见 §6）。
 
 ---
 
@@ -109,14 +109,20 @@ uv run --no-sync ruff format --check     -> 187 files already formatted         
 - `--text "今天过得怎么样？我在呢，陪你聊一会儿。"` 实际产出 **23553 字节** ogg，`OggS` 魔数，
   ffprobe 确认 `codec_name=opus / sample_rate=48000 / channels=1 / duration=4.1065s`。
 
-**未做（前置条件缺失，不是代码问题）**：`api.telegram.org` 本机 **TCP 443 不通**（真机实测），
-因此**语音气泡无法真的发到 Telegram**；等用户网络恢复后，本卡代码即可直接生效。
-验证命令（网络恢复后）：
+**未做（前置条件，不是代码问题；2026-10-19 晚总领更正）**：
+`api.telegram.org` **直连** TCP 443 确实不通（`direct_status=000`），
+但**系统代理（Clash 127.0.0.1:7890）可达**：`getMe` 返回 **200**（约 7.2s）；
+桥进程（PID 20048）当时已有一条 **ESTABLISHED -> 127.0.0.1:7890** 的 long-poll 连接。
+原因：`_open_telegram` 用 `build_opener()`（默认 opener），Windows 上会读系统 WinINET 代理设置
+⇒ 自动走 Clash；直连只是兜底。
+**⇒ 准前置条件：需要系统代理在开（Clash 7890）；只有直连时不通。**
+因此语音气泡**能发出去**，只等桥重启加载新代码（重启由总领统一做）。
+验证命令（桥加载新代码后）：
 ```powershell
-# 1) 服务在跑（一键启动API.bat），2) 配置在 data/run/tts.json
+# 1) 服务在跑（一键启动API.bat / 当前 PID 19052），2) 配置在 data/run/tts.json
 .\.venv\Scripts\python.exe scripts\tts_voice.py --check
 .\.venv\Scripts\python.exe scripts\tts_voice.py --text "我在呢" --out data\cache\tts_voice\_sample.ogg
-# 3) 桥常驻：她下一次开口应收到一条语音气泡；/status 里"语音：开"
+# 3) 桥常驻：她下一次开口应收到一条语音气泡（带字幕）；/status 里"语音：开"
 .\.venv\Scripts\python.exe scripts\telegram_bridge.py
 ```
 
@@ -125,7 +131,7 @@ uv run --no-sync ruff format --check     -> 187 files already formatted         
 ## 7. 未做与已知限制
 
 1. **TTS 服务不自启**（`一键启动API.bat` 由人启动；本卡未注册计划任务）。服务不跑时桥自动降级文本。
-2. Telegram 网络仍不可达（用户 Clash 规则问题）⇒ 语音气泡真机未验证。
+2. Telegram **直连不通、系统代理（Clash 7890）可达** ⇒ 语音气泡需要代理在开；桥重启后即可真机验证。
 3. 语音只覆盖 Telegram 桥；桌宠/其它通道是否出声不在本卡。
 4. 单条语音上限 120 字（可配）；超长按句切多条。
 5. 缓存无上限清理（`data/cache/tts_voice/`；单条约 24KB，日常量级可忽略；后续可加按天清理）。

@@ -129,3 +129,6 @@ class ExpressionResult:
     restraint_reason: str | None = None
     restraint_logged: bool = False
     sentences: list[str] = field(default_factory=list)
+    # S3：本次作业里被钩回来的记忆 id（只内部传递到 persist，用于判定"她重述了哪条"；
+    # **不进 prompt**，assistant 侧永远只看到 narrative 文本）。
+    hook_memory_ids: list[int] = field(default_factory=list)

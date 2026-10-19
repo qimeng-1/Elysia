@@ -78,10 +78,19 @@ SOURCES = (SOURCE_SELF, SOURCE_USER, SOURCE_OBSERVATION, SOURCE_INFERENCE, SOURC
 # ── 确定性（P3-T）：她有多确定这件事 ──────────────────
 CERTAINTY_CERTAIN = "certain"  # 确信（亲历 / 亲口 / 用户明说）
 CERTAINTY_PROBABLE = "probable"  # 大概（较可信，但不是硬事实）
+# S3（允许记错）：她重述改写后，确定性最多降到这一档；**地板**——不再往下
+# （降成 speculative 等于她否认这件事真实发生过，那是另一回事，不在 S3）。
+CERTAINTY_UNCERTAIN = "uncertain"  # 不太确定（她自己的版本与原话已有出入）
 CERTAINTY_HEARD = "heard"  # 听说（转述 / 二手）
 CERTAINTY_SPECULATIVE = "speculative"  # 推测（低可信，只能当背景）
 
-CERTAINTIES = (CERTAINTY_CERTAIN, CERTAINTY_PROBABLE, CERTAINTY_HEARD, CERTAINTY_SPECULATIVE)
+CERTAINTIES = (
+    CERTAINTY_CERTAIN,
+    CERTAINTY_PROBABLE,
+    CERTAINTY_UNCERTAIN,
+    CERTAINTY_HEARD,
+    CERTAINTY_SPECULATIVE,
+)
 
 # ── 认领状态（P3-V）：这条记忆算不算"她的" ────────────────
 # 默认 claimed：落库即默认是她的记忆。这是**能力**——事实先可靠地递到她手上

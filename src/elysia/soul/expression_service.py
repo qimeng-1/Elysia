@@ -72,6 +72,7 @@ from elysia.llm.chain import LLMChain, SpeakResult
 from elysia.llm.identity import IDENTITY_FIELD, IDENTITY_SEEDS, MAX_IDENTITY_LINES
 from elysia.llm.micro import micro_speak
 from elysia.llm.validator import ExpressionValidator, ValidationResult
+from elysia.memory.drift import maybe_drift
 from elysia.memory.levels import (
     CERTAINTY_CERTAIN,
     CLAIM_REJECTED,
@@ -668,6 +669,7 @@ class ExpressionService:
             log.warning("装配 dialogue_context 失败——本次不带近期对话", exc_info=True)
 
         # ── 1b. 记忆注入：只在"话题撞上"时（被唤起才浮现，不再每句都推）──
+        hook_memory_ids: list[int] = []
         if self.retriever is not None and job.user_message:
             try:
                 hooks = await self.retriever(
@@ -690,6 +692,8 @@ class ExpressionService:
                 # ——「真实产生的犹豫，就是生命本身」（路线图 §1.3）。
                 await asyncio.sleep(recall_latency_ms(hooks) / 1000.0)
                 payload["memory_hooks"] = [h.label for h in hooks]
+                # S3：把命中 id 随作业带到 persist（只内部传递，不进 prompt）
+                hook_memory_ids = [h.memory_id for h in hooks]
                 await self._feel_recall(hooks)
 
         # ── 1c. 身份段（"我是谁"）：每句都在场，不走 hooks 段 ──
@@ -726,6 +730,8 @@ class ExpressionService:
             intent=str(payload.get("intent", "")),
             # 记忆的 emotion_vector 取"她开口那一刻"的心情，随结果回到落库拍
             feelings=dict(output.feelings.to_dict()),
+            # S3：本次被钩回来的记忆 id（persist 用于"她重述了哪条"的判定）
+            hook_memory_ids=hook_memory_ids,
         )
 
         # P0-R19：多句回复 = **一次** LLM 调用后在句边界拆开（不许多调）
@@ -800,6 +806,8 @@ class ExpressionService:
                 "restraint": result.restraint_reason is not None,
                 "restraint_reason": result.restraint_reason,
                 "utterance_count": len(sentences),
+                # S3：本次被钩回来的记忆 id（内部取证；不参与 prompt）
+                "hook_memory_ids": list(result.hook_memory_ids),
             }
         )
         if result.restraint_logged:
@@ -814,6 +822,16 @@ class ExpressionService:
                 validation=validation,
                 level=result.level,
             )
+        # ── 4a2. S3：允许记错——她重述了本次钩回来的哪条记忆？──────────
+        # 只改 narrative、content 永不改；每次改写留历史 + 降 certainty（有地板）。
+        # 失败只记日志：漂移是记忆层的增强，不能拖垮一次开口/落库。
+        if result.hook_memory_ids and result.text:
+            bubbles = sentences or [result.text]
+            for memory_id in result.hook_memory_ids:
+                try:
+                    await maybe_drift(self._store, memory_id, bubbles, now=now)
+                except Exception:
+                    log.warning("记忆漂移失败 id=%s（不影响落库）", memory_id, exc_info=True)
         await self.flush_utterances(now)
         # ── 4b. P3 运行时接线：她说的话成为经历 → 写入记忆 ──
         if result.text:

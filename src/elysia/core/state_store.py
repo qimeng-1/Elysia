@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS memory_index (
     emotions         REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_index_key ON memory_index (path_key);
+CREATE TABLE IF NOT EXISTS memory_narrative_history (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               REAL NOT NULL,
+    memory_id        INTEGER NOT NULL,
+    old_narrative    TEXT NOT NULL,
+    new_narrative    TEXT NOT NULL,
+    certainty_before TEXT NOT NULL,
+    certainty_after  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_narrative_history_memory
+    ON memory_narrative_history (memory_id, ts);
 """
 
 
@@ -555,6 +566,95 @@ class HeartbeatStore(_AsyncSQLite):
             "SELECT COUNT(*) FROM kept_moments WHERE ts >= ?", (float(since_ts),)
         )
         return int(rows[0][0]) if rows else 0
+
+    async def rewrite_narrative(
+        self,
+        memory_id: int,
+        *,
+        new_narrative: str,
+        certainty_after: str,
+        now: float,
+    ) -> dict[str, Any] | None:
+        """S3：仅改写 `narrative` + 降 certainty（`content` 永不改），并留历史。
+
+        返回 `{old_narrative, certainty_before, content}`；记忆不存在返回 None。
+        同时 `access_count += 1`、`last_access_ts = now`（沿用既有口径）。
+        """
+
+        def _rewrite(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute(
+                "SELECT narrative, certainty, content FROM memories WHERE id = ?",
+                (int(memory_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            old_narrative, certainty_before, content = str(row[0]), str(row[1]), str(row[2])
+            conn.execute(
+                "UPDATE memories SET narrative = ?, certainty = ?,"
+                " access_count = access_count + 1, last_access_ts = ? WHERE id = ?",
+                (new_narrative, certainty_after, float(now), int(memory_id)),
+            )
+            conn.execute(
+                "INSERT INTO memory_narrative_history (ts, memory_id, old_narrative,"
+                " new_narrative, certainty_before, certainty_after)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    float(now),
+                    int(memory_id),
+                    old_narrative,
+                    new_narrative,
+                    certainty_before,
+                    certainty_after,
+                ),
+            )
+            conn.commit()
+            return {
+                "old_narrative": old_narrative,
+                "certainty_before": certainty_before,
+                "content": content,
+            }
+
+        outcome = await self.submit_ret(_rewrite)
+        return dict(outcome) if isinstance(outcome, dict) else None
+
+    async def narrative_drift(self, memory_id: int) -> list[dict[str, Any]]:
+        """某条记忆的漂移史（S3）：按时间升序。"""
+        rows = await self.execute_raw(
+            "SELECT ts, memory_id, old_narrative, new_narrative, certainty_before,"
+            " certainty_after FROM memory_narrative_history"
+            " WHERE memory_id = ? ORDER BY ts, id",
+            (int(memory_id),),
+        )
+        return [
+            {
+                "ts": float(r[0]),
+                "memory_id": int(r[1]),
+                "old_narrative": str(r[2]),
+                "new_narrative": str(r[3]),
+                "certainty_before": str(r[4]),
+                "certainty_after": str(r[5]),
+            }
+            for r in rows
+        ]
+
+    async def memory_drift_summary(self, limit: int = 20) -> list[dict[str, Any]]:
+        """最近的漂移条目（新的在前），供总领窗核对"她改过什么"。"""
+        rows = await self.execute_raw(
+            "SELECT ts, memory_id, old_narrative, new_narrative, certainty_before,"
+            " certainty_after FROM memory_narrative_history ORDER BY ts DESC, id DESC LIMIT ?",
+            (int(limit),),
+        )
+        return [
+            {
+                "ts": float(r[0]),
+                "memory_id": int(r[1]),
+                "old_narrative": str(r[2]),
+                "new_narrative": str(r[3]),
+                "certainty_before": str(r[4]),
+                "certainty_after": str(r[5]),
+            }
+            for r in rows
+        ]
 
     async def expression(
         self,

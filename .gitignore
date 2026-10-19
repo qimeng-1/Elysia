@@ -22,6 +22,8 @@ data/logs/
 data/cache/
 data/tmp/
 data/run/
+# 她自己的写作工作区（W3，2026-10-19）：她自己写下的东西，属运行时数据，不入库
+data/her_writing/
 # 大二进制快照：不入库（理由见上方注释）。注意 .gitignore 不支持行尾注释，只能单独成行。
 data/checkpoints/
 # 运行时 SQLite 主体文件（进程持续锁定写入，改由 checkpoints/ 做快照版本化）

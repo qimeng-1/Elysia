@@ -476,6 +476,13 @@ class HeartbeatStore(_AsyncSQLite):
         rows = await self.execute_raw("SELECT COALESCE(MAX(exchange_id), 0) FROM dialogue_turns")
         return int(rows[0][0]) if rows else 0
 
+    async def last_user_turn_ts(self) -> float | None:
+        """最近一条用户轮次的时刻（S1d 归属窗口：超出窗口的气泡算"自发"）。"""
+        rows = await self.execute_raw(
+            "SELECT ts FROM dialogue_turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
+        )
+        return float(rows[0][0]) if rows else None
+
     async def dialogue_turns(self, limit: int | None = None) -> list[dict[str, Any]]:
         """读最近 `limit` 条对话轮次（按时间**升序**返回；不含 limit 则按时间升序全量）。"""
         if limit is None:

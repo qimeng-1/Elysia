@@ -233,3 +233,36 @@ async def test_tool_wiring(store: HeartbeatStore) -> None:
         assert "keep_this_moment" in _TOOL_NAMES
     finally:
         await store.close()
+
+
+# ── S2 闸门扩展的显式正反用例（近期未留住的 exchange 被挡 / 留住的放行）────
+@pytest.mark.asyncio
+async def test_recent_unkept_exchange_is_blocked(store: HeartbeatStore) -> None:
+    await store.start()
+    try:
+        now = T0 + 1000.0
+        await _add_exchange(store, now - 1200.0, "键盘坏了还能换，你手没事才要紧")
+        records = [MemoryRecord.from_dict(d) for d in await store.iterate_memories()]
+        hooks = select_hooks(
+            records, MOOD, now=now, query="键盘", recent_dialogue_since_ts=now - 3600.0
+        )
+        assert hooks == [], "近期未留住的 exchange 仍应被进行中对话闸挡住"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_kept_exchange_is_retrievable(store: HeartbeatStore) -> None:
+    await store.start()
+    try:
+        now = T0 + 1000.0
+        keeper = MomentKeeper(store, clock=lambda: now)
+        kept_id = await _add_exchange(store, now - 1200.0, "你说咖啡洒键盘上了，我更担心你")
+        await keeper.keep_this_moment("我在意的是你，不是键盘")
+        records = [MemoryRecord.from_dict(d) for d in await store.iterate_memories()]
+        hooks = select_hooks(
+            records, MOOD, now=now, query="键盘", recent_dialogue_since_ts=now - 3600.0
+        )
+        assert [h.memory_id for h in hooks] == [kept_id], "她留住的 exchange 必须放行"
+    finally:
+        await store.close()

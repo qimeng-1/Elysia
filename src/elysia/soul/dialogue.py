@@ -36,6 +36,13 @@ CONTEXT_MAX_CHARS = 2000
 RECENT_OPENINGS = 8
 OPENING_CHARS = 6
 
+# ── S1d：回复归属窗口（秒）───────────────────────────────────────────
+# 她一次回复的多句气泡间隔是 2–8s，180s 足够宽；**超过窗口还开口 = 自发**，
+# 不属于任何交换（写 `exchange_id=0`），否则等不到人时的自言自语会被压进
+# 上一次交换的记忆（真机缺陷：ex=3 混进 8 句自发言）。常量可配，不写死分支。
+REPLY_WINDOW_S = 180.0
+SELF_TALK_EXCHANGE_ID = 0
+
 ROLE_USER = "user"
 ROLE_HER = "her"
 
@@ -62,12 +69,20 @@ async def record_her_bubble(
     emotion_vector: dict[str, float] | None = None,
     intent: str | None = None,
 ) -> None:
-    """她的每条气泡 → 一条 `role='her'` 轮次，归当前交换号（没有用户消息时为 0）。"""
+    """她的每条气泡 → 一条 `role='her'` 轮次。
+
+    S1d 归属窗口：只有在**最近一条用户消息之后 `REPLY_WINDOW_S` 内**的气泡才归
+    当前交换号；超出窗口（或从没收到过用户消息）⇒ `exchange_id=0`（自发，不属于任何
+    交换）。这样封存交换时不会把"等不到人时的自言自语"也压进那次事件的记忆。
+    """
     bubble = str(text or "").strip()
     if not bubble:
         return
     try:
-        exchange_id = int(await store.max_exchange_id())
+        exchange_id = SELF_TALK_EXCHANGE_ID
+        last_user_ts = await store.last_user_turn_ts()
+        if last_user_ts is not None and float(now) - float(last_user_ts) <= REPLY_WINDOW_S:
+            exchange_id = int(await store.max_exchange_id())
         await store.add_dialogue_turn(
             now,
             ROLE_HER,
@@ -143,7 +158,9 @@ def build_exchange_text(turns: list[dict[str, Any]]) -> tuple[str, dict[str, flo
     """把一次交换的轮次压成一条事件记忆的正文 + 她当时的感受（纯函数，可单测）。
 
     形如：`你："<原话截断120字>"／我（当时 miss=0.33）："<她的回复截断120字>"`。
+    **忽略 `exchange_id <= 0` 的轮次**（S1d：自发气泡不属于任何交换）。
     """
+    turns = [turn for turn in turns if int(turn.get("exchange_id") or 0) > 0]
     user_text = " ".join(
         str(turn.get("text") or "").strip() for turn in turns if turn.get("role") == ROLE_USER
     ).strip()

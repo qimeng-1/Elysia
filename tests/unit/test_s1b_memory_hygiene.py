@@ -150,9 +150,14 @@ def test_protected_recent_interaction_is_retrievable() -> None:
 # ── ③ 一次交换一条记忆 ───────────────────────────────────────
 def test_build_exchange_text_format_and_truncation() -> None:
     turns = [
-        {"role": "user", "text": "你" * 500},
-        {"role": "her", "text": "好" * 500, "emotion_vector": {"miss": 0.333, "chat": 0.6}},
-        {"role": "her", "text": "我等你", "emotion_vector": {"miss": 0.2}},
+        {"role": "user", "text": "你" * 500, "exchange_id": 1},
+        {
+            "role": "her",
+            "text": "好" * 500,
+            "emotion_vector": {"miss": 0.333, "chat": 0.6},
+            "exchange_id": 1,
+        },
+        {"role": "her", "text": "我等你", "emotion_vector": {"miss": 0.2}, "exchange_id": 1},
     ]
     content, emotion = build_exchange_text(turns)
     assert content.startswith('你："')

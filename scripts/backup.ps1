@@ -28,7 +28,7 @@ param(
     [string]$Source = "",
     [string]$BackupRoot = "D:\ElysiaBackup\elysia",
     [int]$Keep = 7,
-    [string]$Time = "03:00",
+    [string]$Time = "03:30",
     [switch]$Register,
     [switch]$Unregister
 )

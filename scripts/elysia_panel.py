@@ -51,9 +51,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as dt
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -934,9 +936,53 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(code, result)
 
 
-def _status_payload(s: Snapshot, server: PanelServer | None = None) -> dict[str, object]:
-    import datetime as dt
+def voice_status(root: Path = ROOT) -> dict[str, object]:
+    """只读观测：桥最近一次"语音/文字"决策 + 语音缓存数量/最近时间。
 
+    数据源：`data/logs/telegram_bridge.log`（桥自己写的 RotatingFileHandler 日志）
+    与 `data/cache/tts_voice/*.ogg`。桥进程不监听端口，面板只能这样跨进程观测。
+    """
+    base = Path(root)
+    log_path = base / "data" / "logs" / "telegram_bridge.log"
+    cache_dir = base / "data" / "cache" / "tts_voice"
+    info: dict[str, object] = {
+        "configured": (base / "data" / "run" / "tts.json").is_file(),
+        "cache_files": 0,
+        "last_voice_ts": None,
+        "medium": None,
+        "reason": None,
+        "failed": False,
+        "last_medium_ts": None,
+        "log_path": str(log_path),
+    }
+    try:
+        files = sorted(cache_dir.glob("*.ogg"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        files = []
+    if files:
+        info["cache_files"] = len(files)
+        with contextlib.suppress(OSError):
+            info["last_voice_ts"] = files[-1].stat().st_mtime
+    try:
+        tail = log_path.read_bytes()[-262144:].decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        tail = []
+    for line in reversed(tail):
+        match = re.search(r"medium=(voice|text)\s+reason=(\S+)", line)
+        if not match:
+            continue
+        info["medium"] = match.group(1)
+        info["reason"] = match.group(2)
+        info["failed"] = "voice_failed" in line
+        with contextlib.suppress(ValueError):
+            info["last_medium_ts"] = dt.datetime.strptime(
+                line[:19], "%Y-%m-%d %H:%M:%S"
+            ).timestamp()
+        break
+    return info
+
+
+def _status_payload(s: Snapshot, server: PanelServer | None = None) -> dict[str, object]:
     def hhmm(ts: float | None) -> str | None:
         return dt.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else None
 
@@ -1006,6 +1052,8 @@ def _status_payload(s: Snapshot, server: PanelServer | None = None) -> dict[str,
             "recent_expressions": [
                 [hhmm(t), lvl, str(txt)[:120]] for t, lvl, txt in s.recent_expressions
             ],
+            # B+C 语音观测（2026-10-20）：手机上也看得到"她这条为什么出声/写字"
+            "voice": voice_status(ROOT),
         },
         "errors": s.errors,
     }

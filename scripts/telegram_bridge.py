@@ -65,6 +65,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,10 @@ CHAT_FILE = Path("data") / "run" / "telegram_chat.txt"
 PID_FILE = Path("data") / "run" / "telegram_bridge.pid"
 DEFAULT_STATE_DB = Path("data") / "state.db"
 DEFAULT_HEARTBEAT_DB = Path("data") / "heartbeat.db"
+LOG_FILE = Path("data") / "logs" / "telegram_bridge.log"
+LOG_MAX_BYTES = 1_000_000  # 1MB 轮转
+LOG_BACKUPS = 3
+LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
 POLL_TIMEOUT_S = 25  # getUpdates 长轮询秒数（任务卡指定）
 HTTP_TIMEOUT_S = 35.0  # 必须大于长轮询，否则正常等待被自己掐断
@@ -107,6 +112,42 @@ HELP_TEXT = (
     "这里是她的 Telegram 通道：直接发文字，她 1 秒内会读到；她开口会自动发回这里。\n"
     "发 /status 看她现在的状态。"
 )
+
+
+def setup_logging(
+    path: Path | None = None,
+    *,
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUPS,
+) -> Path:
+    """桥**自己**写日志文件（不依赖 stdout 重定向）。
+
+    根因（2026-10-19 真机）：桥由计划任务用 `pythonw.exe` 起，父进程是 Task Scheduler
+    （svchost）⇒ **没有 stdout**；只靠 `logging.basicConfig(stream=stdout)` 的话，
+    `medium=voice|text reason=...` 这些观测行全部丢失。
+    现在用 `RotatingFileHandler` 写 `data/logs/telegram_bridge.log`（1MB 轮转 / 保留 3 份）。
+
+    **幂等**：同一个文件已挂过 handler 就直接返回，重复调用不会双写。
+    """
+    target = Path(path) if path is not None else ROOT / LOG_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    resolved = target.resolve()
+    for handler in list(log.handlers):
+        base = getattr(handler, "baseFilename", None)
+        if isinstance(handler, RotatingFileHandler) and base and Path(base).resolve() == resolved:
+            return target
+    handler = RotatingFileHandler(
+        target,
+        maxBytes=max(1024, int(max_bytes)),
+        backupCount=max(0, int(backup_count)),
+        encoding="utf-8",
+        delay=False,
+    )
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False  # 只走文件，避免和 root/stdout 重复
+    return target
 
 
 class BridgeConfigError(RuntimeError):
@@ -760,13 +801,39 @@ class TelegramBridge:
         intent = str(parsed.get("intent") or row[1] or "")
         return {"ts": ts, "age_s": age_s, "intent": intent, "emotions": emotions}
 
-    def _decide_medium(self, text: str) -> tuple[str, str]:
-        """B+C：决定这条气泡发语音（带字幕）还是文字；返回 (medium, reason) 并写日志。"""
-        if self._ensure_voice() is None:
-            return "text", "voice_unconfigured"
+    def log_startup_summary(self) -> None:
+        """启动时写一行 **配置摘要**（供事后查"她这条为什么没出声"；**绝不写 token**）。"""
+        try:
+            if not self._tts_config_path.is_file():
+                log.info("tts.config=missing (voice off, text only)")
+                return
+            cfg = load_config(self._tts_config_path)
+        except Exception as exc:
+            log.warning("tts.config=invalid detail=%s", type(exc).__name__)
+            return
+        if not cfg.enabled:
+            log.info("tts.enabled=False (voice off, text only)")
+            return
+        log.info(
+            "tts.enabled=True max_chars_for_voice=%d text_intents=%s "
+            "prefer_voice_intents=%s api_url=%s api_style=%s state_max_age_s=%g",
+            cfg.max_chars_for_voice,
+            ",".join(cfg.text_intents),
+            ",".join(cfg.prefer_voice_intents),
+            cfg.api_url,
+            cfg.api_style,
+            cfg.state_max_age_s,
+        )
+
+    def _decide_medium(self, text: str) -> tuple[str, str, str]:
+        """B+C：返回 `(medium, reason, intent)`；intent 仅用于日志观测（可能为空）。"""
         cfg = self._tts_cfg if self._tts_cfg is not None else TTSConfig()
         state = self._latest_state(cfg)
-        return decide_medium_with_reason(text, state, cfg)
+        intent = str(state.get("intent") or "") if isinstance(state, Mapping) else ""
+        if self._ensure_voice() is None:
+            return "text", "voice_unconfigured", intent
+        medium, reason = decide_medium_with_reason(text, state, cfg)
+        return medium, reason, intent
 
     def _send_pending(self) -> int:
         sent = 0
@@ -777,9 +844,10 @@ class TelegramBridge:
                 log.info("尚无白名单 chat，%d 条气泡暂缓发送", len(self._pending))
                 break
             text = _clip_telegram(self._pending[0])
-            medium, reason = self._decide_medium(text)
+            medium, reason, intent = self._decide_medium(text)
+            intent_log = intent or "-"
             if medium == "voice" and self._send_voice_chunks(chat_id, text):
-                log.info("medium=voice reason=%s len=%d", reason, len(text))
+                log.info("medium=voice reason=%s len=%d intent=%s", reason, len(text), intent_log)
                 self._pending.pop(0)
                 self.last_send_error = None
                 self._send_fail_backoff = 1.0
@@ -788,10 +856,15 @@ class TelegramBridge:
                 sent += 1
                 continue
             if medium == "voice":
-                # 语音失败（合成/转换/上传）⇒ 降级文字，消息不丢
-                log.warning("medium=text reason=voice_failed(len=%d)", len(text))
+                # 语音失败（合成/转换/上传）⇒ 降级文字，消息不丢；原因必须落盘可查
+                log.warning(
+                    "medium=text reason=voice_failed detail=%s len=%d intent=%s",
+                    self.last_voice_error or "unknown",
+                    len(text),
+                    intent_log,
+                )
             else:
-                log.info("medium=text reason=%s len=%d", reason, len(text))
+                log.info("medium=text reason=%s len=%d intent=%s", reason, len(text), intent_log)
             try:
                 message_id = self._api.send_message(chat_id, text)
             except Exception as exc:
@@ -879,6 +952,7 @@ class TelegramBridge:
             return 3
         stop = stop_event if stop_event is not None else threading.Event()
         self.initialize_cursor()
+        self.log_startup_summary()
         sender = threading.Thread(
             target=self._sender_loop, args=(stop,), name="telegram-sender", daemon=True
         )
@@ -900,6 +974,7 @@ class TelegramBridge:
 
     def run_once(self) -> dict[str, int]:
         """只跑一轮：收（timeout=0）+ 发。供联调/真机 smoke 用。"""
+        self.log_startup_summary()
         received = 0
         try:
             updates = self._api.get_updates(self._offset, timeout_s=0)
@@ -945,18 +1020,22 @@ def main(argv: list[str] | None = None) -> int:
         "--chat-file", default=None, help="白名单 chat 路径（默认 data/run/telegram_chat.txt）"
     )
     a = ap.parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout
-    )
+    # 桥由计划任务用 pythonw.exe 起（父进程 svchost，**没有 stdout**）⇒ 日志必须自己落盘，
+    # 不能依赖 logging.basicConfig(stream=stdout)。
+    log_path = setup_logging()
     try:
         token = load_token(Path(a.token_file) if a.token_file else None)
     except BridgeConfigError as exc:
         log.error("拒绝启动：%s", exc)
         return 2
     bridge = TelegramBridge(token, chat_file=Path(a.chat_file) if a.chat_file else None)
+    log.info("日志文件：%s", log_path)
     if a.once:
         result = bridge.run_once()
-        log.info("单轮完成：收到 %d 条更新，发出 %d 条气泡", result["received"], result["sent"])
+        message = f"单轮完成：收到 {result['received']} 条更新，发出 {result['sent']} 条气泡"
+        log.info(message)
+        with contextlib.suppress(Exception):  # pythonw 下 stdout 可能是 None
+            print(f"[ok] {message}（日志：{log_path}）")
         return 0
     if bridge.chat_id is None:
         log.info("尚未绑定 chat：请先用你的 Telegram 给机器人发一条消息（首条自动绑定）")

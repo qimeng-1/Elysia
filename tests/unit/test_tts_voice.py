@@ -44,6 +44,7 @@ def _load(name: str, filename: Path) -> Any:
 
 tts = _load("tts_voice_probe", SCRIPTS / "tts_voice.py")
 bridge = _load("telegram_bridge_voice_probe", SCRIPTS / "telegram_bridge.py")
+panel = _load("elysia_panel_tts_probe", SCRIPTS / "elysia_panel.py")
 
 
 # ── 构造工具 ────────────────────────────────────────────────────────
@@ -614,3 +615,126 @@ def test_voice_bubbles_are_not_resent_on_next_poll(
     assert b.poll_expression_once() == 1
     assert b.poll_expression_once() == 0
     assert count == 1 and len(fake.voices) == 1
+
+
+# ── 桥日志落盘 / 轮转 / 面板观测（2026-10-20 观测缺口补强）──────────
+def _detach_log(path: Path) -> None:
+    """摘掉测试挂上的文件 handler（避免污染后续用例）。"""
+    for handler in list(bridge.log.handlers):
+        base = getattr(handler, "baseFilename", None)
+        if base and Path(base).resolve() == path.resolve():
+            bridge.log.removeHandler(handler)
+            handler.close()
+
+
+@pytest.fixture()
+def bridge_log(tmp_path: Path):
+    path = tmp_path / "bridge.log"
+    bridge.setup_logging(path, max_bytes=1024, backup_count=2)
+    try:
+        yield path
+    finally:
+        _detach_log(path)
+
+
+def test_setup_logging_is_idempotent(tmp_path: Path) -> None:
+    """重复初始化**不得**加第二个 handler（否则每条日志双写）。"""
+    path = tmp_path / "bridge.log"
+    bridge.setup_logging(path)
+    bridge.setup_logging(path, max_bytes=4096)
+    try:
+        same = [
+            h
+            for h in bridge.log.handlers
+            if getattr(h, "baseFilename", None) and Path(h.baseFilename).resolve() == path.resolve()
+        ]
+        assert len(same) == 1, "重复初始化给同一个日志文件挂了多个 handler（会双写）"
+    finally:
+        _detach_log(path)
+
+
+def test_medium_line_is_written_to_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bridge_log: Path
+) -> None:
+    """每条气泡的 `medium=... reason=... len=... intent=...` 必须真的落盘（不靠 stdout）。"""
+
+    def voice(_text: str) -> bytes:
+        return b"OggS" + b"\x00" * 8
+
+    b, _fake, _state, hb = _bridge(tmp_path, monkeypatch, voice)
+    b.initialize_cursor()
+    _add_bubble(hb, "我在呢。")
+    assert b.poll_expression_once() == 1
+    text = bridge_log.read_text(encoding="utf-8")
+    assert "medium=voice" in text
+    assert "reason=" in text and "len=" in text and "intent=" in text
+
+
+def test_startup_summary_logged_without_token(tmp_path: Path, bridge_log: Path) -> None:
+    """启动摘要写进日志；含关键配置，**不含 token**。"""
+    cfg_path = tmp_path / "tts.json"
+    cfg_path.write_text(
+        json.dumps(
+            {"enabled": True, "api_url": "http://127.0.0.1:9880", "max_chars_for_voice": 30},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    b = bridge.TelegramBridge(
+        TOKEN,
+        heartbeat_db=tmp_path / "heartbeat.db",
+        tts_config_path=cfg_path,
+        voice=lambda _text: b"OggS",
+    )
+    b.log_startup_summary()
+    text = bridge_log.read_text(encoding="utf-8")
+    assert "tts.enabled=True" in text
+    assert "max_chars_for_voice=30" in text
+    assert "api_url=http://127.0.0.1:9880" in text
+    assert TOKEN not in text, "启动摘要泄露了 token"
+
+
+def test_rotation_does_not_raise(tmp_path: Path) -> None:
+    """写入超过上限时轮转，不抛异常，且真的产生备份文件。"""
+    path = tmp_path / "rot.log"
+    bridge.setup_logging(path, max_bytes=1024, backup_count=2)
+    try:
+        for i in range(200):
+            bridge.log.info("medium=text reason=too_long len=%d %s", i, "x" * 80)
+        assert path.exists()
+        assert list(tmp_path.glob("rot.log.*")), "超过 1KB 却没有发生轮转"
+    finally:
+        _detach_log(path)
+
+
+def test_voice_status_reads_bridge_log_and_cache(tmp_path: Path) -> None:
+    """面板 `/api/status` 的 voice 小节：从桥日志 + 缓存目录只读推导（手机上看得到）。"""
+    logs = tmp_path / "data" / "logs"
+    cache = tmp_path / "data" / "cache" / "tts_voice"
+    run = tmp_path / "data" / "run"
+    for d in (logs, cache, run):
+        d.mkdir(parents=True, exist_ok=True)
+    (run / "tts.json").write_text("{}", encoding="utf-8")
+    (cache / "a.ogg").write_bytes(b"OggS")
+    (logs / "telegram_bridge.log").write_text(
+        "2026-10-20 00:22:43,123 INFO medium=voice reason=default_voice len=6 intent=回应\n",
+        encoding="utf-8",
+    )
+    info = panel.voice_status(tmp_path)
+    assert info["configured"] is True
+    assert info["cache_files"] == 1
+    assert info["medium"] == "voice"
+    assert info["reason"] == "default_voice"
+    assert info["failed"] is False
+    assert info["last_voice_ts"] is not None
+    assert info["last_medium_ts"] is not None
+
+    # 失败降级也必须可观测
+    (logs / "telegram_bridge.log").write_text(
+        "2026-10-20 00:23:00,000 WARNING "
+        "medium=text reason=voice_failed detail=http_error len=5 intent=回应\n",
+        encoding="utf-8",
+    )
+    info2 = panel.voice_status(tmp_path)
+    assert info2["medium"] == "text" and info2["reason"] == "voice_failed"
+    assert info2["failed"] is True

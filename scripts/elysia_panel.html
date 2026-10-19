@@ -313,12 +313,17 @@ function render(d){
           d.last_main_ts? "（上次主声 "+new Date(d.last_main_ts*1000).toLocaleString("zh-CN",{hour12:false})+"）":""}</div>`
       : ""));
 
+  const v = d.channel?.voice || {};
+  const vTxt = v.medium ? (v.medium + "（" + (v.reason||"?") + "）") : "无记录";
+  const vDot = v.medium==="voice" ? "on" : (v.failed ? "warn" : "off");
   put("svc", [
     row(dot(d.tts_up?"on":"warn")+"GPT-SoVITS", d.tts_up?"可连":"未启动"),
     row(dot(d.llm_up?"on":"bad")+"主声 LLM", d.llm_up?"可达":"不可达"),
     row(dot((d.watchdog_state||"").toLowerCase()==="ready"?"on":"warn")+"看门狗", d.watchdog_state||"—"),
     row("下次备份", d.backup_next||"—"),
     row(dot((d.channel?.push?.configured)?"on":"warn")+"手机推送", (d.channel?.push?.configured)?"已配置":"未配置"),
+    row(dot(vDot)+"语音载体", vTxt),
+    row("语音缓存", (v.cache_files!=null? v.cache_files : "—") + " 条"),
   ].join(""));
   if(!d.tts_up) el("svc").innerHTML += '<div class="mut" style="font-size:12px;margin-top:6px">未开语音 ⇒ 她只出文字，属预期降级</div>';
 

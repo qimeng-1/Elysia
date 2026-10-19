@@ -92,6 +92,7 @@ from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
 from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
+from elysia.soul.dialogue import build_dialogue_context, record_her_bubble
 from elysia.soul.expression import (
     ReplyDecision,
     build_expression,
@@ -400,9 +401,10 @@ class ExpressionService:
         # 记忆被唤起 → 感受回路（只推心情，不进入话语）
         self._on_recall = on_recall
         self._last_express_ts: float | None = None
-        # P0-R19：多句回复的待发队列（due_ts, text）；由心跳每拍 flush，
+        # P0-R19：多句回复的待发队列（due_ts, text, emotion, intent）；由心跳每拍 flush，
         # 因此句间 2–8s 的停顿是真实时间，不是一口气写完。
-        self._pending_utterances: list[tuple[float, str]] = []
+        # S1a：每句气泡落库时同步写一条 `role='her'` 对话轮次（emotion/intent 随气泡带上）。
+        self._pending_utterances: list[tuple[float, str, dict[str, float], str]] = []
         # W1：最近说出口的微声句子（进程内环形缓冲）——`pick_variant` 用它做连续去重。
         # 不落库、不新增表：它是"这一两分钟里她刚说过什么"的运行时上下文，不是档案。
         self._recent_micro: deque[str] = deque(maxlen=RECENT_MICRO_MAX)
@@ -669,6 +671,15 @@ class ExpressionService:
         # 因此正常运行时它不为空；空列表 = 她此刻真的没有自我认知（她把种子一条条放下了）。
         payload[IDENTITY_FIELD] = await self._identity_lines()
 
+        # ── 1c2. S1a：最近真实对话（接得上话的物理基础）─────────
+        # 与 `memory_hooks`（撞上的旧记忆）语义不同、两者并存；读失败给空表，
+        # 绝不因为没有上下文而让她说不出话。
+        try:
+            payload["dialogue_context"] = await build_dialogue_context(self._store, now=now)
+        except Exception:
+            log.warning("装配 dialogue_context 失败——本次不带近期对话", exc_info=True)
+            payload["dialogue_context"] = []
+
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)
         if self.retriever is not None and callable(set_runner):
@@ -730,11 +741,22 @@ class ExpressionService:
         # ── 4. 落库：thought_log（桌宠气泡）+ expression_log（取证）──
         # P0-R19：第一句立刻冒泡，其余按她状态的间隔排队（心跳每拍 flush）
         sentences = result.sentences or ([result.text] if result.text else [])
+        bubble_emotion = dict(result.feelings or {})
         if sentences:
             await self._store.think(now, "expression", sentences[0])
+            # S1a：气泡落库 = 一条 `role='her'` 对话轮次（失败不影响她说话）
+            await record_her_bubble(
+                self._store,
+                now,
+                sentences[0],
+                emotion_vector=bubble_emotion,
+                intent=result.intent,
+            )
             gap = utterance_gap_s(result.reply_desire)
             for index, sentence in enumerate(sentences[1:], start=1):
-                self._pending_utterances.append((now + gap * index, sentence))
+                self._pending_utterances.append(
+                    (now + gap * index, sentence, bubble_emotion, result.intent)
+                )
         validation: dict[str, object] = (
             {"ok": result.validation.ok, "reason": result.validation.reason}
             if result.validation is not None
@@ -795,8 +817,12 @@ class ExpressionService:
         if not due:
             return 0
         self._pending_utterances = [item for item in self._pending_utterances if item[0] > now]
-        for _, sentence in sorted(due):
+        for _, sentence, _emotion, _intent in sorted(due):
             await self._store.think(now, "expression", sentence)
+            # S1a：后续气泡同样是 `role='her'` 对话轮次
+            await record_her_bubble(
+                self._store, now, sentence, emotion_vector=_emotion, intent=_intent
+            )
         return len(due)
 
     async def tick(

@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS expression_log (
     validation  TEXT NOT NULL,
     level       TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dialogue_turns (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts             REAL NOT NULL,
+    role           TEXT NOT NULL,
+    text           TEXT NOT NULL,
+    exchange_id    INTEGER NOT NULL,
+    emotion_vector TEXT,
+    intent         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dialogue_turns_ts ON dialogue_turns (ts);
 CREATE TABLE IF NOT EXISTS memories (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     created_ts     REAL NOT NULL,
@@ -418,6 +428,69 @@ class HeartbeatStore(_AsyncSQLite):
     async def thought_count(self) -> int:
         rows = await self.execute_raw("SELECT COUNT(*) FROM thought_log")
         return int(rows[0][0])
+
+    async def add_dialogue_turn(
+        self,
+        ts: float,
+        role: str,
+        text: str,
+        exchange_id: int,
+        *,
+        emotion_vector: dict[str, float] | None = None,
+        intent: str | None = None,
+    ) -> int:
+        """写一条对话轮次（S1a）：`role='user'/'her'`，同一次交换共用 `exchange_id`。
+
+        原话不裁剪（上下文读取时才截断）；`emotion_vector`/`intent` 只有 her 侧有。
+        返回新行 id。
+        """
+        emotion = json.dumps(emotion_vector, ensure_ascii=False) if emotion_vector else None
+
+        def _add(conn: sqlite3.Connection) -> int:
+            cur = conn.execute(
+                "INSERT INTO dialogue_turns (ts, role, text, exchange_id, emotion_vector, intent)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (ts, role, text, int(exchange_id), emotion, intent),
+            )
+            conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+
+        return int(await self.submit_ret(_add))
+
+    async def max_exchange_id(self) -> int:
+        """当前交换号（无对话时 0）。用户新消息 = 在这个值上 +1。"""
+        rows = await self.execute_raw("SELECT COALESCE(MAX(exchange_id), 0) FROM dialogue_turns")
+        return int(rows[0][0]) if rows else 0
+
+    async def dialogue_turns(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """读最近 `limit` 条对话轮次（按时间**升序**返回；不含 limit 则按时间升序全量）。"""
+        if limit is None:
+            rows = await self.execute_raw(
+                "SELECT id, ts, role, text, exchange_id, emotion_vector, intent"
+                " FROM dialogue_turns ORDER BY id"
+            )
+        else:
+            rows = await self.execute_raw(
+                "SELECT id, ts, role, text, exchange_id, emotion_vector, intent"
+                " FROM dialogue_turns ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+            rows = list(reversed(rows))
+        out: list[dict[str, Any]] = []
+        for rid, ts, role, text, exchange_id, emotion, intent in rows:
+            out.append(
+                {
+                    "id": int(rid),
+                    "ts": float(ts),
+                    "role": str(role),
+                    "text": str(text),
+                    "exchange_id": int(exchange_id),
+                    "emotion_vector": json.loads(emotion) if emotion else {},
+                    "intent": intent,
+                }
+            )
+        return out
 
     async def expression(
         self,

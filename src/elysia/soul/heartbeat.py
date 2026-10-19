@@ -63,6 +63,7 @@ from elysia.soul.away_life import AwayLife
 from elysia.soul.boundary import STATE_PRESSURE_WORDS, BoundaryDecision, BoundaryKeeper
 from elysia.soul.brain import BrainLoop, BrainOutput
 from elysia.soul.desire import DesireEvent
+from elysia.soul.dialogue import record_user_message
 from elysia.soul.distress import DISTRESS_INTERVAL_S, DistressMonitor
 from elysia.soul.expression import RESTRAINT_INTENT, ReplyDecision
 from elysia.soul.expression_service import ExpressionService
@@ -951,11 +952,8 @@ class SoulHeartbeat:
             if its > state.last_interaction_ts:
                 state.last_interaction_ts = its
             # P1：新交互事件 → 欲望系统
-            if its > self._last_interaction_event_ts and self._brain_loop is not None:
+            if its > self._last_interaction_event_ts:
                 self._last_interaction_event_ts = its
-                # P0-R19：不在这里立刻给满足感——先记下来，等"回不回"决定后
-                # 再结算（回应 = interaction +CS；选择不回 = silence -CS）。
-                self._pending_social_pulse = True
                 # P2：新交互 → 强制开口回应
                 self._new_interaction = True
                 # P3 打字对话：提取用户输入文本（桌宠写入 interaction.text）
@@ -965,6 +963,17 @@ class SoulHeartbeat:
                     if isinstance(raw_text, str) and raw_text.strip()
                     else None
                 )
+                # S1a：用户新消息 = 新交换号 + 写一条对话轮次（失败不影响她说话，
+                # `record_user_message` 内部吞异常并记日志）。这是"接得上话"的起点。
+                # 注意：这条**不依赖** brain_loop 是否存在——对话归档是基础设施。
+                if self._pending_user_message is not None:
+                    await record_user_message(
+                        self._heartbeat_store, now, self._pending_user_message
+                    )
+                if self._brain_loop is not None:
+                    # P0-R19：不在这里立刻给满足感——先记下来，等"回不回"决定后
+                    # 再结算（回应 = interaction +CS；选择不回 = silence -CS）。
+                    self._pending_social_pulse = True
 
     # ── P2 表达辅助 ─────────────────────────────────────
 

@@ -28,12 +28,17 @@
       不冒异常到主循环；发送失败的气泡留在内存待发队列里下次重试。
     · **游标只在内存**：首次启动只建立基线，**不补推历史**（重启不刷屏）。
 
-语音气泡（O1，2026-10-19 用户批准 TTS）
-    `data/run/tts.json` 存在且 `enabled=true` 时，每条气泡先走
-    GPT-SoVITS -> wav -> ffmpeg **ogg/opus** -> Telegram `sendVoice`；
-    **任何一步失败（配置/服务/ffmpeg/上传）都自动降级发文本，绝不丢消息**。
+语音气泡（O1 + B/C，2026-10-19 用户批准）
+    `data/run/tts.json` 存在且 `enabled=true` 时，每条气泡：
+      1. **先决定载体**（C）：读 `expression_log` 最近 ≤120s 那行的
+         `instruction.emotion_vector` + `intent`，按配置决定 `voice` 还是 `text`
+         （太长/信息型意图 -> 文字；想亲近/情绪高 -> 语音；状态读不到 -> 默认语音底座）。
+         每次发送都记一行 `medium=voice|text reason=<rule>`，阈值全部在配置里。
+      2. **语音带字幕**（B）：GPT-SoVITS -> wav -> ffmpeg ogg/opus -> `sendVoice`，
+         每个音频块用该块原文作 caption（纯文本、≤1024 字，不带 parse_mode）。
+    **任何一步失败（配置/状态/服务/ffmpeg/上传）都自动降级发文本，绝不丢消息**。
     合成结果按文本+配置缓存（`data/cache/tts_voice/`），同一句不重复合成。
-    长文本按句切成 <= `max_chars_per_voice` 的几段语音。< 配置改了 mtime 会自动重载。
+    配置改了 mtime 会自动重载。
 
 用法
 ----
@@ -68,7 +73,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from elysia_dash import ro_connect, take_snapshot  # noqa: E402
 from elysia_panel import SayError, sanitize_say_text, write_interaction  # noqa: E402
-from tts_voice import TTSConfig, load_config, split_for_voice, synthesize_ogg  # noqa: E402
+from tts_voice import (  # noqa: E402
+    CAPTION_MAX_CHARS,
+    TTSConfig,
+    decide_medium_with_reason,
+    load_config,
+    split_for_voice,
+    synthesize_ogg,
+)
 
 from elysia.soul.expression import split_utterances  # noqa: E402
 
@@ -266,8 +278,15 @@ class TelegramAPI:
             },
         )
 
-    def send_voice(self, chat_id: int, ogg: bytes, *, filename: str = "voice.ogg") -> None:
-        """发一条 Telegram 语音气泡（multipart 上传 ogg/opus）。失败抛 TelegramError。"""
+    def send_voice(
+        self, chat_id: int, ogg: bytes, *, filename: str = "voice.ogg", caption: str = ""
+    ) -> None:
+        """发语音气泡（multipart 上传 ogg/opus；可选纯文本字幕）。失败抛 TelegramError。
+
+        B（2026-10-19）：字幕与音频块一一对应，由调用方传该块原文。
+        **纯文本，不带 parse_mode** —— 她的话里可能出现 `_ * [ ]` 等字符，
+        交给 Telegram 解析会整条失败（宁可不加样式，也要保证发得出去）。
+        """
         boundary = "----ElysiaVoice" + secrets.token_hex(8)
         parts: list[bytes] = []
 
@@ -281,6 +300,8 @@ class TelegramAPI:
             )
 
         field("chat_id", str(int(chat_id)))
+        if caption:
+            field("caption", _clip_caption(caption))
         parts.append(
             (
                 f"--{boundary}\r\n"
@@ -332,6 +353,14 @@ def _clip_telegram(text: str) -> str:
     if len(text) <= TELEGRAM_MAX_CHARS:
         return text
     return text[: TELEGRAM_MAX_CHARS - 20] + "\n…（太长，后面截断了）"
+
+
+def _clip_caption(text: str) -> str:
+    """语音字幕上限 1024（Telegram 媒体 caption）；超了截断加省略号。"""
+    text = text or ""
+    if len(text) <= CAPTION_MAX_CHARS:
+        return text
+    return text[: CAPTION_MAX_CHARS - 1] + "…"
 
 
 # ── 单实例护栏（防止双开 ⇒ 同一条气泡发两遍）────────────────────────
@@ -643,7 +672,11 @@ class TelegramBridge:
         return self._voice
 
     def _send_voice_chunks(self, chat_id: int, text: str) -> bool:
-        """尝试把一条气泡发成语音；**任何一步失败返回 False**，由调用方降级发文本。"""
+        """尝试把一条气泡发成语音；**任何一步失败返回 False**，由调用方降级发文本。
+
+        B（2026-10-19）：字幕与音频块**一一对应** —— `split_for_voice` 切出的每块
+        用该块原文做 caption（纯文本，超 1024 字符截断）。
+        """
         voice = self._ensure_voice()
         if voice is None:
             return False
@@ -653,7 +686,7 @@ class TelegramBridge:
         if not chunks:
             return False
         # 先全部合成（缓存命中很快），再发；避免"发了一半再失败"造成内容重复
-        oggs: list[bytes] = []
+        oggs: list[tuple[bytes, str]] = []
         for chunk in chunks:
             try:
                 ogg = voice(chunk)
@@ -665,20 +698,75 @@ class TelegramBridge:
             if not ogg:
                 self.last_voice_error = "empty_ogg"
                 return False
-            oggs.append(ogg)
-        for ogg in oggs:
+            oggs.append((ogg, chunk))
+        for ogg, chunk in oggs:
             try:
-                self._api.send_voice(chat_id, ogg)
+                self._api.send_voice(chat_id, ogg, caption=chunk)
             except Exception as exc:
                 self.last_voice_error = type(exc).__name__
                 log.warning("sendVoice 失败，重试一次：%s", type(exc).__name__)
                 try:
-                    self._api.send_voice(chat_id, ogg)
+                    self._api.send_voice(chat_id, ogg, caption=chunk)
                 except Exception as exc2:
                     self.last_voice_error = type(exc2).__name__
                     log.warning("sendVoice 仍失败，降级发文本：%s", type(exc2).__name__)
                     return False
         return True
+
+    def _latest_state(self, cfg: TTSConfig) -> dict[str, Any] | None:
+        """取 `expression_log` 最近一行（≤ state_max_age_s）作为"她此刻的状态"。
+
+        为什么是 expression_log：`thought_log` 只有 `id, ts, kind, text` 四列、**没有状态**；
+        `instruction` 列是表达指令 JSON（含 `emotion_vector` / `intent`）。
+        读不到/过期 ⇒ None（调用方按 B 底座发语音+字幕，并记 `state_unreadable`）。
+        """
+        if not self._heartbeat_db.is_file():
+            log.info("medium=voice reason=state_unreadable(detail=db_missing)")
+            return None
+        try:
+            con = ro_connect(str(self._heartbeat_db))
+            try:
+                row = con.execute(
+                    "SELECT ts, intent, instruction FROM expression_log ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                con.close()
+        except Exception as exc:
+            log.info("medium=voice reason=state_unreadable(detail=%s)", type(exc).__name__)
+            return None
+        if row is None:
+            log.info("medium=voice reason=state_unreadable(detail=no_row)")
+            return None
+        ts = float(row[0] or 0.0)
+        age_s = time.time() - ts
+        if age_s < 0 or age_s > cfg.state_max_age_s:
+            log.info(
+                "medium=voice reason=state_unreadable(detail=stale age=%.0fs)", max(age_s, 0.0)
+            )
+            return None
+        instruction = row[2]
+        parsed: dict[str, Any] = {}
+        if isinstance(instruction, str) and instruction.strip():
+            with contextlib.suppress(json.JSONDecodeError):
+                loaded = json.loads(instruction)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+        emotions_raw = parsed.get("emotion_vector")
+        emotions: dict[str, float] = {}
+        if isinstance(emotions_raw, Mapping):
+            for key, value in emotions_raw.items():
+                with contextlib.suppress(TypeError, ValueError):
+                    emotions[str(key)] = float(value)  # type: ignore[arg-type]
+        intent = str(parsed.get("intent") or row[1] or "")
+        return {"ts": ts, "age_s": age_s, "intent": intent, "emotions": emotions}
+
+    def _decide_medium(self, text: str) -> tuple[str, str]:
+        """B+C：决定这条气泡发语音（带字幕）还是文字；返回 (medium, reason) 并写日志。"""
+        if self._ensure_voice() is None:
+            return "text", "voice_unconfigured"
+        cfg = self._tts_cfg if self._tts_cfg is not None else TTSConfig()
+        state = self._latest_state(cfg)
+        return decide_medium_with_reason(text, state, cfg)
 
     def _send_pending(self) -> int:
         sent = 0
@@ -689,7 +777,9 @@ class TelegramBridge:
                 log.info("尚无白名单 chat，%d 条气泡暂缓发送", len(self._pending))
                 break
             text = _clip_telegram(self._pending[0])
-            if self._send_voice_chunks(chat_id, text):
+            medium, reason = self._decide_medium(text)
+            if medium == "voice" and self._send_voice_chunks(chat_id, text):
+                log.info("medium=voice reason=%s len=%d", reason, len(text))
                 self._pending.pop(0)
                 self.last_send_error = None
                 self._send_fail_backoff = 1.0
@@ -697,6 +787,11 @@ class TelegramBridge:
                 self._last_sent_text = None
                 sent += 1
                 continue
+            if medium == "voice":
+                # 语音失败（合成/转换/上传）⇒ 降级文字，消息不丢
+                log.warning("medium=text reason=voice_failed(len=%d)", len(text))
+            else:
+                log.info("medium=text reason=%s len=%d", reason, len(text))
             try:
                 message_id = self._api.send_message(chat_id, text)
             except Exception as exc:

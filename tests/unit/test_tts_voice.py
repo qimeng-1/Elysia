@@ -19,6 +19,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+import time
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
@@ -239,18 +240,22 @@ class FakeTelegram:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
         self.voices: list[bytes] = []
+        self.captions: list[str] = []  # B：每条语音对应的字幕
         self.edits: list[dict[str, Any]] = []
         self.calls: list[str] = []
+        self.bodies: list[bytes] = []  # 原始 body（multipart 断言用）
         self.fail_voice = False
 
     def __call__(self, req: Any, timeout_s: float) -> bytes:
         method = str(req.full_url).rsplit("/", 1)[-1]
         self.calls.append(method)
         if method == "sendVoice":
-            # multipart 不是 JSON：只取文件段
+            # multipart 不是 JSON：只取文件段 + caption 字段
             if self.fail_voice:
                 raise urllib.error.URLError("voice down")
+            self.bodies.append(req.data)
             self.voices.append(_ogg_from_multipart(req.data))
+            self.captions.append(_field_from_multipart(req.data, "caption"))
             return json.dumps(
                 {"ok": True, "result": {"message_id": 900 + len(self.voices)}}
             ).encode()
@@ -272,6 +277,14 @@ def _ogg_from_multipart(body: bytes) -> bytes:
     return body[start:end]
 
 
+def _field_from_multipart(body: bytes, name: str) -> str:
+    """从 multipart body 里取一个纯文本字段（caption 等）。"""
+    marker = ('Content-Disposition: form-data; name="' + name + '"\r\n\r\n').encode("utf-8")
+    start = body.index(marker) + len(marker)
+    end = body.index(b"\r\n--", start)
+    return body[start:end].decode("utf-8", errors="replace")
+
+
 def _state_db(path: Path) -> Path:
     con = sqlite3.connect(path)
     try:
@@ -289,6 +302,10 @@ def _heartbeat_db(path: Path) -> Path:
             "CREATE TABLE IF NOT EXISTS thought_log ("
             " id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"
             " kind TEXT NOT NULL, text TEXT NOT NULL);"
+            "CREATE TABLE IF NOT EXISTS expression_log ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"
+            " intent TEXT NOT NULL, instruction TEXT NOT NULL,"
+            " llm_text TEXT NOT NULL, validation TEXT NOT NULL, level TEXT NOT NULL);"
         )
         con.commit()
     finally:
@@ -330,10 +347,89 @@ def _add_bubble(hb: Path, text: str) -> None:
         con.close()
 
 
+def _add_expression_state(
+    hb: Path,
+    *,
+    intent: str = "回应",
+    emotions: dict[str, float] | None = None,
+    ts: float | None = None,
+) -> None:
+    """往 expression_log 写一行"她此刻的状态"（C 从这里取 emotion_vector/intent）。"""
+    instruction = json.dumps(
+        {"intent": intent, "emotion_vector": emotions or {}}, ensure_ascii=False
+    )
+    con = sqlite3.connect(hb)
+    try:
+        con.execute(
+            "INSERT INTO expression_log (ts, intent, instruction, llm_text, validation, level)"
+            " VALUES (?, ?, ?, '', '{}', 'micro')",
+            (time.time() if ts is None else ts, intent, instruction),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+# ── C：状态 -> 载体（纯函数边界）────────────────────────────────────
+def test_decide_medium_length_boundary() -> None:
+    """长度 29/30/31：> max_chars_for_voice（默认 30）才写字，等于 30 仍是语音。"""
+    cfg = tts.TTSConfig()
+    assert tts.decide_medium("字" * 29, None, cfg) == "voice"
+    assert tts.decide_medium("字" * 30, None, cfg) == "voice"
+    assert tts.decide_medium("字" * 31, None, cfg) == "text"
+    assert tts.decide_medium_with_reason("字" * 31, None, cfg) == ("text", "too_long")
+
+
+def test_decide_medium_info_intents_are_text() -> None:
+    """信息型 intent（自检报告/好奇提问）⇒ 文字：读比听快。"""
+    cfg = tts.TTSConfig()
+    for intent in ("自检报告", "好奇提问"):
+        medium, reason = tts.decide_medium_with_reason(
+            "在呢。", {"intent": intent, "emotions": {}}, cfg
+        )
+        assert (medium, reason) == ("text", "info_intent")
+
+
+def test_decide_medium_voice_reasons_and_thresholds() -> None:
+    """阈值上下各一格：miss>0.4 / rest>0.45 命中给不同 reason；正好等于阈值不算命中。"""
+    cfg = tts.TTSConfig()
+
+    def reason(intent: str, emotions: dict[str, float]) -> tuple[str, str]:
+        return tts.decide_medium_with_reason(
+            "在呢。", {"intent": intent, "emotions": emotions}, cfg
+        )
+
+    assert reason("回应", {"miss": 0.41}) == ("voice", "miss_high")
+    assert reason("回应", {"miss": 0.4}) == ("voice", "default_voice")
+    assert reason("回应", {"rest": 0.46}) == ("voice", "rest_high")
+    assert reason("回应", {"rest": 0.45}) == ("voice", "default_voice")
+    for intent in ("思念", "主动问候"):
+        assert reason(intent, {}) == ("voice", "prefer_intent")
+
+
+def test_decide_medium_state_missing_defaults_to_voice_with_caption() -> None:
+    """状态读不到 ⇒ **默认语音底座**（B：语音+字幕），绝不因读不到状态就不发。"""
+    cfg = tts.TTSConfig()
+    assert tts.decide_medium_with_reason("在呢。", None, cfg) == ("voice", "state_unreadable")
+    # state 为空 dict 也算"读不到"
+    assert tts.decide_medium_with_reason("在呢。", {}, cfg) == ("voice", "state_unreadable")
+
+
+def test_decide_medium_is_configurable() -> None:
+    """阈值/意图全部来自配置（不写死）：换个配置，结论要跟着变。"""
+    cfg = tts.TTSConfig(max_chars_for_voice=5, text_intents=("发呆呓语",))
+    assert tts.decide_medium("六个字都不到的长度", None, cfg) == "text"  # 长度 >5
+    assert tts.decide_medium_with_reason("嗯。", {"intent": "发呆呓语", "emotions": {}}, cfg) == (
+        "text",
+        "info_intent",
+    )
+    assert tts.decide_medium("嗯。", {"intent": "回应", "emotions": {}}, cfg) == "voice"
+
+
 def test_voice_success_sends_send_voice_not_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """语音成功 ⇒ 只发 `sendVoice` 语音气泡（不再发同一条文本）。"""
+    """语音成功 ⇒ 只发 `sendVoice` 语音气泡（不再发同一条文本），且**带字幕**（B）。"""
     calls: list[str] = []
 
     def voice(text: str) -> bytes:
@@ -346,6 +442,7 @@ def test_voice_success_sends_send_voice_not_text(
     assert b.poll_expression_once() == 1
     assert fake.voices and not fake.sent
     assert calls == ["我在呢。"]
+    assert fake.captions == ["我在呢。"], "语音没有带对应的字幕"
     assert fake.calls.count("sendVoice") == 1
 
 
@@ -369,10 +466,8 @@ def test_voice_failure_falls_back_to_text_and_keeps_message(
     assert b.last_voice_error == "timeout"
 
 
-def test_voice_long_text_is_split_into_multiple_voice_bubbles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """长文本 ⇒ 多条语音（每段不超上限），而不是一个巨大的语音文件。"""
+def test_voice_caption_matches_each_chunk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B：字幕与音频块**一一对应** —— 每个音频块用它自己的原文做 caption。"""
     texts: list[str] = []
 
     def voice(text: str) -> bytes:
@@ -380,24 +475,117 @@ def test_voice_long_text_is_split_into_multiple_voice_bubbles(
         return b"OggS" + b"\x00" * 16
 
     b, fake, _state, hb = _bridge(tmp_path, monkeypatch, voice)
+    # 强制多块：语音决策阈值放宽，但每块 20 字（split_for_voice 下限 20）
+    b._tts_cfg = tts.TTSConfig(
+        max_chars_per_voice=20, max_chars_for_voice=1000, cache_dir=str(tmp_path / "cache")
+    )
     b.initialize_cursor()
-    _add_bubble(hb, "第一句。" * 40)  # 160 字，超过默认 120 的切分上限
+    _add_bubble(hb, "第一句。" * 40)  # 160 字 -> 多块语音
     assert b.poll_expression_once() >= 1
     assert len(texts) >= 2
     assert len(fake.voices) == len(texts)
+    assert fake.captions == texts, "字幕与音频块没有一一对应"
     assert not fake.sent
 
 
-def test_send_voice_uses_multipart_and_never_leaks_token(
+def test_long_message_is_sent_as_text_not_voice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`sendVoice` 必须是 multipart（chat_id + voice 文件），且错误信息里不带 token。"""
+    """C：超过 `max_chars_for_voice`（默认 30）⇒ 写字，不合成语音（读比听快）。"""
+    texts: list[str] = []
+
+    def voice(text: str) -> bytes:
+        texts.append(text)
+        return b"OggS" + b"\x00" * 8
+
+    b, fake, _state, hb = _bridge(tmp_path, monkeypatch, voice)
+    b.initialize_cursor()
+    _add_bubble(hb, "字" * 31)
+    assert b.poll_expression_once() == 1
+    assert texts == [], "长消息不该合成语音"
+    assert fake.voices == []
+    assert [m["text"] for m in fake.sent] == ["字" * 31]
+
+
+def test_info_intent_state_is_sent_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """C：状态里 intent=自检报告/好奇提问 ⇒ 文字（即使很短）。"""
+    calls: list[str] = []
+
+    def voice(text: str) -> bytes:
+        calls.append(text)
+        return b"OggS" + b"\x00" * 8
+
+    b, fake, _state, hb = _bridge(tmp_path, monkeypatch, voice)
+    b.initialize_cursor()
+    _add_expression_state(hb, intent="自检报告", emotions={})
+    _add_bubble(hb, "我看了一下自己。")
+    assert b.poll_expression_once() == 1
+    assert calls == []
+    assert fake.voices == []
+    assert [m["text"] for m in fake.sent] == ["我看了一下自己。"]
+
+
+def test_high_miss_state_is_sent_as_voice_with_caption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C：状态里 miss 高 ⇒ 语音（带字幕）；reason 可观测（miss_high）。"""
+    calls: list[str] = []
+
+    def voice(text: str) -> bytes:
+        calls.append(text)
+        return b"OggS" + b"\x00" * 8
+
+    b, fake, _state, hb = _bridge(tmp_path, monkeypatch, voice)
+    b.initialize_cursor()
+    _add_expression_state(hb, intent="回应", emotions={"miss": 0.65})
+    _add_bubble(hb, "我有点想你了。")
+    assert b.poll_expression_once() == 1
+    assert calls == ["我有点想你了。"]
+    assert fake.captions == ["我有点想你了。"]
+    assert fake.sent == []
+
+
+def test_state_older_than_120s_falls_back_to_voice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """状态行过期（>120s）⇒ 视为读不到 ⇒ 默认语音底座（不是不发）。"""
+    calls: list[str] = []
+
+    def voice(text: str) -> bytes:
+        calls.append(text)
+        return b"OggS" + b"\x00" * 8
+
+    b, fake, _state, hb = _bridge(tmp_path, monkeypatch, voice)
+    b.initialize_cursor()
+    _add_expression_state(
+        hb, intent="自检报告", emotions={}, ts=time.time() - 3600
+    )  # 过期行不该影响决策
+    _add_bubble(hb, "在呢。")
+    assert b.poll_expression_once() == 1
+    assert calls == ["在呢。"]
+    assert fake.captions == ["在呢。"]
+
+
+def test_send_voice_uses_multipart_caption_and_never_leaks_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sendVoice` 必须是 multipart（chat_id + voice + 纯文本 caption），且错误信息里不带 token。"""
     fake = FakeTelegram()
     monkeypatch.setattr(bridge, "_open_telegram", fake)
     api = bridge.TelegramAPI(TOKEN)
-    api.send_voice(111, b"OggS" + b"\x00" * 8)
+    api.send_voice(111, b"OggS" + b"\x00" * 8, caption="她说的话")
     assert fake.calls == ["sendVoice"]
     assert fake.voices and fake.voices[0].startswith(b"OggS")
+    assert fake.captions == ["她说的话"]
+    # 字幕是纯文本：不允许 parse_mode（她的话里有 `_ * [ ]` 会让 Telegram 解析失败）
+    body = fake.bodies[0]
+    assert b'name="caption"' in body
+    assert b'name="parse_mode"' not in body
+
+    # 超 1024 字符 ⇒ 截断加省略号（不是静默丢字幕，也不是让 Telegram 拒收）
+    api.send_voice(111, b"OggS", caption="字" * 1500)
+    assert len(fake.captions[-1]) <= tts.CAPTION_MAX_CHARS
+    assert fake.captions[-1].endswith("…")
 
     # 失败路径：异常文本里不得出现 token（URL 路径含 token）
     def boom(req: Any, timeout_s: float) -> bytes:

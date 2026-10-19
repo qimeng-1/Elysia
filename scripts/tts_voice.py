@@ -55,6 +55,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,17 @@ class TTSConfig:
     opus_bitrate: str = "48k"
     cache_dir: str = str(DEFAULT_CACHE_DIR)
     profiles: dict[str, VoiceProfile] = field(default_factory=dict)
+    # ── B+C（2026-10-19 用户拍板）：语音带字幕 + 状态决定出声/写字 ──
+    # 全部可配（data/run/tts.json），代码里只是缺省值
+    max_chars_for_voice: int = 30  # 超过这个字数 ⇒ 发文字（读比听快）
+    text_intents: tuple[str, ...] = ("自检报告", "好奇提问")  # 信息型意图 ⇒ 文字
+    prefer_voice_intents: tuple[str, ...] = ("思念", "主动问候")  # 想亲近 ⇒ 语音
+    voice_miss_threshold: float = 0.4  # miss 高于它 ⇒ 语音
+    voice_rest_threshold: float = 0.45  # rest 高于它 ⇒ 语音（她累了，话短，适合出声）
+    state_max_age_s: float = 120.0  # expression_log 状态行超过这么久 ⇒ 视为读不到
+
+
+CAPTION_MAX_CHARS = 1024  # Telegram 媒体 caption 上限
 
 
 def config_path(path: Path | None = None) -> Path:
@@ -124,6 +136,17 @@ def _as_int(value: object, default: int) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _as_str_tuple(value: object, default: tuple[str, ...]) -> tuple[str, ...]:
+    """配置里可以是 JSON 数组或逗号分隔字符串；缺项回退默认值（缺字段不崩）。"""
+    if isinstance(value, (list, tuple)):
+        items = tuple(str(v).strip() for v in value if str(v).strip())
+        return items or default
+    if isinstance(value, str):
+        items = tuple(part.strip() for part in value.split(",") if part.strip())
+        return items or default
+    return default
 
 
 def load_config(path: Path | None = None) -> TTSConfig:
@@ -167,6 +190,12 @@ def load_config(path: Path | None = None) -> TTSConfig:
         cache_dir=str(data.get("cache_dir", str(DEFAULT_CACHE_DIR))).strip()
         or str(DEFAULT_CACHE_DIR),
         profiles=profiles,
+        max_chars_for_voice=max(1, _as_int(data.get("max_chars_for_voice"), 30)),
+        text_intents=_as_str_tuple(data.get("text_intents"), ("自检报告", "好奇提问")),
+        prefer_voice_intents=_as_str_tuple(data.get("prefer_voice_intents"), ("思念", "主动问候")),
+        voice_miss_threshold=_as_float(data.get("voice_miss_threshold"), 0.4),
+        voice_rest_threshold=_as_float(data.get("voice_rest_threshold"), 0.45),
+        state_max_age_s=_as_float(data.get("state_max_age_s"), 120.0),
     )
 
 
@@ -449,6 +478,55 @@ def split_for_voice(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> list[str]:
     return [c for c in chunks if c]
 
 
+# ── B+C（2026-10-19 用户拍板）：她的状态决定"出声还是写字"──────────────
+def decide_medium_with_reason(
+    text: str, state: Mapping[str, Any] | None, cfg: TTSConfig
+) -> tuple[str, str]:
+    """ "语音"还是"文字"——纯函数（方便测边界），返回 `(medium, reason)`。
+
+    规则（顺序即优先级；阈值全部来自配置，不写死）：
+      1. 超过 `max_chars_for_voice` ⇒ text（读比听快）
+      2. intent ∈ `text_intents`（自检报告/好奇提问等信息型）⇒ text
+      3. 状态读不到（None / 过期）⇒ **voice**（B 底座：语音+字幕；绝不因状态缺失整条不发）
+      4. miss > `voice_miss_threshold` 或 rest > `voice_rest_threshold` ⇒ voice
+      5. intent ∈ `prefer_voice_intents`（思念/主动问候）⇒ voice
+      6. 其余 ⇒ voice（默认底座）
+
+    `state` 形如 `{"intent": "思念", "emotions": {"miss": 0.6, ...}, "ts": 179...}`。
+    """
+    body = (text or "").strip()
+    limit = max(1, int(cfg.max_chars_for_voice))
+    if len(body) > limit:
+        return "text", "too_long"
+
+    intent = ""
+    emotions: dict[str, float] = {}
+    if isinstance(state, Mapping):
+        intent = str(state.get("intent") or "")
+        raw = state.get("emotions")
+        if isinstance(raw, Mapping):
+            for key, value in raw.items():
+                with contextlib.suppress(TypeError, ValueError):
+                    emotions[str(key)] = float(value)  # type: ignore[arg-type]
+
+    if intent and intent in cfg.text_intents:
+        return "text", "info_intent"
+    if not isinstance(state, Mapping) or not state:
+        return "voice", "state_unreadable"
+    if emotions.get("miss", 0.0) > cfg.voice_miss_threshold:
+        return "voice", "miss_high"
+    if emotions.get("rest", 0.0) > cfg.voice_rest_threshold:
+        return "voice", "rest_high"
+    if intent and intent in cfg.prefer_voice_intents:
+        return "voice", "prefer_intent"
+    return "voice", "default_voice"
+
+
+def decide_medium(text: str, state: Mapping[str, Any] | None, cfg: TTSConfig) -> str:
+    """只取结论：`"voice"` 或 `"text"`（原因见 `decide_medium_with_reason`）。"""
+    return decide_medium_with_reason(text, state, cfg)[0]
+
+
 # ── 环境核查 / CLI ──────────────────────────────────────────────────
 def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
     try:
@@ -504,6 +582,14 @@ def check_environment(path: Path | None = None) -> int:
             print(f"[{state}] profile {name}: {ref}")
             ok = ok and ref.is_file()
     print(f"[ok] cache_dir={cache_dir(cfg)}")
+    print(
+        "[ok] medium(B+C): "
+        f"max_chars_for_voice={cfg.max_chars_for_voice} "
+        f"text_intents={','.join(cfg.text_intents)} "
+        f"prefer_voice_intents={','.join(cfg.prefer_voice_intents)} "
+        f"miss>{cfg.voice_miss_threshold:g} rest>{cfg.voice_rest_threshold:g} "
+        f"state_max_age_s={cfg.state_max_age_s:g}"
+    )
     return 0 if ok else 1
 
 
@@ -531,6 +617,13 @@ def write_template(path: Path | None = None, *, root: str | None = None) -> Path
         "max_chars_per_voice": DEFAULT_MAX_CHARS,
         "opus_bitrate": "48k",
         "cache_dir": str(DEFAULT_CACHE_DIR).replace("\\", "/"),
+        # B+C（2026-10-19）：语音带字幕 + 状态决定出声/写字（全部可调）
+        "max_chars_for_voice": 30,
+        "text_intents": ["自检报告", "好奇提问"],
+        "prefer_voice_intents": ["思念", "主动问候"],
+        "voice_miss_threshold": 0.4,
+        "voice_rest_threshold": 0.45,
+        "state_max_age_s": 120,
         "profiles": {
             name: {
                 "ref_audio_path": profile.ref_audio_path,

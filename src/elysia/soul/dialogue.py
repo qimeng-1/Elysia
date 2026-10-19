@@ -32,6 +32,10 @@ MAX_CONTEXT_TURNS = 20
 CONTEXT_TEXT_CHARS = 200
 CONTEXT_MAX_CHARS = 2000
 
+# ── S1c：她最近几次开口的开头（治"夜深了"开场同质化）──────────────────
+RECENT_OPENINGS = 8
+OPENING_CHARS = 6
+
 ROLE_USER = "user"
 ROLE_HER = "her"
 
@@ -220,3 +224,24 @@ async def seal_pending(store: Any, state_store: Any, now: float) -> int | None:
     except Exception:
         log.warning("封存交换失败——不影响她说话", exc_info=True)
         return None
+
+
+# ── S1c：开场去重（她最近 8 条气泡的开头片段）────────────────────
+async def recent_openings(store: Any, *, limit: int = RECENT_OPENINGS) -> list[str]:
+    """她最近 `limit` 条气泡的**开头片段**（每条前 `OPENING_CHARS` 字，按时间升序）。
+
+    供表达指令的 `recent_openings`：让模型看到自己最近怎么开口的，避免句句
+    「夜深了/夜里」。读失败返回 []（不影响她说话）。
+    """
+    try:
+        # 多取一些 turn 再筛 her（用户轮次会夹杂其间），保证凑够 limit 条气泡
+        turns = await store.dialogue_turns(limit=max(limit * 5, limit))
+    except Exception:
+        log.warning("读最近开口失败——本次不带 recent_openings", exc_info=True)
+        return []
+    her_texts = [
+        str(turn.get("text") or "").strip()
+        for turn in turns
+        if turn.get("role") == ROLE_HER and str(turn.get("text") or "").strip()
+    ]
+    return [text[:OPENING_CHARS] for text in her_texts[-limit:]]

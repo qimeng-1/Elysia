@@ -92,7 +92,7 @@ from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
 from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.soul.brain import BrainOutput
-from elysia.soul.dialogue import recent_dialogue_window, record_her_bubble
+from elysia.soul.dialogue import recent_dialogue_window, recent_openings, record_her_bubble
 from elysia.soul.expression import (
     ReplyDecision,
     build_expression,
@@ -695,6 +695,12 @@ class ExpressionService:
         # ── 1c2. S1a：最近真实对话（接得上话的物理基础）─────────
         # 与 `memory_hooks`（撞上的旧记忆）语义不同、两者并存。
         payload["dialogue_context"] = dialogue_context
+        # S1c：她最近几次开口的开头（治"句句夜深了"的同质化开场）
+        try:
+            payload["recent_openings"] = await recent_openings(self._store)
+        except Exception:
+            log.warning("装配 recent_openings 失败——本次不带开场去重", exc_info=True)
+            payload["recent_openings"] = []
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)

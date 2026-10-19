@@ -41,12 +41,11 @@ from elysia.memory.levels import (
     LEVEL_DEEP,
     PROTECT_DEEP_ACCESS,
     RETENTION_DORMANT,
-    RETENTION_DORMANT_AGE_DAYS,
-    RETENTION_FADE_AGE_DAYS,
     RETENTION_FADED,
     RETENTION_PRESENT,
     SOURCE_INFERENCE,
     MemoryRecord,
+    retention_age_thresholds,
 )
 from elysia.memory.promote import promote_batch
 from elysia.memory.retrieve import recall_for_feeling
@@ -142,15 +141,20 @@ def _demote_target(rec: MemoryRecord, now: float) -> str | None:
 
     `faded` 额外要求 `access_count == 0`：被想起过的事至少曾经重要，
     不该连细节都淡掉（它是"从没被翻过的那本旧相册"）。
+
+    S4a（防雪崩）：阈值不是同一个常数，而是 `retention_age_thresholds(rec.id)`——
+    每条记忆有由 id 哈希决定的 ±15 天确定性偏移，否则同批出生的记忆会在同一天
+    一次性全部降级（可及性推演：2026-12-19 一次 968 条）。
     """
     current_depth = _RETENTION_DEPTH.get(rec.retention_state)
     if current_depth is None:  # suppressed：她的决定，程序不碰
         return None
     last_ts = rec.last_access_ts if rec.last_access_ts is not None else rec.created_ts
     since_days = max(0.0, (now - last_ts) / 86400.0)
-    if since_days >= RETENTION_DORMANT_AGE_DAYS:
+    fade_age_days, dormant_age_days = retention_age_thresholds(rec.id)
+    if since_days >= dormant_age_days:
         target = RETENTION_DORMANT
-    elif since_days >= RETENTION_FADE_AGE_DAYS and rec.access_count == 0:
+    elif since_days >= fade_age_days and rec.access_count == 0:
         target = RETENTION_FADED
     else:
         return None

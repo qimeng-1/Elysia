@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,6 +124,40 @@ FALLBACK_RETENTION = RETENTION_PRESENT
 # 下一轮维护会立刻把它打回 dormant——永远醒不过来。
 RETENTION_FADE_AGE_DAYS = 60.0  # 两个月没被想起过、且从未被想起 → 细节淡掉
 RETENTION_DORMANT_AGE_DAYS = 180.0  # 半年没被想起 → 失去访问权
+
+# ── S4a 防雪崩：阈值的**确定性抖动**（±15 天）──────────────────────
+# 她的记忆库是同一批出生的（记忆系统 29 天前才上线），若阈值是同一个数，
+# 遗忘会**同一天一次性发生**（可达性推演：2026-12-19 会有 968 条同时变 faded）。
+# 这里给每条记忆的 fade/dormant 阈值加一个由 `memory_id` 哈希决定的偏移，
+# 让降级摊成两个月的斜坡。**不许用随机**：同一条记忆每次必须算出同一个偏移，
+# 重启/迁移后也一样（hashlib，绝不用 Python `hash()`——它带进程级随机种子）。
+RETENTION_JITTER_DAYS = 15.0
+
+
+def retention_jitter_days(memory_id: int | None) -> float:
+    """S4a：某条记忆的阈值偏移（`[-RETENTION_JITTER_DAYS, +RETENTION_JITTER_DAYS)`）。
+
+    由 `memory_id` 的 SHA-256 决定（确定性、跨进程/跨迁移一致）；没有 id 时偏移为 0。
+    """
+    if memory_id is None:
+        return 0.0
+    digest = hashlib.sha256(f"retention-jitter:{int(memory_id)}".encode()).digest()
+    fraction = int.from_bytes(digest[:8], "big") / float(1 << 64)  # [0, 1)
+    return (fraction * 2.0 - 1.0) * RETENTION_JITTER_DAYS
+
+
+def retention_age_thresholds(memory_id: int | None) -> tuple[float, float]:
+    """S4a：`(fade 天数, dormant 天数)` = 基础阈值 + 该记忆的同一个偏移。
+
+    fade 与 dormant 用**同一个偏移**：两档间距（120 天）与先后顺序保持不变；
+    阈值常量本身由用户拍板（60/180），抖动层跟着常量走，不写死数字。
+    """
+    jitter = retention_jitter_days(memory_id)
+    return (
+        RETENTION_FADE_AGE_DAYS + jitter,
+        RETENTION_DORMANT_AGE_DAYS + jitter,
+    )
+
 
 # 旧数据回填 / 调用方未标注时的默认映射（由 kind 推导）。
 # 一份映射同时供给三处：state_store 的回填 SQL、MemoryRecord.from_dict 的缺省、

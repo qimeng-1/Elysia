@@ -35,6 +35,7 @@ from elysia.memory.levels import (
     RETENTION_DORMANT_AGE_DAYS,
     RETENTION_FADE_AGE_DAYS,
     RETENTION_FADED,
+    RETENTION_JITTER_DAYS,
     RETENTION_PRESENT,
     RETENTION_SUPPRESSED,
     SOURCE_USER,
@@ -300,7 +301,9 @@ async def test_fade_after_sixty_days_never_recalled(tmp_path: Path) -> None:
     try:
         never = await _add(store, ts=1.0, access_count=0)
         once = await _add(store, ts=1.0, access_count=1, last_access_ts=1.0, narrative="被想起过")
-        await soul._maintain_memories(1.0 + (RETENTION_FADE_AGE_DAYS + 1) * DAY)
+        await soul._maintain_memories(
+            1.0 + (RETENTION_FADE_AGE_DAYS + RETENTION_JITTER_DAYS + 1) * DAY
+        )
         assert (await store.get_memory(never) or {})["retention_state"] == RETENTION_FADED
         # 被想起过的事至少曾经重要，不该连细节都淡掉
         assert (await store.get_memory(once) or {})["retention_state"] == RETENTION_PRESENT
@@ -317,7 +320,9 @@ async def test_dormant_after_six_months(tmp_path: Path) -> None:
     await store.start()
     try:
         mid = await _add(store, ts=1.0, access_count=1, last_access_ts=1.0)
-        await soul._maintain_memories(1.0 + (RETENTION_DORMANT_AGE_DAYS + 1) * DAY)
+        await soul._maintain_memories(
+            1.0 + (RETENTION_DORMANT_AGE_DAYS + RETENTION_JITTER_DAYS + 1) * DAY
+        )
         assert (await store.get_memory(mid) or {})["retention_state"] == RETENTION_DORMANT
     finally:
         await state_store.close()
@@ -336,7 +341,9 @@ async def test_protected_and_suppressed_are_never_demoted(tmp_path: Path) -> Non
         held = await _add(store, ts=1.0, access_count=0, narrative="不想再想起的事")
         await store.set_retention_state(held, RETENTION_SUPPRESSED)
 
-        await soul._maintain_memories(1.0 + (RETENTION_DORMANT_AGE_DAYS + 10) * DAY)
+        await soul._maintain_memories(
+            1.0 + (RETENTION_DORMANT_AGE_DAYS + RETENTION_JITTER_DAYS + 10) * DAY
+        )
 
         assert (await store.get_memory(precious) or {})["retention_state"] == RETENTION_PRESENT
         assert (await store.get_memory(held) or {})["retention_state"] == RETENTION_SUPPRESSED
@@ -353,7 +360,9 @@ async def test_demote_is_monotonic(tmp_path: Path) -> None:
     await store.start()
     try:
         mid = await _add(store, ts=1.0, retention=RETENTION_DORMANT, access_count=0)
-        await soul._maintain_memories(1.0 + (RETENTION_FADE_AGE_DAYS + 1) * DAY)
+        await soul._maintain_memories(
+            1.0 + (RETENTION_FADE_AGE_DAYS + RETENTION_JITTER_DAYS + 1) * DAY
+        )
         assert (await store.get_memory(mid) or {})["retention_state"] == RETENTION_DORMANT
     finally:
         await state_store.close()

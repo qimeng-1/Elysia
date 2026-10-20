@@ -216,7 +216,12 @@ async def test_force_interaction_always_speaks(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_internal_impulse_throttled(tmp_path: Path) -> None:
+async def test_internal_impulse_never_fires_without_event(tmp_path: Path) -> None:
+    """P4：内部冲动**不再由经过时间触发**；没有事件/跨越 ⇒ 永远不开口。
+
+    `rhythm_interval_s` 仍存在，但只作"事件发生后多久回应"的响应延迟，
+    不再是"过了这么久就该说"的触发器。
+    """
     from elysia.core.state_store import HeartbeatStore
 
     store = HeartbeatStore(tmp_path / "heartbeat.db")
@@ -225,24 +230,19 @@ async def test_internal_impulse_throttled(tmp_path: Path) -> None:
         chain = LLMChain(main=_FixedTextBackend("嗯嗯"), fallback=None)
         svc = ExpressionService(chain, store)
 
-        # W2：间隔由她的状态**连续**映射（60–1800s），不再是 180/600 两档常量。
-        # 用例只钉"节流语义"：不到间隔不开口、到了就开口——具体秒数由映射自己算。
         output = _brain_output(action="think_quiet")
-        interval = svc.rhythm_interval_s(output, now=T0)
+        interval = svc.rhythm_interval_s(output, now=T0)  # 仅响应延迟，仍 60–1800s
         assert 60.0 <= interval <= 1800.0
 
-        # 第一次内部冲动：开口
-        first = await svc.tick(output, now=T0)
-        # 间隔一半时再次内部冲动：节流不开口
-        second = await svc.tick(output, now=T0 + interval * 0.5)
-        # 超过间隔：重新开口
-        third = await svc.tick(output, now=T0 + interval + 1.0)
+        # 没有事件、没有 force：无论过多久都不开口（旧实现这里会开口）
+        assert await svc.tick(output, now=T0) is None
+        assert await svc.tick(output, now=T0 + interval + 1.0) is None
+        assert await svc.tick(output, now=T0 + 10 * 86400.0) is None
 
-        assert first is not None
-        assert second is None
-        assert third is not None
-        count = await store.thought_count()
-        assert count == 2
+        # force（你对她说）仍立即开口
+        forced = await svc.tick(output, now=T0 + 10 * 86400.0 + 1.0, force=True)
+        assert forced is not None
+        assert await store.thought_count() == 1
     finally:
         await store.close()
 

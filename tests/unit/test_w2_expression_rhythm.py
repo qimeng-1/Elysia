@@ -181,16 +181,18 @@ def test_mapping_spans_multiple_bands_on_plausible_states() -> None:
     assert p90 / p10 > 3.0, f"p90/p10 只有 {p90 / p10:.2f} 倍 ⇒ 仍是窄带"
 
 
-# ── 运行时接线：should_speak 真的用了连续映射（不是造好了没插电）────
-def test_should_speak_honours_mapped_interval() -> None:
+# ── P4：运行时不再用"经过时间"触发（interval 只作事件后的响应延迟）────
+def test_should_speak_no_longer_triggers_on_elapsed_time() -> None:
+    """取消测试（P4）：把"经过时间 ⇒ 开口"加回去 ⇒ 本用例红。"""
     service = _service()
     output = _output(style=0.5)
     interval = service.rhythm_interval_s(output, now=0.0)
     assert EXPRESS_INTERVAL_MIN_S <= interval <= EXPRESS_INTERVAL_MAX_S
 
-    assert service.should_speak(output, 0.0, True), "force 立即开口并定基线"
-    assert not service.should_speak(output, interval - 1.0, False), "差 1 秒仍须节流"
-    assert service.should_speak(output, interval + 1.0, False), "到点必须开口"
+    assert service.should_speak(output, 0.0, True), "force 立即开口"
+    # 再过 10 天：没有事件也不该开口（时间不再是触发器）
+    assert not service.should_speak(output, 10 * 86400.0, False), "经过时间不得触发开口"
+    assert service.should_speak(output, 10 * 86400.0 + 1.0, False, greeting=True), "问候仍立即"
 
 
 # 行为级取消测试（只看 should_speak，不 import 任何 W2 新符号）在配套文件

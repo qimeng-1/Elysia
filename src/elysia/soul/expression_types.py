@@ -89,6 +89,9 @@ class ExpressionJob:
     restraint_reason: str | None = None
     # True = "选择不回"的 reason 已由心跳在决定那一刻落库（persist 不再重复写）
     restraint_logged: bool = False
+    # P4：这一次开口的离散原因（discovery/threshold/presence/write/response）。
+    # 只内部传递、落 `expression_log.validation.speech_cause`；**不进 prompt**。
+    speech_cause: str = "none"
 
     @property
     def order_key(self) -> JobOrder:
@@ -132,3 +135,5 @@ class ExpressionResult:
     # S3：本次作业里被钩回来的记忆 id（只内部传递到 persist，用于判定"她重述了哪条"；
     # **不进 prompt**，assistant 侧永远只看到 narrative 文本）。
     hook_memory_ids: list[int] = field(default_factory=list)
+    # P4：开口原因（落 expression_log.validation.speech_cause，供"每次开口可追溯"）
+    speech_cause: str = "none"

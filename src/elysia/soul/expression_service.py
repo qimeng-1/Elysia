@@ -175,6 +175,9 @@ RHYTHM_W_RELUCTANCE = 0.35  # 关系退缩（1.0→2.0 的倍数连续折算成�
 # 意愿的一阶指数平滑时间常数（秒）：τ=60 时 1 分钟走完 63%、5 分钟走完 99%。
 # 用来压掉逐拍抖动；对称平滑不会有方向偏置（不会让"安静/活跃"中的哪一边占便宜）。
 RHYTHM_SMOOTH_TAU_S = 60.0
+# P4：对话进行中的判定窗（用户最近一条消息后这段时间内，她内部冲动不说话）。
+# 与 S1b 的"进行中对话"闸同一口径（900s），避免"你正说着、她突然自言自语"。
+DIALOGUE_ACTIVE_WINDOW_S = 900.0
 
 # --- W1 常量（保持不变）---
 
@@ -477,6 +480,17 @@ class ExpressionService:
         self._rhythm_ts = float(now)
         return interval_from_willingness(self._rhythm_w)
 
+    async def in_dialogue(self, now: float, *, window_s: float = DIALOGUE_ACTIVE_WINDOW_S) -> bool:
+        """P4：是否"正在对话中"（用户最近 `window_s` 内说过话）⇒ 内部冲动不说话。"""
+        try:
+            last_user_ts = await self._store.last_user_turn_ts()
+        except Exception:
+            return False
+        if last_user_ts is None:
+            return False
+        delta = float(now) - float(last_user_ts)
+        return 0.0 <= delta <= float(window_s)
+
     def should_speak(
         self,
         output: BrainOutput,
@@ -486,40 +500,20 @@ class ExpressionService:
         greeting: bool = False,
         reluctance: float = 1.0,
     ) -> bool:
-        """触发判断（20.6 的 1.3）：外部交互立即开口；内部冲动按**意愿连续驱动**的间隔。
+        """P4：**只**决定"外部交互/问候"的立即开口；内部冲动不再看经过时间。
 
-        由**心跳拍**调用（廉价、非阻塞）——「谁决定开口」因此仍在生命循环里，
-        worker 只管执行，不判断该不该说。
+        旧实现「距上次开口 ≥ interval（60–1800s）⇒ 开口」的路径已整条删除——
+        时间不是触发器。内部冲动由 `SpeechTrigger` 按离散事件/阈值跨越调度；
+        `rhythm_interval_s` 保留为**事件发生后多久回应**的响应延迟（不再决定何时轮到说）。
 
-        W2（2026-10-19）：间隔不再由 `brain_action + thought_style>0` 二选一常量决定，
-        而是 `rhythm_interval_s` 给出的连续值（60–1800s）。旧实现的两个问题——
-        「想不想说」只有两档、以及阈值本身造成窄带节拍——都随之消失。
-
-        `greeting`（阶段 5 第七批）：她**刚从"不在场"回到"在场"**——这一声问候
-        **越过节流**（刚回来值得说一句）；但仍按内部冲动的入队语义走
-        （队列满时可被丢＝"她这次决定不说"）。
-
-        `reluctance`（P4b 关系涌现）：退缩量导出的倍数（1.0 → 2.0）。W2 起它不再是
-        "把秒数乘 2"，而是折成**意愿折扣**参与同一条连续映射——退缩越深，间隔越长，
-        但不会越过 1800s 的上限。用户主动说话（`force`）与问候不受它影响：
-        **她对关系的退缩，不等于对你不理不睬**。这两条路径 W2 前后语义完全不变。
-
-        判定为真即**记下开口时刻**（节流基线），不等 worker 真的说出口：提交被队列
-        丢弃时也照样推进——丢弃＝「她这次决定不说」（D1），若等到执行成功才推进，
-        同一句话会在队列满的每一拍被重新判定、反复丢弃。
+        `force` / `greeting` 语义与 P4 之前完全一致：你对她说、或你刚回来，她总会开口。
         """
-        # 先推进节奏（force/greeting 也推进）：她的状态在这两种路径上同样真实变化，
-        # 下一拍的内部间隔应当接着当前状态走，而不是停在上次内部冲动时的旧值。
-        interval = self.rhythm_interval_s(output, now, reluctance=reluctance)
+        # 仍推进 EMA（事件响应延迟要用当前状态）；但这里不再用它判断"该不该说"
+        self.rhythm_interval_s(output, now, reluctance=reluctance)
         if force or greeting:
-            # P0-R19（b 方案）：收到你的话她**总会开口**——要么回应，要么说明
-            # "现在不太想说话"；到底哪种由 `decide_reply` 决定（确定性、落 reason）。
             self._last_express_ts = now
             return True
-        if self._last_express_ts is not None and now - self._last_express_ts < interval:
-            return False
-        self._last_express_ts = now
-        return True
+        return False
 
     def decide_reply(
         self,
@@ -828,6 +822,8 @@ class ExpressionService:
             feelings=dict(output.feelings.to_dict()),
             # S3：本次被钩回来的记忆 id（persist 用于"她重述了哪条"的判定）
             hook_memory_ids=hook_memory_ids,
+            # P4：开口原因随结果回到落库拍（写进 expression_log.validation）
+            speech_cause=job.speech_cause,
         )
 
         # P0-R19：多句回复 = **一次** LLM 调用后在句边界拆开（不许多调）
@@ -904,6 +900,8 @@ class ExpressionService:
                 "utterance_count": len(sentences),
                 # S3：本次被钩回来的记忆 id（内部取证；不参与 prompt）
                 "hook_memory_ids": list(result.hook_memory_ids),
+                # P4：每次开口都必须能追溯到一个离散原因（不得为 none 却开口）
+                "speech_cause": result.speech_cause,
             }
         )
         if result.restraint_logged:

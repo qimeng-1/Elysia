@@ -1,14 +1,12 @@
-"""W2 节流行为级用例（**只 import 既有符号**，让取消测试的红态是断言失败）。
+"""W2/P4 行为级用例：意愿→**响应延迟**仍连续；但时间不再是开口触发器。
 
-配套 `test_w2_expression_rhythm.py`（纯映射/接线）在还原旧实现时是 ImportError；
-本文件只调用 `ExpressionService.should_speak`——旧实现下它照样能跑，于是
-`test_observed_thresholds_are_not_two_constants` 会以**可见的断言失败**变红：
+P4（2026-10-20）：`should_speak` 里"距上次开口 ≥ interval ⇒ 开口"的路径整条删除。
+`rhythm_interval_s` 保留为"事件发生后多久回应"的响应延迟——它仍随状态连续变化
+（旧实现只有 180/600 两档），但**不再决定何时轮到说**。
 
-    旧：只有 180/600 两档 ⇒ 观测到的间隔种类 = 1–2
-    新：随状态连续变化 ⇒ 观测到 ≥4 种，且安静态明显更久、活跃态更快
-
-取消测试（还原旧 `should_speak` ⇒ 本文件必须红）：`test_observed_thresholds_are_not_two_constants`。
-`force` / `greeting` / 退缩三条是**回归护栏**（新旧都应绿）。
+取消测试：
+- 把"经过时间"触发加回去 ⇒ `test_internal_impulse_never_fires_by_elapsed_time` 红；
+- 把响应延迟压回两个常量 ⇒ `test_response_delay_is_continuous_not_two_constants` 红。
 """
 
 from __future__ import annotations
@@ -20,7 +18,7 @@ from elysia.soul.desire import DesireState
 from elysia.soul.dimensions import FeelingState
 from elysia.soul.expression_service import ExpressionService
 
-MAX_INTERVAL_S = 1800.0  # W2 上限（与实现同值；本文件刻意不 import 新常量）
+MAX_INTERVAL_S = 1800.0  # 响应延迟上限（与实现同值；本文件刻意不 import 新常量）
 
 
 def _output(*, style: float = 0.08, rest: float = 0.05, action: str = "none") -> BrainOutput:
@@ -41,43 +39,37 @@ def _output(*, style: float = 0.08, rest: float = 0.05, action: str = "none") ->
 
 
 def _service() -> ExpressionService:
-    """只测节流：LLM/存储都不参与，传 None 即可（与 test_panel_channel 同手法）。"""
+    """只测节奏：LLM/存储都不参与，传 None 即可（与 test_panel_channel 同手法）。"""
     return ExpressionService(None, None)  # type: ignore[arg-type]
 
 
-def _measured_interval(output: BrainOutput, *, reluctance: float = 1.0) -> float:
-    """行为测量：先 force 一次定基线，再逐秒问"现在该开口了吗"，第一个 True 即间隔。"""
-    service = _service()
-    assert service.should_speak(output, 0.0, True, reluctance=reluctance), "force 必须立即开口"
-    for offset in range(0, int(MAX_INTERVAL_S) + 120):
-        if service.should_speak(output, float(offset), False, reluctance=reluctance):
-            return float(offset)
-    raise AssertionError(f"超过 {MAX_INTERVAL_S:.0f}s+120 仍不开口 ⇒ 间隔映射越界")
-
-
-def test_observed_thresholds_are_not_two_constants() -> None:
-    """取消测试（W2 核心）：旧 should_speak 只能测出 180/600 两档 ⇒ 本用例红。"""
+def test_response_delay_is_continuous_not_two_constants() -> None:
+    """取消测试（W2 核心）：响应延迟仍随状态连续变化，不是 180/600 两档。"""
     styles = [-0.8, -0.4, 0.0, 0.4, 0.8]
-    measured = [_measured_interval(_output(style=s)) for s in styles]
+    measured = [_service().rhythm_interval_s(_output(style=s), now=0.0) for s in styles]
     distinct = len({round(v) for v in measured})
-    assert distinct >= 4, f"只观测到 {distinct} 种间隔 {measured} ⇒ 仍是固定节拍器"
-    assert all(b < a for a, b in pairwise(measured)), f"间隔没有随活跃度变短：{measured}"
-    assert measured[0] > 500, "安静态应该明显更久才开口"
-    assert measured[-1] < 300, "活跃态应该更快开口"
+    assert distinct >= 4, f"只观测到 {distinct} 种响应延迟 {measured} ⇒ 又成固定节拍器"
+    assert all(b < a for a, b in pairwise(measured)), f"延迟没有随活跃度变短：{measured}"
+    assert measured[0] > 500, "安静态应该明显更慢回应"
+    assert measured[-1] < 300, "活跃态应该更快回应"
+    assert all(60.0 <= v <= MAX_INTERVAL_S for v in measured)
 
 
-def test_force_and_greeting_bypass_any_interval() -> None:
-    """回归护栏：force（你对她说）与 greeting（她刚回来）永远立即开口（W2 前后不变）。"""
+def test_internal_impulse_never_fires_by_elapsed_time() -> None:
+    """P4 核心：没有事件/跨越，无论过多久都不开口；force/greeting 仍立即。"""
     service = _service()
     output = _output(style=-1.0, rest=0.5)  # 最安静的状态
     assert service.should_speak(output, 1.0, True), "force 必须立即开口"
-    assert service.should_speak(output, 2.0, False, greeting=True), "greeting 必须越过节流"
-    assert not service.should_speak(output, 3.0, False), "内部冲动仍然要被节流"
+    assert service.should_speak(output, 2.0, False, greeting=True), "greeting 必须立即开口"
+    # 关键：隔一天再问，没有事件 ⇒ 不开口（旧实现这里会 True）
+    assert not service.should_speak(output, 1.0 + 86400.0, False), (
+        "内部冲动不得由经过时间触发（P4 已删除该路径）"
+    )
 
 
-def test_reluctance_lengthens_but_never_breaks_bounds() -> None:
-    """回归护栏：退缩 → 间隔变长（关系可测量的表达效果），且不顶穿 1800s。"""
-    close = _measured_interval(_output(style=0.3), reluctance=1.0)
-    withdrawn = _measured_interval(_output(style=0.3), reluctance=2.0)
-    assert withdrawn > close, "关系退缩必须让她说得更少"
-    assert withdrawn <= MAX_INTERVAL_S, "退缩不得把间隔顶穿 1800s 上限"
+def test_reluctance_lengthens_response_delay_but_never_breaks_bounds() -> None:
+    """退缩 → 响应更慢（关系可测量），但不顶穿 1800s；仍是同一条连续映射。"""
+    close = _service().rhythm_interval_s(_output(style=0.3), now=0.0, reluctance=1.0)
+    withdrawn = _service().rhythm_interval_s(_output(style=0.3), now=0.0, reluctance=2.0)
+    assert withdrawn > close, "关系退缩必须让她回应更慢"
+    assert withdrawn <= MAX_INTERVAL_S, "退缩不得把响应延迟顶穿 1800s 上限"

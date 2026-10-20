@@ -70,6 +70,7 @@ from elysia.soul.expression_types import (
 )
 from elysia.soul.expression_worker import ExpressionWorker
 from elysia.soul.relationship import RelationshipKeeper, RelationshipTone
+from elysia.soul.speech_trigger import SpeechTrigger
 from elysia.soul.words import permitted_words
 
 logger = logging.getLogger("elysia.soul.heartbeat")
@@ -235,6 +236,10 @@ class SoulHeartbeat:
         self._error_times: deque[float] = deque()
         # 内部冲动（第七批）：她刚从"不在场"回到"在场" → 待问候（**边沿触发**，只问一次）
         self._greet_pending = False
+        # P4：事件驱动的开口调度（"过了多久"不再触发；只有事件/阈值跨越才可能开口）
+        self._speech_trigger = SpeechTrigger()
+        # 事件巡检游标：只对"这一拍之后新发生的" world 记忆/意图完成起反应
+        self._last_event_check_ts: float | None = None
         self._last_mode: Mode | None = None
         # P0-R19：本拍收到的输入还没有结算"社交满足"——等意愿层决定后再给脉冲
         self._pending_social_pulse = False
@@ -476,8 +481,9 @@ class SoulHeartbeat:
                 tone = self._relationship.tone()
 
             # ── 阶段 E（后半）：表达派发（决策层定意图 → 提交 worker）──────
-            # 内部冲动（第七批）：刚回来 → 问候。问候**越过节流**（值得一声），
-            # 但仍保持 force=False —— 队列满时它可以被丢（＝"她这次决定不说"）。
+            # P4：**不再有"距上次开口 ≥ interval ⇒ 开口"这条路径**。触发只来自离散原因：
+            # 新发现（world/意图完成）/ 状态跨越阈值（迟滞）/ 你回来（问候）/ 刚写完东西；
+            # 你对她说（force）与 P4 之前完全一致。没有事件 ⇒ 她可以一直不说话。
             try:
                 greeting = self._greet_pending and mode is Mode.PRESENT
                 restraint_this_turn = False
@@ -497,19 +503,32 @@ class SoulHeartbeat:
                             and self._boundary_decision.is_refusal
                         ),
                     )
+                # P4 事件巡检：新 world 记忆 / 刚完成的意图
+                discovery, wrote = await self._harvest_events(now)
+                speech_cause: str | None = None
+                if self._expression is not None and brain_output is not None:
+                    in_dialogue = await self._expression.in_dialogue(now)
+                    # 意愿只决定"事件发生后多久回应"（响应延迟），不决定"何时轮到说"
+                    delay_s = self._expression.rhythm_interval_s(
+                        brain_output, now, reluctance=tone.interval_factor()
+                    )
+                    speech_cause = self._speech_trigger.observe(
+                        brain_output.feelings.to_dict(),
+                        now,
+                        force=self._new_interaction,
+                        greeting=greeting,
+                        discovery=discovery,
+                        wrote=wrote,
+                        # 你正在对话中 ⇒ 内部冲动不说话（S1b 的闸）；force 不受影响
+                        dialogue_active=in_dialogue and not self._new_interaction,
+                        delay_s=delay_s,
+                    )
                 if (
-                    self._expression is not None
+                    speech_cause is not None
+                    and self._expression is not None
                     and worker is not None
                     and not frozen
                     and brain_output is not None
-                    and self._expression.should_speak(
-                        brain_output,
-                        now,
-                        self._new_interaction,
-                        greeting=greeting,
-                        # 退缩 → 主动开口变少（可测量的关系效果，T1）
-                        reluctance=tone.interval_factor(),
-                    )
                 ):
                     if greeting:
                         self._greet_pending = False
@@ -548,6 +567,8 @@ class SoulHeartbeat:
                             restraint_logged=restraint_logged,
                             # 退缩 → 句子变短（可测量的关系效果，T1）
                             max_chars=tone.max_chars(),
+                            # P4：这次开口的离散原因（落 expression_log.validation）
+                            speech_cause=speech_cause,
                         )
                     )
             except Exception:
@@ -1001,6 +1022,33 @@ class SoulHeartbeat:
     def _state_pressure(env: dict[str, object]) -> bool:
         """她此刻状态不好吗？（**复用受保护词的授权判定**——同一个真相，不另起一套）。"""
         return any(word in STATE_PRESSURE_WORDS for word in permitted_words(env))
+
+    async def _harvest_events(self, now: float) -> tuple[bool, bool]:
+        """P4：这一拍有没有**新事件**——(有新发现, 刚写完东西)。
+
+        只认"游标之后新发生的"：新的 world 记忆（P2）/ 刚完成的意图（P3）。
+        首拍只记游标、不追认历史事件（历史已在 `recent_discoveries` 里）。
+        """
+        if self._last_event_check_ts is None:
+            self._last_event_check_ts = float(now)
+            return False, False
+        since = self._last_event_check_ts
+        self._last_event_check_ts = float(now)
+        discovery = False
+        wrote = False
+        try:
+            worlds = await self._heartbeat_store.recent_world_memories(since, limit=1)
+            discovery = bool(worlds)
+        except Exception:
+            self._stage_failed("F:harvest_world")
+        try:
+            finished = await self._heartbeat_store.recent_finished_intentions(since, limit=10)
+        except Exception:
+            finished = []
+        if finished:
+            discovery = True
+            wrote = any(str(item.get("action") or "") == "write_note" for item in finished)
+        return discovery, wrote
 
     async def _advance_relationship(
         self, now: float, output: BrainOutput | None

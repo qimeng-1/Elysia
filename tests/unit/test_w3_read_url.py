@@ -56,11 +56,15 @@ def _fake_miyoushe(payload: dict[str, Any], *, final_url: str = "") -> Any:
     return fetch
 
 
-# ── 白名单恰好两条 ──────────────────────────────────────────────
-def test_whitelist_allows_exactly_the_two_entries() -> None:
+# ── 白名单恰好四条（档 1 扩展）──────────────────────────────────
+def test_whitelist_allows_exactly_the_four_entries() -> None:
     assert is_allowed_url(WIKI_URL)
     assert is_allowed_url("http://zh.wikipedia.org/wiki/X")
+    assert is_allowed_url("https://zh.wikipedia.org/wiki/Special:Random")
     assert is_allowed_url(MIYOUSHE_SEARCH)
+    assert is_allowed_url("https://github.com/trending")
+    assert is_allowed_url("https://github.com/trending/")
+    assert is_allowed_url("https://wttr.in/Beijing?format=3")
     rejected = [
         "https://evil.example.com/wiki/X",
         "https://zh.wikipedia.org.evil.com/wiki/X",  # 后缀伪装
@@ -71,6 +75,10 @@ def test_whitelist_allows_exactly_the_two_entries() -> None:
         f"https://{EXTERNAL_DATA_MARKER}/x",  # 荒谬但必须拒绝
         "https://bbs-api.miyoushe.com/post/wapi/getPostFull?post_id=1",  # 403 的那个，不碰
         "https://bbs-api.miyoushe.com/post/wapi/searchPosts",  # 缺 keyword
+        "https://github.com/evil/repo",  # 只放行 Trending 页本身
+        "https://github.com/trending?since=daily",  # 不接参数（保持精确）
+        "https://wttr.in/Shanghai?format=3",  # 只放行北京
+        "https://wttr.in/",  # 缺城市
         "javascript:alert(1)",
     ]
     for url in rejected:

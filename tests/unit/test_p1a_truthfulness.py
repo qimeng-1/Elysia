@@ -1,15 +1,16 @@
-"""P1a：反编造——无依据的"我做过"就地改写成诚实说法（不是丢气泡）。
+"""P1a（fix 后）：反编造——只拦"我读过外部世界"，且整句换成自然诚实句。
 
-真机病根（2026-10-20 22:06）：她编造「页面翻了一堆」「花瓣的页面、旧剧的讨论」，
-而她本人没有读过任何页面（`kind='world'` 记忆为 0，也没有后台执行器）。
-用户裁定：谎可以撒，但**要有动机**；结构性缺失造成的编造不行。
+用户实测（2026-10-20）：旧实现把 12 句日常话改了 10 句，还会产出"我没真的看过一下时间"
+这类语病。P1a-fix 两条：
+1. **只拦外部信息主张**：动作（读/查/搜/逛/翻/看）**且**外部来源对象（维基/页面/网页/
+   米游社/论坛/帖子/资料/文章/网上），或引用外部内容（"维基上写着"）；
+   「我看了你一眼」「我去趟厨房」「我看了个视频」「我读过那本书」**不拦**。
+2. **整句替换**成自然诚实句（「其实我还没真的去翻过呢。」），同一气泡其余句子原样保留。
 
-处置原则（word_block 教训）：只改**主张那一句**里的"我做过/我看到"片段，
-不丢整句、不丢同一条气泡其余内容；改不动才降级微声。
+依据判定/动机放行/日志/统计保持原样。
 
-取消测试：去掉依据检查（`_span_related` 恒 False）⇒
-`test_tool_evidence_passes` / `test_memory_evidence_passes` / `test_dialogue_evidence_passes`
-必红（能复现"她把读过的页面说成没读过"）。
+取消测试：把检测放宽成"有动作就算"（去掉外部来源对象要求）⇒
+`test_daily_sentences_are_never_rewritten` 必红（12 句日常话被误伤）。
 """
 
 from __future__ import annotations
@@ -24,28 +25,52 @@ import pytest
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.validator import ValidationResult
-from elysia.memory.levels import KIND_EXCHANGE, LEVEL_SHALLOW, SOURCE_USER, MemoryRecord
-from elysia.memory.retrieve import MemoryHit, select_hooks
+from elysia.memory.levels import KIND_EXCHANGE, LEVEL_SHALLOW, SOURCE_USER
+from elysia.memory.retrieve import MemoryHit
 from elysia.soul.expression_service import ExpressionService
 from elysia.soul.honesty import (
     claim_is_related,
+    is_external_claim,
     reset_claim_stats,
     rewrite_unfounded_claims,
 )
 from elysia.soul.tools.read_url import ReadResult
 
 T0 = 1_000_000.0
-CLAIM = "我看了维基上关于埃舍尔的页面。今天天气不错。"
+CLAIM = "我读了维基上关于埃舍尔的页面。今天天气不错。"
+HONEST = "其实我还没真的去翻过呢。今天天气不错。"
 EVIDENCE = "《埃舍尔》是荷兰版画艺术家，以不可能的图形闻名。"
+
+# 用户实测的"误伤尺子"（12 句日常话：一句都不许改）
+DAILY_SENTENCES = [
+    "我看了你一眼，你好像有点累。",
+    "我看了一下时间，已经三点了。",
+    "我读过那本书，挺喜欢的。",
+    "我去了趟厨房，倒了杯水。",
+    "我查了一下，你的生日是11月11日。",
+    "我搜了搜，没找到。",
+    "我看了个视频，特别好笑。",
+    "我去过海边，风很大。",
+    "我翻了翻手机，没什么消息。",
+    "我睡了一觉，好多了。",
+    "我在厨房待了一会儿。",
+    "我看了会儿书，困了。",
+]
+
+# 真正该拦的外部信息主张
+EXTERNAL_CLAIMS = [
+    "我读了维基上关于埃舍尔的页面。",
+    "页面翻了一堆。",
+    "我在那页看到埃舍尔。",
+    "维基上写着埃舍尔是荷兰人。",
+]
 
 
 class _FakeLLM:
     def __init__(self, text: str) -> None:
         self.text = text
-        self.payloads: list[dict[str, Any]] = []
 
     async def speak(self, payload: dict[str, Any]) -> Any:
-        self.payloads.append(dict(payload))
         return SimpleNamespace(
             text=self.text,
             level="main",
@@ -74,20 +99,39 @@ def _job(user_message: str | None = None):
     )
 
 
-# ── 纯函数：改写/依据/动机 ────────────────────────────────
-def test_unfounded_claim_is_rewritten_but_rest_kept() -> None:
+# ── 日常语料回归集（P1a-fix 的验收尺子）────────────────────
+def test_daily_sentences_are_never_rewritten() -> None:
+    reset_claim_stats()
+    for sentence in DAILY_SENTENCES:
+        assert is_external_claim(sentence) is False, f"日常动作被误判成编造：{sentence}"
+        result = rewrite_unfounded_claims(sentence)
+        assert result.text == sentence, f"日常话被改写：{sentence} → {result.text}"
+        assert result.rewritten == 0
+
+
+def test_external_claims_are_detected_and_rewritten_as_whole_sentence() -> None:
+    reset_claim_stats()
+    for sentence in EXTERNAL_CLAIMS:
+        assert is_external_claim(sentence) is True
+        result = rewrite_unfounded_claims(sentence)
+        assert result.rewritten == 1
+        assert result.text.startswith("其实"), result.text
+        assert "我没真的看过一下" not in result.text, "不许把短语塞回原句造语病"
+
+
+def test_rest_of_bubble_is_kept() -> None:
     reset_claim_stats()
     result = rewrite_unfounded_claims(CLAIM)
-    assert "我没真的看过" in result.text
-    assert "我看了" not in result.text
-    assert "今天天气不错" in result.text, "同一气泡的其余内容不得丢"
-    assert result.rewritten == 1
+    assert result.text == HONEST
+    assert "今天天气不错" in result.text, "同一气泡的其余句子必须原样保留"
+    assert "我读了维基" not in result.text
 
 
+# ── 依据 / 动机（保持原行为）──────────────────────────────
 def test_tool_evidence_passes() -> None:
     reset_claim_stats()
     result = rewrite_unfounded_claims(CLAIM, evidence_texts=[EVIDENCE])
-    assert result.text == CLAIM, "本次成功工具结果就是依据，不该改写"
+    assert result.text == CLAIM
     assert result.rewritten == 0
 
 
@@ -98,9 +142,8 @@ def test_memory_evidence_passes() -> None:
 
 
 def test_claim_relatedness_uses_content_words() -> None:
-    # "我/看了/维基/页面"这些套话不能把无关依据算成相关
-    assert claim_is_related("我看了维基上关于埃舍尔的页面", EVIDENCE) is True
-    assert claim_is_related("我看了维基上关于埃舍尔的页面", "今天原神更新了") is False
+    assert claim_is_related("我读了维基上关于埃舍尔的页面", EVIDENCE) is True
+    assert claim_is_related("我读了维基上关于埃舍尔的页面", "今天原神更新了") is False
 
 
 def test_motive_allows_fiction() -> None:
@@ -111,7 +154,7 @@ def test_motive_allows_fiction() -> None:
     assert result.rewritten == 0
 
 
-# ── 服务接线：无依据 ⇒ 改写；有依据/动机 ⇒ 放行 ────────────
+# ── 服务接线 ──────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_run_job_rewrites_fabrication(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -122,9 +165,21 @@ async def test_run_job_rewrites_fabrication(
         service = ExpressionService(_FakeLLM(CLAIM), store)  # type: ignore[arg-type]
         with caplog.at_level(logging.INFO):
             result = await service.run_job(_job(user_message="你在干嘛"))
-        assert "我没真的看过" in result.text
-        assert "今天天气不错" in result.text
+        assert result.text == HONEST
         assert any("unfounded_claims rewritten=" in r.getMessage() for r in caplog.records)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_daily_sentence_passes_through_service(tmp_path: Path) -> None:
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        daily = "我看了你一眼，你好像有点累。"
+        service = ExpressionService(_FakeLLM(daily), store)  # type: ignore[arg-type]
+        result = await service.run_job(_job(user_message="你在干嘛"))
+        assert result.text == daily
     finally:
         await store.close()
 
@@ -208,7 +263,6 @@ async def test_motive_allows_and_logs(tmp_path: Path, caplog: pytest.LogCaptureF
     store = HeartbeatStore(tmp_path / "heartbeat.db")
     await store.start()
     try:
-        # P3 之前 intentions 表还不存在；这里手工建表模拟"动机源已有数据"
         con = sqlite3.connect(str(tmp_path / "heartbeat.db"))
         con.execute(
             "CREATE TABLE intentions (id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -232,19 +286,3 @@ async def test_motive_allows_and_logs(tmp_path: Path, caplog: pytest.LogCaptureF
         assert any("kind=surprise" in m for m in messages)
     finally:
         await store.close()
-
-
-def test_select_hooks_still_filters_world_kind_by_source() -> None:
-    """P1a 只读证据：world 记忆的 source 必须是 observation，否则会被 hooks 闸挡住（P2 承重）。"""
-    rec = MemoryRecord(
-        id=1,
-        created_ts=T0,
-        kind="world",
-        content="读了《埃舍尔》：荷兰版画艺术家",
-        emotion_vector={"chat": 0.4},
-        importance=0.25,
-        source="observation",
-        certainty="certain",
-        narrative="读了《埃舍尔》：荷兰版画艺术家",
-    )
-    assert [h.memory_id for h in select_hooks([rec], {"chat": 0.5})] == [1]

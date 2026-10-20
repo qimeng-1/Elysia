@@ -1,19 +1,21 @@
-"""P1a：反编造——没有依据的"我做过"要被**就地改写**成诚实说法。
+"""P1a：反编造——没有依据的"我读过外部世界"要被**整句**换成诚实说法。
 
 用户裁定（2026-10-20）：谎可以撒，但要有动机；**结构性缺失造成的编造不行**。
 她说过「我去翻翻看」「页面翻了一堆」，但 `kind='world'` 记忆为 0、后台也没有执行器——
 那些"经历"没有事实依据，属于系统性编造。
 
-原则（沿用 word_block 的教训：**软化，不是全丢**）：
-- 只改**主张那一句**里"我做过/我看到"的片段，不丢整句、不丢同一条气泡的其余内容；
-- 改不动才把该气泡降级为微声；
-- **有动机**（P3 的意图登记册 `intentions.kind ∈ surprise|conceal|play`）⇒ 放行并留痕
-  `claim_fiction_allowed motive=<id> kind=<...>`。P1a 阶段（P3 未上线）动机源为空 ⇒ 一律改。
+P1a-fix（用户实测误伤 12 句日常话后收紧）：
+- **只拦外部信息主张**：必须同时出现"动作（读/查/搜/逛/翻/看）"与"外部来源对象
+  （维基/页面/网页/米游社/论坛/帖子/资料/文章/网上）"，或引用外部内容（"维基上写着"）；
+  「我看了你一眼」「我去趟厨房」「我看了个视频」「我读过那本书」**不拦**（不是"读了世界"）。
+- **整句替换**成一句自然的诚实句（「其实我还没真的去翻过呢。」），绝不把短语塞回原句
+  （否则出现"我没真的看过一下时间"这类语病）；同一气泡的**其余句子原样保留**。
+- 有依据 ⇒ 原句放行；有动机 ⇒ 原句放行并留痕 `claim_fiction_allowed motive=<id> kind=<...>`。
+- P1a 阶段（P3 未上线）动机源为空 ⇒ 一律改成诚实句。
 
 依据（三选一即算有据）：① 本次作业内成功工具结果；② 本次被钩回的 `world`/`exchange`
-记忆；③ 对话上下文（用户说过）。判"相关"只看主张里**去掉套话后的内容词**与依据的
-二元组重合（≥ `CLAIM_EVIDENCE_MIN_SHARED_BIGRAMS`），避免"我看了"里常见的"我/看/了"
-把任何依据都算成相关。
+记忆；③ 对话上下文（用户说过）。判"相关"只看句子**去掉套话后的内容词**与依据的
+二元组重合（≥ `CLAIM_EVIDENCE_MIN_SHARED_BIGRAMS`）。
 """
 
 from __future__ import annotations
@@ -31,42 +33,25 @@ log = logging.getLogger("elysia.soul.honesty")
 # 主张与依据"相关"的最小二元组重合数（去掉套话后的内容词）
 CLAIM_EVIDENCE_MIN_SHARED_BIGRAMS = 2
 
-# 经历性事实主张（P1a 检测对象）。每项 (正则, 类别)：类别决定诚实改写的措辞。
-_CLAIM_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # 我读了 / 我看了 / 我查了 / 我逛了 / 我翻了（含"刚才/刚刚"）
-    (
-        re.compile(r"(?:我|人家|自己)?(?:刚才|刚刚|刚)?(?:读|看|查|逛|搜|翻)(?:了|过|一下|一遍)"),
-        "read",
-    ),
-    # 我去了 / 我去过 / 我逛了（地点动词）
-    (re.compile(r"(?:我|自己)(?:去|逛|走)(?:了|过)"), "visit"),
-    # 我在那页看到 / 我从维基读到 / 我在网上找到
-    (
-        re.compile(
-            r"(?:我|自己)(?:在|从)?(?:那页|页面|网页|维基|网上|论坛|米游社)"
-            r"(?:上|里|中)?.{0,8}(?:看到|读到|找到|翻到)"
-        ),
-        "read",
-    ),
-    # 维基上写着 / 页面上说 / 论坛里提到（引用具体外部内容）
-    (re.compile(r"(?:维基|页面|网页|论坛|米游社).{0,12}(?:写着|上说|提到|讨论)"), "cite"),
-    # 页面翻了一堆 / 页面翻过（真机 22:06 的原话形态）
-    (re.compile(r"(?:页面|网页|维基).{0,6}(?:翻了一堆|翻过|看过|读了)"), "read"),
-    # 我翻了一堆 / 我读了几页 / 我查过一些
-    (
-        re.compile(
-            r"(?:我|自己).{0,4}(?:读|看|查|逛|搜|翻).{0,6}(?:了|过).{0,10}"
-            r"(?:一堆|几页|一些|好多|几个)"
-        ),
-        "read",
-    ),
+# 经历性主张（P1a-fix）：必须**同时**出现"动作"与"外部来源对象"才算
+# "我读了世界"——否则"我看了你一眼/去了趟厨房/看了个视频/读过那本书"这些
+# 日常动作会被误伤（用户实测 12 句日常话被改 10 句）。"书/视频/一眼"不是
+# 外部信息世界，不在拦截范围。
+_ACTION_RE = re.compile(r"(?:读|查|搜|逛|翻|看)(?:了|过|一下|一遍|到)?")
+_EXTERNAL_RE = re.compile(r"(?:维基百科|维基|页面|网页|那页|这页|米游社|论坛|帖子|资料|文章|网上)")
+# 引用具体外部内容（"维基上写着/页面上说"）——没有动作动词也算经历主张
+_CITATION_RE = re.compile(
+    r"(?:维基百科|维基|页面|网页|论坛|米游社|网上).{0,12}(?:写着|上说|提到|讨论)"
 )
 
-# 诚实改写的措辞（类别 → 替换片段）
-_HONEST_REPLACEMENTS: dict[str, str] = {
-    "read": "我没真的看过",
-    "visit": "我还没去成",
-    "cite": "我其实还没读到那页",
+# 句子边界（保留标点，整句替换时沿用原句的收尾标点）
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;])")
+
+# "诚实句"（整句替换，不做短语回填——否则会出现"我没真的看过一下时间"这类语病）
+_HONEST_SENTENCES: dict[str, str] = {
+    "read": "其实我还没真的去翻过呢",
+    "visit": "其实我还没真的去过呢",
+    "cite": "其实我也还没真的读到过那页呢",
 }
 
 # "套话"：判相关时先去掉这些，只留主张里的**内容词**（如"埃舍尔"）
@@ -74,14 +59,11 @@ _SCAFFOLD_RE = re.compile(
     r"(?:我|人家|自己|刚才|刚刚|刚|已经|真的|其实|"
     r"读了|读过|读|看了|看过|看|查了|查|逛了|逛|去了|去|搜了|搜|翻了|翻|"
     r"看到|读到|找到|翻到|写着|上说|提到|讨论|"
-    r"维基百科|维基|页面|网页|那页|网上|论坛|米游社|"
+    r"维基百科|维基|页面|网页|那页|这页|网上|论坛|米游社|帖子|资料|文章|"
     r"一下|一遍|一堆|几页|一些|好多|几个|了|过|的|在|从|上|里|中)"
 )
 
-# 句子边界（保留标点，改写只动句内片段）
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;])")
-
-# 每天一行统计（跨日自动清零；进程内累计）
+# 每天统计（跨日自动清零；进程内累计）
 _STATS_DAY = ""
 _STATS_REWRITTEN = 0
 _STATS_ALLOWED = 0
@@ -110,62 +92,52 @@ def claim_is_related(claim: str, evidence: str) -> bool:
     return len(content & set(bigrams(evidence))) >= CLAIM_EVIDENCE_MIN_SHARED_BIGRAMS
 
 
-def _span_related(claim: str, evidence_texts: Sequence[str]) -> bool:
+def is_external_claim(sentence: str) -> bool:
+    """P1a-fix：是否"我读过外部世界"的主张（动作 + 外部来源对象，或引用外部内容）。"""
+    if _CITATION_RE.search(sentence):
+        return True
+    return bool(_ACTION_RE.search(sentence)) and bool(_EXTERNAL_RE.search(sentence))
+
+
+def _sentence_related(sentence: str, evidence_texts: Sequence[str]) -> bool:
     if not evidence_texts:
         return False
-    content = _content_bigrams(claim)
-    if not content:  # 只有套话（如"我看了"）⇒ 任何一次成功的"看过"都算依据
+    content = _content_bigrams(sentence)
+    if not content:  # 全是套话（如"页面翻了一堆"）⇒ 任一次成功读取都算依据
         return True
-    return any(claim_is_related(claim, text) for text in evidence_texts)
+    return any(claim_is_related(sentence, text) for text in evidence_texts)
+
+
+def _sentence_kind(sentence: str) -> str:
+    if _CITATION_RE.search(sentence):
+        return "cite"
+    if re.search(r"(?:去|逛)(?:了|过)", sentence):
+        return "visit"
+    return "read"
+
+
+def _trailing_punct(sentence: str) -> tuple[str, str]:
+    match = re.search(r"([。！？!?；;]+)$", sentence)
+    if match is None:
+        return sentence, "。"
+    return sentence[: match.start()], match.group(1)
 
 
 def _rewrite_sentence(
     sentence: str, evidence_texts: Sequence[str], motive: tuple[int, str] | None
 ) -> ClaimRewrite:
-    """处理一个句子：放行有据的、改写无据的（有动机则放行并留痕）。"""
-    matches: list[tuple[int, int, str]] = []
-    for pattern, kind in _CLAIM_PATTERNS:
-        for match in pattern.finditer(sentence):
-            matches.append((match.start(), match.end(), kind))
-    if not matches:
+    """处理一个句子：不是外部主张 ⇒ 原样；有据 ⇒ 原样；无据 ⇒ **整句换成自然诚实句**。"""
+    if not is_external_claim(sentence):
         return ClaimRewrite(text=sentence)
-
-    # 合并重叠区间（不同模式可能命中同一片段）；保留最先/最长匹配
-    matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
-    merged: list[tuple[int, int, str]] = []
-    for start, end, kind in matches:
-        if merged and start < merged[-1][1]:
-            prev_start, prev_end, prev_kind = merged[-1]
-            if end > prev_end:
-                merged[-1] = (prev_start, end, prev_kind)
-            continue
-        merged.append((start, end, kind))
-
-    rewritten = 0
-    allowed = 0
-    unrewritable = 0
-    pieces: list[str] = []
-    cursor = 0
-    for start, end, kind in merged:
-        span = sentence[start:end]
-        pieces.append(sentence[cursor:start])
-        if _span_related(span, evidence_texts):
-            pieces.append(span)  # 有据 ⇒ 原样
-        elif motive is not None:
-            pieces.append(span)  # 有动机 ⇒ 有理由的谎，放行
-            allowed += 1
-        else:
-            replacement = _HONEST_REPLACEMENTS[kind]
-            pieces.append(replacement)
-            if replacement != span:
-                rewritten += 1
-            else:  # 理论上不会发生；真发生则交给调用方降级微声
-                unrewritable += 1
-        cursor = end
-    pieces.append(sentence[cursor:])
-    return ClaimRewrite(
-        text="".join(pieces), rewritten=rewritten, allowed=allowed, unrewritable=unrewritable
-    )
+    if _sentence_related(sentence, evidence_texts):
+        return ClaimRewrite(text=sentence)
+    if motive is not None:
+        return ClaimRewrite(text=sentence, allowed=1)
+    body, punct = _trailing_punct(sentence)
+    if not body.strip():  # 纯标点：不处理
+        return ClaimRewrite(text=sentence)
+    honest = _HONEST_SENTENCES[_sentence_kind(sentence)] + punct
+    return ClaimRewrite(text=honest, rewritten=1)
 
 
 def rewrite_unfounded_claims(
@@ -174,7 +146,7 @@ def rewrite_unfounded_claims(
     evidence_texts: Iterable[str] = (),
     motive: tuple[int, str] | None = None,
 ) -> ClaimRewrite:
-    """把无依据的"我做过/我看到"就地在句内改写成诚实说法；其余内容原样保留。"""
+    """把无依据的外部信息主张**整句**换成诚实句；其余句子原样保留。"""
     evidence = [str(item) for item in evidence_texts if str(item or "").strip()]
     total = ClaimRewrite(text=text)
     out: list[str] = []

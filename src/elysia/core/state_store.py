@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS memories (
     certainty      TEXT NOT NULL DEFAULT '{FALLBACK_CERTAINTY}',
     claim_status   TEXT NOT NULL DEFAULT '{FALLBACK_CLAIM}',
     retention_state TEXT NOT NULL DEFAULT '{FALLBACK_RETENTION}',
-    keep_reason    TEXT
+    keep_reason    TEXT,
+    source_ref     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_ts ON memories (created_ts);
 CREATE INDEX IF NOT EXISTS idx_memories_level ON memories (level);
@@ -372,6 +373,8 @@ class HeartbeatStore(_AsyncSQLite):
                 "ALTER TABLE memories ADD COLUMN retention_state TEXT",
                 # S2（她的"这条我想留着"）：她给出的理由，旧行 NULL
                 "ALTER TABLE memories ADD COLUMN keep_reason TEXT",
+                # P2（世界记忆）：来源引用（read_url 最终 URL），24h 去重用；旧行 NULL
+                "ALTER TABLE memories ADD COLUMN source_ref TEXT",
                 # 旧数据回填（P3-T）：按 kind 推导；只填 NULL，幂等
                 _backfill_sql("source", SOURCE_BY_KIND, FALLBACK_SOURCE),
                 _backfill_sql("certainty", CERTAINTY_BY_KIND, FALLBACK_CERTAINTY),
@@ -406,6 +409,8 @@ class HeartbeatStore(_AsyncSQLite):
             "retention_state": row[16],
             # S2：她留住这条记忆时给的理由（旧行为 NULL）
             "keep_reason": row[17] if len(row) > 17 else None,
+            # P2：来源引用（世界记忆的 URL；旧行为 NULL）
+            "source_ref": row[18] if len(row) > 18 else None,
         }
 
     async def append(self, ts: float, beat_type: str, payload: dict[str, Any]) -> None:
@@ -701,8 +706,8 @@ class HeartbeatStore(_AsyncSQLite):
             cur = conn.execute(
                 "INSERT INTO memories (created_ts, level, kind, content, emotion_vector,"
                 " importance, access_count, last_access_ts, protected, detail_level, narrative,"
-                " source, certainty, claim_status, retention_state)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " source, certainty, claim_status, retention_state, source_ref)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ts,
                     record.get("level", "shallow"),
@@ -719,6 +724,7 @@ class HeartbeatStore(_AsyncSQLite):
                     record.get("certainty") or default_certainty(kind),
                     record.get("claim_status") or FALLBACK_CLAIM,
                     record.get("retention_state") or FALLBACK_RETENTION,
+                    record.get("source_ref"),
                 ),
             )
             conn.commit()
@@ -729,6 +735,17 @@ class HeartbeatStore(_AsyncSQLite):
 
     async def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         rows = await self.execute_raw("SELECT * FROM memories WHERE id = ?", (memory_id,))
+        return self._memory_row_to_dict(rows[0]) if rows else None
+
+    async def find_recent_memory(
+        self, kind: str, *, source_ref: str, since: float
+    ) -> dict[str, Any] | None:
+        """最近一条同来源（`source_ref`）的同 kind 记忆（P2：同 URL 24h 去重）。"""
+        rows = await self.execute_raw(
+            "SELECT * FROM memories WHERE kind = ? AND source_ref = ? AND created_ts >= ?"
+            " ORDER BY id DESC LIMIT 1",
+            (kind, source_ref, float(since)),
+        )
         return self._memory_row_to_dict(rows[0]) if rows else None
 
     async def count_memories(self, level: str | None = None) -> int:

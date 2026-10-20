@@ -92,6 +92,7 @@ from elysia.memory.scorer import importance
 from elysia.memory.sediment import SEDIMENT_CLUSTER_SIMILARITY
 from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
+from elysia.memory.world import record_world_memory
 from elysia.soul.brain import BrainOutput
 from elysia.soul.dialogue import recent_dialogue_window, recent_openings, record_her_bubble
 from elysia.soul.expression import (
@@ -1076,12 +1077,25 @@ class ExpressionService:
         失败时只回"读不到 + 原因"，**绝不编造内容**。
 
         P1a：**成功**结果记入本次作业的工具依据（她之后说"我看了…"就有据）。
+        P2：**成功**后才落一条世界记忆（`kind='world'`，同 URL 24h 去重）；失败不落。
         """
         if not url.strip():
             return "（read_url 读不到：没有给 url）"
         result: ReadResult = await asyncio.to_thread(self._read_url, url)
         if result.ok:
             self._job_tool_evidence.append(result.text)
+            # P2：读到的要落库——这是"我读过"的事实依据；写失败不影响工具回执
+            if now is not None:
+                try:
+                    await record_world_memory(
+                        self._store,
+                        title=str(result.source or result.final_url or url),
+                        summary=result.text,
+                        url=str(result.final_url or url),
+                        now=float(now),
+                    )
+                except Exception:  # 增强路径：绝不拖垮一次成功读取
+                    log.warning("落世界记忆失败（不影响本次读取）", exc_info=True)
         return result.as_tool_text()
 
     async def _tool_write_note(self, text: str, filename: str | None) -> str:

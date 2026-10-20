@@ -51,6 +51,7 @@ from elysia.memory.levels import (
     KIND_EXPRESSION,
     KIND_INTERACTION,
     KIND_SELF,
+    KIND_WORLD,
     LEVEL_DEEP,
     LEVEL_WORKING,
     RETENTION_DORMANT,
@@ -238,6 +239,9 @@ class MemoryHit:
     # 同簇成员（第十五节 A2）：这次检索里被判为"同一件事"、已并入本条的其他记忆 id。
     # 它是**代表**——注入表达的仍只有本条一行，兄弟只用于"这件事被反复提起"的加分与观测。
     sibling_ids: tuple[int, ...] = ()
+    # P2：记忆类型（`world` 的标签用「今天」而不是「刚刚」——"读到"是当天的事，
+    # 用"刚刚"会让她以为刚发生，重复去读同一页）。
+    kind: str = ""
 
     @property
     def label(self) -> str:
@@ -250,6 +254,10 @@ class MemoryHit:
         只把真实的不确定说出来（不新增约束、不改写记忆原文）。
         """
         phrase = age_phrase(self.age_days)
+        # P2：世界记忆是"今天读到的"——标签用「今天」，不用「刚刚」（刚刚会显得
+        # 是此刻正在发生的事，容易让她重复去读同一页）。
+        if self.kind == KIND_WORLD and self.age_days is not None and self.age_days < 1.0:
+            phrase = "今天"
         if self.detail_level < FUZZY_DETAIL_THRESHOLD:
             phrase = f"{phrase}·记不太清" if phrase else "记不太清"
         return f"（{phrase}）{self.narrative}" if phrase else self.narrative
@@ -513,6 +521,7 @@ def select_hooks(
                 age_days=age_days,
                 detail_level=rec.detail_level,
                 woke_from=woke_from,
+                kind=rec.kind,
             )
         )
     hits.sort(key=lambda h: h.score, reverse=True)

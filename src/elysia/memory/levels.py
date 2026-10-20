@@ -54,6 +54,10 @@ KIND_EXCHANGE = "exchange"
 # CHECK 约束（零 DDL 变更）。只有**她认领**才能产生这个类型（程序只递候选），
 # 因此它既不进 memory_hooks（那是"话题撞上的背景常识"），也不参与取代判定。
 KIND_SELF = "self"
+# 世界记忆（P2）：她**真的读过**的外部资料（`read_url` 成功后才落）。
+# 这是"我读过"的事实依据——有它，反编造（P1a）才有据可依；没有它，那些"经历"
+# 就只是编的。来源必须是 observation（inference/system 会被 hooks 闸挡掉）。
+KIND_WORLD = "world"
 
 KINDS = (
     KIND_INTERACTION,
@@ -61,6 +65,7 @@ KINDS = (
     KIND_STATE,
     KIND_INTERNAL,
     KIND_EXCHANGE,
+    KIND_WORLD,
     KIND_SELF,
 )
 
@@ -169,6 +174,7 @@ SOURCE_BY_KIND: dict[str, str] = {
     KIND_STATE: SOURCE_OBSERVATION,
     KIND_INTERNAL: SOURCE_SELF,  # 独处念头是她自己的
     KIND_EXCHANGE: SOURCE_USER,  # 一次交换由用户参与发起
+    KIND_WORLD: SOURCE_OBSERVATION,  # P2：她读到的外部资料（observation，不是推断）
     KIND_SELF: SOURCE_SELF,  # 自我认知是她认领的（程序只递候选）
 }
 CERTAINTY_BY_KIND: dict[str, str] = {
@@ -177,6 +183,7 @@ CERTAINTY_BY_KIND: dict[str, str] = {
     KIND_STATE: CERTAINTY_CERTAIN,
     KIND_INTERNAL: CERTAINTY_PROBABLE,  # 独处念头是印象，不是硬事实
     KIND_EXCHANGE: CERTAINTY_CERTAIN,  # 双方原话都在，事件是确定的
+    KIND_WORLD: CERTAINTY_CERTAIN,  # P2：工具真的读到了，内容是确定的
     KIND_SELF: CERTAINTY_CERTAIN,  # 她认领过的，就是她确信的
 }
 

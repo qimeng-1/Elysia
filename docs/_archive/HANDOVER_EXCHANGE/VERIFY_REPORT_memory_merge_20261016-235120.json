@@ -1,0 +1,199 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "out integrity_check",
+      "ok": true,
+      "detail": "ok"
+    },
+    {
+      "name": "out foreign_key_check",
+      "ok": true,
+      "detail": "violations=0"
+    },
+    {
+      "name": "count heartbeats",
+      "ok": true,
+      "detail": "out=179241 \u671f\u671b=179241 (tr=128035+m=51206)"
+    },
+    {
+      "name": "count memories",
+      "ok": true,
+      "detail": "out=539 \u671f\u671b=539 (tr=434+m=105)"
+    },
+    {
+      "name": "count memory_index",
+      "ok": true,
+      "detail": "out=535 \u671f\u671b=535 (tr=432+m=103)"
+    },
+    {
+      "name": "count thought_log",
+      "ok": true,
+      "detail": "out=550 \u671f\u671b=550 (tr=447+m=103)"
+    },
+    {
+      "name": "count expression_log",
+      "ok": true,
+      "detail": "out=509 \u671f\u671b=509 (tr=415+m=94)"
+    },
+    {
+      "name": "memories.content \u591a\u91cd\u96c6\u5b88\u6052",
+      "ok": true,
+      "detail": "out=539 \u671f\u671b=539"
+    },
+    {
+      "name": "thought_log.text \u591a\u91cd\u96c6\u5b88\u6052",
+      "ok": true,
+      "detail": "out=550 \u671f\u671b=550"
+    },
+    {
+      "name": "expression_log.llm_text \u591a\u91cd\u96c6\u5b88\u6052",
+      "ok": true,
+      "detail": "out=509 \u671f\u671b=509"
+    },
+    {
+      "name": "heartbeats.payload \u591a\u91cd\u96c6\u5b88\u6052",
+      "ok": true,
+      "detail": "out=179241 \u671f\u671b=179241"
+    },
+    {
+      "name": "memory_index \u65e0\u5b64\u513f",
+      "ok": true,
+      "detail": "orphan=0"
+    },
+    {
+      "name": "superseded_by \u65e0\u60ac\u7a7a",
+      "ok": true,
+      "detail": "dangling=0"
+    },
+    {
+      "name": "memory_index memory_id \u552f\u4e00",
+      "ok": true,
+      "detail": "dup=0"
+    },
+    {
+      "name": "superseded_by \u6761\u6570\u5b88\u6052",
+      "ok": true,
+      "detail": "out=22 \u671f\u671b=22"
+    },
+    {
+      "name": "heartbeats id \u552f\u4e00",
+      "ok": true,
+      "detail": "rows=179241 distinct=179241"
+    },
+    {
+      "name": "memories id \u552f\u4e00",
+      "ok": true,
+      "detail": "rows=539 distinct=539"
+    },
+    {
+      "name": "memory_index id \u552f\u4e00",
+      "ok": true,
+      "detail": "rows=535 distinct=535"
+    },
+    {
+      "name": "thought_log id \u552f\u4e00",
+      "ok": true,
+      "detail": "rows=550 distinct=550"
+    },
+    {
+      "name": "expression_log id \u552f\u4e00",
+      "ok": true,
+      "detail": "rows=509 distinct=509"
+    },
+    {
+      "name": "\u8d77\u70b9 = Transfer \u8d77\u70b9",
+      "ok": true,
+      "detail": "out=1787482445.1312711 tr=1787482445.1312711"
+    },
+    {
+      "name": "\u7ec8\u70b9 = \u4e3b\u7ebf\u7ec8\u70b9",
+      "ok": true,
+      "detail": "out=1792165880.6608717 main=1792165880.6608717"
+    },
+    {
+      "name": "\u4e24\u6e90\u65f6\u95f4\u65e0\u91cd\u53e0",
+      "ok": true,
+      "detail": "tr_max=1790263446.7578003 main_min=1791911915.7256076"
+    },
+    {
+      "name": "first_existence_ts = Transfer \u8bde\u751f\u65f6\u523b",
+      "ok": true,
+      "detail": "out=1787482445.1452239 tr=1787482445.1452239"
+    },
+    {
+      "name": "age_days > 50\uff08\u4fee\u590d\u524d\u53ea\u6709 2 \u5929\uff09",
+      "ok": true,
+      "detail": "age_days=54.21"
+    },
+    {
+      "name": "last_body_online_ts \u53d6\u4e3b\u7ebf\uff08\u8f83\u65b0\uff09",
+      "ok": true,
+      "detail": "out=1792165877.7706618 main=1792165877.7706618"
+    },
+    {
+      "name": "kv \u952e\u5e76\u96c6\u5b88\u6052",
+      "ok": true,
+      "detail": "out=['body_status', 'desire', 'interaction', 'relationship_withdrawal', 'timesense'] \u671f\u671b=['body_status', 'desire', 'interaction', 'relationship_withdrawal', 'timesense']"
+    },
+    {
+      "name": "\u62bd\u6837 heartbeats",
+      "ok": true,
+      "detail": "\u5168\u90e8\u547d\u4e2d"
+    },
+    {
+      "name": "\u62bd\u6837 memories",
+      "ok": true,
+      "detail": "\u5168\u90e8\u547d\u4e2d"
+    },
+    {
+      "name": "\u62bd\u6837 memory_index",
+      "ok": true,
+      "detail": "\u5168\u90e8\u547d\u4e2d"
+    },
+    {
+      "name": "\u62bd\u6837 thought_log",
+      "ok": true,
+      "detail": "\u5168\u90e8\u547d\u4e2d"
+    },
+    {
+      "name": "\u62bd\u6837 expression_log",
+      "ok": true,
+      "detail": "\u5168\u90e8\u547d\u4e2d"
+    }
+  ],
+  "counts": {
+    "heartbeats": {
+      "transfer": 128035,
+      "main": 51206,
+      "out": 179241,
+      "expected": 179241
+    },
+    "memories": {
+      "transfer": 434,
+      "main": 105,
+      "out": 539,
+      "expected": 539
+    },
+    "memory_index": {
+      "transfer": 432,
+      "main": 103,
+      "out": 535,
+      "expected": 535
+    },
+    "thought_log": {
+      "transfer": 447,
+      "main": 103,
+      "out": 550,
+      "expected": 550
+    },
+    "expression_log": {
+      "transfer": 415,
+      "main": 94,
+      "out": 509,
+      "expected": 509
+    }
+  },
+  "age_days": 54.21,
+  "first_existence_ts": 1787482445.1452239
+}

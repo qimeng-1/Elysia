@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS dialogue_turns (
     text           TEXT NOT NULL,
     exchange_id    INTEGER NOT NULL,
     emotion_vector TEXT,
-    intent         TEXT
+    intent         TEXT,
+    speaker        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_dialogue_turns_ts ON dialogue_turns (ts);
 CREATE TABLE IF NOT EXISTS kept_moments (
@@ -389,6 +390,8 @@ class HeartbeatStore(_AsyncSQLite):
                 "ALTER TABLE memories ADD COLUMN keep_reason TEXT",
                 # P2（世界记忆）：来源引用（read_url 最终 URL），24h 去重用；旧行 NULL
                 "ALTER TABLE memories ADD COLUMN source_ref TEXT",
+                # Source 切片：谁在说（user/agent 显示名）；旧行 NULL ⇒ 按用户处理
+                "ALTER TABLE dialogue_turns ADD COLUMN speaker TEXT",
                 # 旧数据回填（P3-T）：按 kind 推导；只填 NULL，幂等
                 _backfill_sql("source", SOURCE_BY_KIND, FALLBACK_SOURCE),
                 _backfill_sql("certainty", CERTAINTY_BY_KIND, FALLBACK_CERTAINTY),
@@ -481,19 +484,22 @@ class HeartbeatStore(_AsyncSQLite):
         *,
         emotion_vector: dict[str, float] | None = None,
         intent: str | None = None,
+        speaker: str | None = "user",
     ) -> int:
         """写一条对话轮次（S1a）：`role='user'/'her'`，同一次交换共用 `exchange_id`。
 
         原话不裁剪（上下文读取时才截断）；`emotion_vector`/`intent` 只有 her 侧有。
-        返回新行 id。
+        `speaker`（Source 切片）：谁在说——`user`=人类、其他=另一个存在（如 `大肥鱼`）、
+        `我`=她自己；旧行 NULL 一律按 `user` 处理。返回新行 id。
         """
         emotion = json.dumps(emotion_vector, ensure_ascii=False) if emotion_vector else None
 
         def _add(conn: sqlite3.Connection) -> int:
             cur = conn.execute(
-                "INSERT INTO dialogue_turns (ts, role, text, exchange_id, emotion_vector, intent)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (ts, role, text, int(exchange_id), emotion, intent),
+                "INSERT INTO dialogue_turns"
+                " (ts, role, text, exchange_id, emotion_vector, intent, speaker)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ts, role, text, int(exchange_id), emotion, intent, speaker),
             )
             conn.commit()
             assert cur.lastrowid is not None
@@ -517,18 +523,18 @@ class HeartbeatStore(_AsyncSQLite):
         """读最近 `limit` 条对话轮次（按时间**升序**返回；不含 limit 则按时间升序全量）。"""
         if limit is None:
             rows = await self.execute_raw(
-                "SELECT id, ts, role, text, exchange_id, emotion_vector, intent"
+                "SELECT id, ts, role, text, exchange_id, emotion_vector, intent, speaker"
                 " FROM dialogue_turns ORDER BY id"
             )
         else:
             rows = await self.execute_raw(
-                "SELECT id, ts, role, text, exchange_id, emotion_vector, intent"
+                "SELECT id, ts, role, text, exchange_id, emotion_vector, intent, speaker"
                 " FROM dialogue_turns ORDER BY id DESC LIMIT ?",
                 (int(limit),),
             )
             rows = list(reversed(rows))
         out: list[dict[str, Any]] = []
-        for rid, ts, role, text, exchange_id, emotion, intent in rows:
+        for rid, ts, role, text, exchange_id, emotion, intent, speaker in rows:
             out.append(
                 {
                     "id": int(rid),
@@ -538,6 +544,7 @@ class HeartbeatStore(_AsyncSQLite):
                     "exchange_id": int(exchange_id),
                     "emotion_vector": json.loads(emotion) if emotion else {},
                     "intent": intent,
+                    "speaker": speaker,
                 }
             )
         return out

@@ -47,14 +47,20 @@ ROLE_USER = "user"
 ROLE_HER = "her"
 
 
-async def record_user_message(store: Any, now: float, text: str) -> int | None:
-    """用户新消息 → 新交换号 + 写一条 `role='user'` 轮次。失败返回 None，不抛。"""
+async def record_user_message(
+    store: Any, now: float, text: str, *, speaker: str = "user"
+) -> int | None:
+    """用户/另一个存在的新消息 → 新交换号 + 写一条 `role='user'` 轮次。
+
+    `speaker`（Source 切片）：`user`=人类；其他显示名=另一个电子生命（如 `大肥鱼`）。
+    缺省 `user`，旧调用方行为完全不变。失败返回 None，不抛。
+    """
     message = str(text or "").strip()
     if not message:
         return None
     try:
         exchange_id = int(await store.max_exchange_id()) + 1
-        await store.add_dialogue_turn(now, ROLE_USER, message, exchange_id)
+        await store.add_dialogue_turn(now, ROLE_USER, message, exchange_id, speaker=speaker)
         return exchange_id
     except Exception:
         log.warning("写对话轮次（user）失败——不影响她说话", exc_info=True)
@@ -90,6 +96,7 @@ async def record_her_bubble(
             exchange_id,
             emotion_vector=dict(emotion_vector or {}),
             intent=intent,
+            speaker="我",
         )
     except Exception:
         log.warning("写对话轮次（her）失败——不影响她说话", exc_info=True)
@@ -121,6 +128,7 @@ async def recent_dialogue_window(
         items.append(
             {
                 "role": str(turn.get("role") or ""),
+                "speaker": _speaker_label(turn),
                 "text": text[:CONTEXT_TEXT_CHARS],
                 "age_s": round(max(0.0, float(now) - float(turn.get("ts") or 0.0)), 1),
             }
@@ -154,16 +162,38 @@ EXCHANGE_TEXT_CHARS = 120
 SEALED_EXCHANGE_KEY = "dialogue_sealed_exchange_id"
 
 
+def _speaker_label(turn: dict[str, Any]) -> str:
+    """对话轮次的说话人显示名（Source 切片）。
+
+    - 人类（缺省/旧行 NULL/`user`）⇒ `你`
+    - 她的气泡 ⇒ `我`
+    - 另一个存在 ⇒ 其 `actor` 显示名（如 `大肥鱼`）
+    """
+    speaker = str(turn.get("speaker") or "").strip()
+    if str(turn.get("role") or "") == ROLE_HER:
+        return "我"
+    if speaker in ("", "user"):
+        return "你"
+    return speaker
+
+
 def build_exchange_text(turns: list[dict[str, Any]]) -> tuple[str, dict[str, float]]:
     """把一次交换的轮次压成一条事件记忆的正文 + 她当时的感受（纯函数，可单测）。
 
-    形如：`你："<原话截断120字>"／我（当时 miss=0.33）："<她的回复截断120字>"`。
-    **忽略 `exchange_id <= 0` 的轮次**（S1d：自发气泡不属于任何交换）。
+    形如：`你："<原话截断120字>"／大肥鱼："<原话>"／我（当时 miss=0.33）："<她的回复>"`。
+    **按轮次分别标说话人**（Source 切片）：人类=`你`，另一个存在=`actor`；
+    不再把所有用户侧的话都压成"你"。**忽略 `exchange_id <= 0` 的轮次**（S1d）。
     """
     turns = [turn for turn in turns if int(turn.get("exchange_id") or 0) > 0]
-    user_text = " ".join(
-        str(turn.get("text") or "").strip() for turn in turns if turn.get("role") == ROLE_USER
-    ).strip()
+    user_parts: list[str] = []
+    for turn in turns:
+        if turn.get("role") != ROLE_USER:
+            continue
+        text = str(turn.get("text") or "").strip()
+        if not text:
+            continue
+        label = _speaker_label(turn)
+        user_parts.append(f'{label}："{text[:EXCHANGE_TEXT_CHARS]}"')
     her_text = " ".join(
         str(turn.get("text") or "").strip() for turn in turns if turn.get("role") == ROLE_HER
     ).strip()
@@ -175,11 +205,11 @@ def build_exchange_text(turns: list[dict[str, Any]]) -> tuple[str, dict[str, flo
             emotion = {str(k): float(v) for k, v in payload.items() if isinstance(v, (int, float))}
             break
     miss = float(emotion.get("miss", 0.0))
-    content = (
-        f'你："{user_text[:EXCHANGE_TEXT_CHARS]}"／'
-        f'我（当时 miss={miss:.2f}）："{her_text[:EXCHANGE_TEXT_CHARS]}"'
-    )
-    return content, emotion
+    segments = [
+        *user_parts,
+        f'我（当时 miss={miss:.2f}）："{her_text[:EXCHANGE_TEXT_CHARS]}"',
+    ]
+    return "／".join(segments), emotion
 
 
 async def seal_exchange(

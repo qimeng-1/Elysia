@@ -393,6 +393,44 @@ def test_http_say_without_reply_is_legal_state_not_error(
         thread.join(timeout=5)
 
 
+def test_http_say_carries_source_and_actor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Source 切片：`/api/say` 接受 source/actor；非法 source ⇒ 400 明确拒绝。"""
+    monkeypatch.setattr(panel, "SAY_WAIT_S", 0.0)
+    monkeypatch.setattr(panel, "take_snapshot", lambda **kw: _fake_snapshot())
+    state = _state_db(tmp_path / "state.db")
+    hb = _heartbeat_db(tmp_path / "heartbeat.db")
+    srv = panel.make_server("127.0.0.1", 0, state_db=state, heartbeat_db=hb)
+    thread, port = _serve(srv)
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/say",
+            data=json.dumps({"text": "夜里好", "source": "agent", "actor": "大肥鱼"}).encode(
+                "utf-8"
+            ),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.status == 200
+        payload = _read_kv_interaction(state)
+        assert payload["source"] == "agent"
+        assert payload["actor"] == "大肥鱼"
+
+        bad = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/say",
+            data=json.dumps({"text": "夜里好", "source": "robot"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(bad, timeout=10)
+        assert exc.value.code == 400
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
 # ── 步 3：她开口时推送 ───────────────────────────────────────────────
 class _WebhookReceiver:
     """本地假 webhook：记录收到的请求体（不联网、不花钱）。"""

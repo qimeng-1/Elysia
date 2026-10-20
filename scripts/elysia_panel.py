@@ -379,18 +379,31 @@ def sanitize_say_text(raw: object) -> tuple[str | None, str | None]:
     return cleaned, None
 
 
-def write_interaction(db_path: Path, text: str, *, now: float | None = None) -> float:
+def write_interaction(
+    db_path: Path,
+    text: str,
+    *,
+    now: float | None = None,
+    source: str = "user",
+    actor: str | None = None,
+) -> float:
     """写 `kv['interaction']`（她心跳每拍读的那一行）。失败抛 `SayError`，绝不静默。
 
     用**独立的读写连接 + busy_timeout=5000**：面板其余部分仍全部 `mode=ro`
     （只读设计不变），这里是唯一的写入口，且只在用户按"发送"时发生。
     写后回读一次核对 —— 提交成功但内容不是我们写的，同样算失败。
+
+    Source 切片：`source='user'`（人类，默认）/ `source='agent'`（另一个电子生命，
+    再带 `actor` 显示名，如 `大肥鱼`）。旧心跳不读这两个字段，带上了也不影响它。
     """
     path = Path(db_path)
     if not path.is_file():
         raise SayError(f"state.db 不存在：{path}（不会新建一个空库冒充成功）")
     ts = time.time() if now is None else float(now)
-    payload = json.dumps({"ts": ts, "text": text}, ensure_ascii=False)
+    payload_obj: dict[str, object] = {"ts": ts, "text": text, "source": source}
+    if source == "agent" and actor:
+        payload_obj["actor"] = actor
+    payload = json.dumps(payload_obj, ensure_ascii=False)
     try:
         conn = sqlite3.connect(str(path), timeout=5.0)
         try:
@@ -487,6 +500,8 @@ def say(
     heartbeat_db: Path | None = None,
     wait_s: float = SAY_WAIT_S,
     poll_s: float = SAY_POLL_S,
+    source: str = "user",
+    actor: str | None = None,
 ) -> dict[str, object]:
     """ "对她说一句话"的完整诚实回报。
 
@@ -498,6 +513,36 @@ def say(
     """
     state_db = Path(state_db)
     hb = Path(heartbeat_db) if heartbeat_db is not None else state_db.with_name("heartbeat.db")
+    # Source 切片：谁在说——user（人类，默认）/ agent（另一个电子生命 + actor 显示名）
+    source_name = str(source or "user").strip().lower()
+    if source_name not in ("user", "agent"):
+        return {
+            "ok": False,
+            "wrote": False,
+            "responded": False,
+            "title": "输入不合法",
+            "detail": "source 只能是 user 或 agent",
+        }
+    actor_name = str(actor or "").strip()
+    if source_name == "agent":
+        if not actor_name:
+            return {
+                "ok": False,
+                "wrote": False,
+                "responded": False,
+                "title": "输入不合法",
+                "detail": "source=agent 时必须给 actor（显示名，如 大肥鱼）",
+            }
+        if len(actor_name) > 40:
+            return {
+                "ok": False,
+                "wrote": False,
+                "responded": False,
+                "title": "输入不合法",
+                "detail": "actor 太长（最多 40 字）",
+            }
+    else:
+        actor_name = ""
     text, err = sanitize_say_text(raw_text)
     if text is None:
         return {
@@ -515,7 +560,7 @@ def say(
     except Exception as exc:
         baseline_err = f"读不到 expression_log（{type(exc).__name__}: {exc}）"
     try:
-        ts = write_interaction(state_db, text)
+        ts = write_interaction(state_db, text, source=source_name, actor=actor_name or None)
     except SayError as exc:
         return {
             "ok": False,
@@ -926,6 +971,8 @@ class Handler(BaseHTTPRequestHandler):
             heartbeat_db=self._srv.heartbeat_db,
             wait_s=SAY_WAIT_S,
             poll_s=SAY_POLL_S,
+            source=data.get("source") or "user",
+            actor=data.get("actor"),
         )
         wrote = bool(result.get("wrote"))
         if wrote and not result.get("responded"):

@@ -940,6 +940,11 @@ class SoulHeartbeat:
                     if isinstance(raw_text, str) and raw_text.strip()
                     else None
                 )
+                # Source 切片：`source='agent'`（另一个电子生命）+ `actor` 显示名；
+                # 缺省/旧行为一律按人类 `user` 处理（向后兼容）。
+                source = str(interaction.get("source") or "user").strip().lower()
+                actor = str(interaction.get("actor") or "").strip()
+                speaker = actor if source == "agent" and actor else "user"
                 # S1a：用户新消息 = 新交换号 + 写一条对话轮次（失败不影响她说话，
                 # `record_user_message` 内部吞异常并记日志）。这是"接得上话"的起点。
                 # 注意：这条**不依赖** brain_loop 是否存在——对话归档是基础设施。
@@ -947,7 +952,7 @@ class SoulHeartbeat:
                     # S1b：新消息到来 = 上一次交换结束 ⇒ 先封存上一条（幂等）
                     await seal_pending(self._heartbeat_store, self._state_store, now)
                     await record_user_message(
-                        self._heartbeat_store, now, self._pending_user_message
+                        self._heartbeat_store, now, self._pending_user_message, speaker=speaker
                     )
                 if self._brain_loop is not None:
                     # P0-R19：不在这里立刻给满足感——先记下来，等"回不回"决定后

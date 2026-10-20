@@ -53,6 +53,7 @@ from elysia.soul.expression_service import ExpressionService, ensure_identity_se
 from elysia.soul.expression_types import ExpressionResult
 from elysia.soul.expression_worker import ExpressionWorker
 from elysia.soul.heartbeat import SoulHeartbeat, make_soul_state, stop_with_cancel
+from elysia.soul.intentions import Intentions, IntentionWorker
 from elysia.tts import build_tts_chain
 
 # ── P0-R2（D-1）：崩溃现场 ────────────────────────────────────────────
@@ -380,13 +381,17 @@ async def _run(
             settings,
             on_degrade=lambda _reason: _on_degrade("tts", settings.tts_degrade_sa_delta),
         )
+        # P3：她的"打算"——声明走工具，执行走独立 worker（不是心跳拍）
+        intentions = Intentions(heartbeat_store)
         expression = ExpressionService(
             llm_chain,
             heartbeat_store,
             tts_chain=tts_chain,
             retriever=retrieve_from_store,
             on_recall=_on_recall,
+            intentions=intentions,
         )
+        intention_worker = IntentionWorker(intentions)
         # 阶段 1（20.6 的 1.3）：表达耗时段（LLM/TTS）交给 worker——心跳提交任务后立刻继续走，
         # 不再在 1Hz 主循环里等外部服务。落库仍由心跳拍做（D2），故 worker 只注入 handler。
         expression_worker = ExpressionWorker(expression.run_job)
@@ -427,6 +432,8 @@ async def _run(
             supervise(heartbeat.run, "soul-heartbeat", on_error=heartbeat.record_error),
             name="soul-heartbeat",
         )
+        # P3：独立意图执行器（每 30s 看一次 pending；不是心跳拍）
+        intention_worker.start()
         ctx.phase = "heartbeat_loop"
         try:
             await stop.wait()
@@ -436,6 +443,8 @@ async def _run(
             ctx.phase = "shutdown"
             log.info("soul stopping：优雅关闭（先停表达，再停心跳与库）")
             heartbeat.set_distress(False)
+            # P3：先停意图执行器，避免它还在写库
+            await intention_worker.aclose()
             # 1.6 关闭序的 worker 段：停收新任务 → 等在跑任务 ≤ EXPRESS_TIMEOUT_S
             # （10s 宽限）→ 超时取消 → 排空结果队列。落库归属不变（D2）：取回的结果
             # 交回心跳写，且**先停它、再停库**。

@@ -136,6 +136,20 @@ CREATE TABLE IF NOT EXISTS memory_narrative_history (
 );
 CREATE INDEX IF NOT EXISTS idx_narrative_history_memory
     ON memory_narrative_history (memory_id, ts);
+CREATE TABLE IF NOT EXISTS intentions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts      REAL NOT NULL,
+    goal            TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    target          TEXT,
+    kind            TEXT NOT NULL DEFAULT 'task',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    last_attempt_ts REAL,
+    outcome         TEXT,
+    finished_ts     REAL
+);
+CREATE INDEX IF NOT EXISTS idx_intentions_status ON intentions (status, created_ts);
 """
 
 
@@ -747,6 +761,107 @@ class HeartbeatStore(_AsyncSQLite):
             (kind, source_ref, float(since)),
         )
         return self._memory_row_to_dict(rows[0]) if rows else None
+
+    # ── P3：她的意图（"打算做"跨时间存活）───────────────────────────
+    @staticmethod
+    def _intention_row(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "id": int(row[0]),
+            "created_ts": float(row[1]),
+            "goal": str(row[2]),
+            "action": str(row[3]),
+            "target": row[4],
+            "kind": str(row[5]),
+            "status": str(row[6]),
+            "attempts": int(row[7]),
+            "last_attempt_ts": row[8],
+            "outcome": row[9],
+            "finished_ts": row[10],
+        }
+
+    async def add_intention(
+        self,
+        ts: float,
+        *,
+        goal: str,
+        action: str,
+        target: str | None,
+        kind: str,
+    ) -> int:
+        """写一条 pending 意图（P3）；返回意图 id。"""
+
+        def _add(conn: sqlite3.Connection) -> int:
+            cur = conn.execute(
+                "INSERT INTO intentions (created_ts, goal, action, target, kind, status)"
+                " VALUES (?, ?, ?, ?, ?, 'pending')",
+                (float(ts), goal, action, target, kind),
+            )
+            conn.commit()
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+
+        return int(await self.submit_ret(_add))
+
+    async def get_intention(self, intention_id: int) -> dict[str, Any] | None:
+        rows = await self.execute_raw("SELECT * FROM intentions WHERE id = ?", (int(intention_id),))
+        return self._intention_row(rows[0]) if rows else None
+
+    async def next_pending_intention(self) -> dict[str, Any] | None:
+        """最早一条 pending 意图（执行器一次只拿一条）。"""
+        rows = await self.execute_raw(
+            "SELECT * FROM intentions WHERE status = 'pending' ORDER BY created_ts, id LIMIT 1"
+        )
+        return self._intention_row(rows[0]) if rows else None
+
+    async def pending_intention_count(self) -> int:
+        rows = await self.execute_raw("SELECT COUNT(*) FROM intentions WHERE status = 'pending'")
+        return int(rows[0][0]) if rows else 0
+
+    async def record_intention_attempt(self, intention_id: int, now: float, outcome: str) -> None:
+        """失败一次：attempts+1、留最后尝试时间与原因（状态仍由调用方决定）。"""
+
+        def _update(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE intentions SET attempts = attempts + 1, last_attempt_ts = ?,"
+                " outcome = ? WHERE id = ?",
+                (float(now), outcome, int(intention_id)),
+            )
+            conn.commit()
+
+        await self.submit(_update)
+
+    async def finish_intention(
+        self, intention_id: int, now: float, status: str, outcome: str
+    ) -> None:
+        """终结一条意图：done / failed / dropped + outcome + finished_ts。"""
+
+        def _update(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE intentions SET status = ?, outcome = ?, finished_ts = ? WHERE id = ?",
+                (status, outcome, float(now), int(intention_id)),
+            )
+            conn.commit()
+
+        await self.submit(_update)
+
+    async def recent_finished_intentions(
+        self, since: float, *, limit: int = 3
+    ) -> list[dict[str, Any]]:
+        rows = await self.execute_raw(
+            "SELECT * FROM intentions WHERE status IN ('done', 'failed')"
+            " AND finished_ts IS NOT NULL AND finished_ts >= ?"
+            " ORDER BY finished_ts DESC, id DESC LIMIT ?",
+            (float(since), int(limit)),
+        )
+        return [self._intention_row(row) for row in rows]
+
+    async def recent_world_memories(self, since: float, *, limit: int = 5) -> list[dict[str, Any]]:
+        rows = await self.execute_raw(
+            "SELECT * FROM memories WHERE kind = 'world' AND created_ts >= ?"
+            " ORDER BY id DESC LIMIT ?",
+            (float(since), int(limit)),
+        )
+        return [self._memory_row_to_dict(row) for row in rows]
 
     async def count_memories(self, level: str | None = None) -> int:
         if level is None:

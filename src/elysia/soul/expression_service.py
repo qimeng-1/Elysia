@@ -112,6 +112,7 @@ from elysia.soul.expression_types import (
     make_job_id,
 )
 from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
+from elysia.soul.intentions import Intentions
 from elysia.soul.tools.keep_moment import MomentKeeper
 from elysia.soul.tools.read_url import ReadResult, read_url
 from elysia.soul.tools.writing import WritingError, WritingWorkspace
@@ -391,12 +392,17 @@ class ExpressionService:
         url_reader: ReadUrlFn | None = None,
         writing_workspace: WritingWorkspace | None = None,
         moment_keeper: MomentKeeper | None = None,
+        intentions: Intentions | None = None,
     ) -> None:
         self._llm = llm_chain
         self._store = heartbeat_store
         self._tts = tts_chain
         self._validator = validator if validator is not None else ExpressionValidator()
         self.retriever = retriever
+        # P3：她的"打算"（默认直接用本库；运行时 worker 与本服务共享同一份实现）
+        self._intentions: Intentions = (
+            intentions if intentions is not None else Intentions(self._store)
+        )
         # W3：她自己的两个工具（只读外部资料 / 写作工作区）。默认接真实实现；
         # 单测注入假抓取与临时目录，因此不需要网络也不写她的真目录。
         self._read_url: ReadUrlFn = url_reader if url_reader is not None else read_url
@@ -539,14 +545,16 @@ class ExpressionService:
     async def _fiction_motive(self) -> tuple[int, str] | None:
         """P1a/P3：她现在有没有"可以撒谎"的动机（意图登记册）。
 
-        P3 之前 `intentions` 表不存在 ⇒ 返回 None（一律把无据主张改写成诚实）。
-        P3 上线后，`kind ∈ surprise|conceal|play` 的 pending/done 意图自动打开"有理由的谎"。
+        **动机只在该意图存在期间有效**：只认 `status='pending'`（还没做完）的
+        `kind ∈ surprise|conceal|play`。`done/failed/dropped` 之后不再放行——
+        否则等于给她永久撒谎许可（P1b 验收要求）。
+        P3 之前 `intentions` 表不存在 ⇒ 返回 None（一律改写成诚实）。
         """
         try:
             rows = await self._store.execute_raw(
                 "SELECT id, kind FROM intentions"
                 " WHERE kind IN ('surprise', 'conceal', 'play')"
-                " AND status IN ('pending', 'done') ORDER BY id DESC LIMIT 1"
+                " AND status = 'pending' ORDER BY id DESC LIMIT 1"
             )
         except Exception:  # 表还没建（P3 之前）：动机源为空
             return None
@@ -785,6 +793,12 @@ class ExpressionService:
         except Exception:
             log.warning("装配 recent_openings 失败——本次不带开场去重", exc_info=True)
             payload["recent_openings"] = []
+        # P3c：最近 24h 她自己做过/读到的事（说不说由她；只放文本不放 id）
+        try:
+            payload["recent_discoveries"] = await self._intentions.recent_discoveries(now)
+        except Exception:
+            log.warning("装配 recent_discoveries 失败", exc_info=True)
+            payload["recent_discoveries"] = []
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)
@@ -1062,6 +1076,15 @@ class ExpressionService:
                 )
             if name == "keep_this_moment":
                 return await self._tool_keep_this_moment(str(args.get("reason") or ""))
+            if name == "set_intention":
+                raw_target = args.get("target")
+                return await self._tool_set_intention(
+                    str(args.get("goal") or ""),
+                    str(args.get("action") or ""),
+                    str(raw_target) if raw_target else None,
+                    str(args.get("kind") or "task"),
+                    now,
+                )
             return ""
 
         return _run
@@ -1069,6 +1092,19 @@ class ExpressionService:
     async def _tool_keep_this_moment(self, reason: str) -> str:
         """S2：她留住最近一次交换。任何失败都返回明确原因（不抛给表达链路）。"""
         return await self._moment_keeper.keep_this_moment(reason)
+
+    async def _tool_set_intention(
+        self,
+        goal: str,
+        action: str,
+        target: str | None,
+        kind: str,
+        now: float,
+    ) -> str:
+        """P3：她写下"打算做"的事（后台执行器会真的去做）。参数非法明确回执。"""
+        return await self._intentions.set_intention(
+            goal=goal, action=action, target=target, kind=kind, now=now
+        )
 
     async def _tool_read_url(self, url: str, now: float | None = None) -> str:
         """只读外部资料（W3）：网络/落盘都在线程里跑，不阻塞事件循环。

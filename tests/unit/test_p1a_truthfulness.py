@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -263,19 +262,10 @@ async def test_motive_allows_and_logs(tmp_path: Path, caplog: pytest.LogCaptureF
     store = HeartbeatStore(tmp_path / "heartbeat.db")
     await store.start()
     try:
-        con = sqlite3.connect(str(tmp_path / "heartbeat.db"))
-        con.execute(
-            "CREATE TABLE intentions (id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " created_ts REAL, goal TEXT, action TEXT, target TEXT, kind TEXT,"
-            " status TEXT, attempts INTEGER DEFAULT 0, last_attempt_ts REAL, outcome TEXT)"
+        # P3 已上线：intentions 表由 store schema 建好，直接写一条 pending surprise
+        await store.add_intention(
+            T0, goal="想给她一个惊喜", action="read_url", target=None, kind="surprise"
         )
-        con.execute(
-            "INSERT INTO intentions (created_ts, goal, action, kind, status)"
-            " VALUES (?, '想给她一个惊喜', 'read_url', 'surprise', 'pending')",
-            (T0,),
-        )
-        con.commit()
-        con.close()
 
         service = ExpressionService(_FakeLLM(CLAIM), store)  # type: ignore[arg-type]
         with caplog.at_level(logging.INFO):

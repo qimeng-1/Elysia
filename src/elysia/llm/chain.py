@@ -266,6 +266,40 @@ KEEP_THIS_MOMENT_TOOL: dict[str, Any] = {
     },
 }
 
+# 她的"打算"（P3）：写下想做的事，后台真的替她去做（读资料 / 写东西）。
+# 注意：这是**能力**，没有"每天只能做几件"的配额（用户明确否决）；技术护栏
+# （并发 1 / 8s 超时 / 连续失败 3 次）由执行器保证，不靠提示词自觉。
+SET_INTENTION_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "set_intention",
+        "description": (
+            "把一个「打算做的事」写下来，后台会真的替你做（你不需要立刻做完）。"
+            "action 只能是 read_url（读一段白名单外部资料）或 write_note（写进你的写作区）。"
+            "kind 是这件事的性质：task（普通）/ surprise（想给她惊喜）/ "
+            "conceal（想先瞒着）/ play（想玩一下）。"
+            "read_url 必须给 target（URL）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "一句话说说你想做什么（≤120 字）"},
+                "action": {"type": "string", "enum": ["read_url", "write_note"]},
+                "target": {
+                    "type": "string",
+                    "description": "read_url 的 URL；write_note 可选文件名（不含路径）",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["task", "surprise", "conceal", "play"],
+                    "description": "这件事的性质（默认 task）",
+                },
+            },
+            "required": ["goal", "action"],
+        },
+    },
+}
+
 
 @dataclass
 class SpeakResult:
@@ -316,7 +350,7 @@ class LLMChain:
                 await self._on_degrade(reason)
 
     async def _main_speak(self, instruction: dict[str, Any]) -> str | None:
-        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的八个工具。"""
+        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的九个工具。"""
         main = self._main
         if main is None:
             return None
@@ -333,6 +367,7 @@ class LLMChain:
                     READ_URL_TOOL,
                     WRITE_NOTE_TOOL,
                     KEEP_THIS_MOMENT_TOOL,
+                    SET_INTENTION_TOOL,
                 ],
                 run_tool=self._tool_runner,
             )

@@ -30,6 +30,7 @@ from elysia.soul.intentions import Intentions
 from elysia.soul.promises import (
     detect_promise,
     is_abandonment,
+    list_pending_promises,
 )
 from elysia.soul.tools.writing import WritingWorkspace
 
@@ -198,8 +199,9 @@ async def test_promises_expire_lazily_after_48h(tmp_path: Path) -> None:
             target=None,
             kind="promise",
         )
-        # 24h 提醒窗口外（47h）不会出现在 payload；但“48h 惰性过期”只按 48h 判定
-        await store.expire_stale_promises(T0)
+        # 读取（list_pending_promises）即触发 48h 惰性过期；24h 窗口外只是不提醒
+        pending = await list_pending_promises(store, T0)
+        assert "很久以前说要写" not in pending
         old_row = await store.get_intention(int(old))
         fresh_row = await store.get_intention(int(fresh))
         assert old_row is not None and old_row["status"] == "expired"
@@ -252,8 +254,41 @@ async def test_abandonment_expires_promise(tmp_path: Path) -> None:
 
 
 def test_detect_promise_and_abandonment() -> None:
+    # T-020b 负例：过去时 / 否定 / 无力 ⇒ 不是承诺
+    assert detect_promise("我写不出来。") is None
+    assert detect_promise("这题我写不下去。") is None
+    assert detect_promise("我写完了。") is None
+    assert detect_promise("我昨天写过了。") is None
+    assert detect_promise("我写得慢。") is None
+    # 正例
     assert detect_promise("我这就写下来给你看。") is not None
     assert detect_promise("我待会儿写好给你") is not None
-    assert detect_promise("今天天气不错。") is None
+
+    # 放弃：普通「算了」不算；必须有写作语境或封闭式说法
+    assert is_abandonment("算了，别管它。") is False
+    assert is_abandonment("那个方案算了。") is False
     assert is_abandonment("算了，不写了。") is True
-    assert is_abandonment("我这就写") is False
+    assert is_abandonment("我写不动了。") is True
+    assert is_abandonment("我不想写了。") is True
+    assert is_abandonment("这事先搁着。") is True
+
+
+@pytest.mark.asyncio
+async def test_abandonment_closes_only_latest_promise(tmp_path: Path) -> None:
+    """T-020b：明确放弃只关**最新一条**，不连带关光。"""
+    service, store, state = await _service(tmp_path)
+    try:
+        older = await store.add_intention(
+            T0 - 200, goal="早上说要写的那篇", action="write_note", target=None, kind="promise"
+        )
+        newer = await store.add_intention(
+            T0 - 100, goal="刚才说要写的那篇", action="write_note", target=None, kind="promise"
+        )
+        await service.persist(_result("算了，不写了。"), now=T0 + 1)
+        older_row = await store.get_intention(int(older))
+        newer_row = await store.get_intention(int(newer))
+        assert older_row is not None and older_row["status"] == "pending"
+        assert newer_row is not None and newer_row["status"] == "expired"
+    finally:
+        await state.close()
+        await store.close()

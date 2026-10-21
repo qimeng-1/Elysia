@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 from collections import deque
@@ -420,6 +421,11 @@ class ExpressionService:
         self._on_recall = on_recall
         # P1a：本次作业内**成功**工具结果（反编造的依据之一；run_job 开头清空）
         self._job_tool_evidence: list[str] = []
+        # T-014（O1）：工具调用留痕——LLM 后端每次工具调用后把结构化记录交回来，
+        # 这里落 thought_log kind='tool'（失败只记日志，绝不影响表达链路）。
+        set_observer = getattr(llm_chain, "set_tool_observer", None)
+        if callable(set_observer):
+            set_observer(self._log_tool_call)
         self._last_express_ts: float | None = None
         # P0-R19：多句回复的待发队列（due_ts, text, emotion, intent）；由心跳每拍 flush，
         # 因此句间 2–8s 的停顿是真实时间，不是一口气写完。
@@ -1086,6 +1092,15 @@ class ExpressionService:
             return ""
 
         return _run
+
+    async def _log_tool_call(self, record: dict[str, Any]) -> None:
+        """T-014（O1）：每次工具调用落一行 `thought_log kind='tool'`（JSON 留痕）。"""
+        try:
+            ts = float(record.get("ts") or 0.0)
+            text = json.dumps(record, ensure_ascii=False, sort_keys=True)
+            await self._store.think(ts, "tool", text)
+        except Exception:
+            log.warning("工具调用留痕失败（不影响表达）", exc_info=True)
 
     async def _tool_keep_this_moment(self, reason: str) -> str:
         """S2：她留住最近一次交换。任何失败都返回明确原因（不抛给表达链路）。"""

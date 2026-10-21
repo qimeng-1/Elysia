@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib import error as urlerror
 from urllib import request
@@ -37,6 +40,10 @@ from elysia.llm.chain import LLMBackend, ToolRunner
 from elysia.llm.identity import IDENTITY_FIELD, compose_identity, identity_lines
 
 log = logging.getLogger("elysia.llm.deepseek")
+
+# 工具调用留痕回调（O1）：每次工具调用把一条结构化记录交出去（落 thought_log）。
+# 返回 Awaitable 时会被 await；回调失败绝不影响表达链路。
+ToolObserver = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 # ── D-10（P0-R11）：代理不可缓存 + 直连自愈 ────────────────────────────
 # 事故（2026-10-18 确诊，用户独立确认："主要是由于我电脑的系统代理自动启动了"）：
@@ -104,6 +111,14 @@ def _is_connection_layer_error(exc: BaseException) -> bool:
 
 # 工具回合上限：防她反复"想起"把一次开口拖长（超出即放弃本轮 → 降级）
 MAX_TOOL_ROUNDS = 3
+# T-014：用户 2026-10-21 决定——她想写的东西不设成本限制；语音仍是 200（节奏不变）。
+# deepseek-chat 的输出上限 8192：等于**不设人为限制**（此前所有请求写死 200，带 tools 时
+# 会把 write_note 的 arguments 截成非法 JSON，她一次都没写成过文件——真机实证）。
+TOOL_MAX_TOKENS = 8192
+# 参数被截断时的重试：仍用"不设限"预算（8192 已是模型上限）；仍截断则回执"没有执行"。
+TOOL_RETRY_MAX_TOKENS = TOOL_MAX_TOKENS
+# 截断/非法参数时回给模型的明确回执（必含"截断"字样；她因此能改口而不是以为写了）
+TRUNCATED_TOOL_RECEIPT = "（工具参数被截断，没有执行。请把参数写完整/写短一点再试一次。）"
 # 工具返回空（确实没结果）时递回给模型的话——明确"没有"，不编造
 _NO_RECALL_TEXT = "（你确实没想起相关的事）"
 # 她可以调用的工具（其余名字一律当作"没有这个能力"）
@@ -220,16 +235,39 @@ def _content_or_none(data: dict[str, Any]) -> str | None:
     return str(content).strip() or None
 
 
-def _tool_args(call: dict[str, Any]) -> dict[str, Any]:
-    """从工具调用里取参数（解析失败 → 空字典）。"""
+def _tool_args(call: dict[str, Any]) -> dict[str, Any] | None:
+    """从工具调用里取参数。
+
+    - 没给参数（缺失/空串/`null`）⇒ `{}`（合法的"无参数"）
+    - 合法 JSON 对象 ⇒ dict
+    - 解析失败（典型：max_tokens 截断把 arguments 切成半截 JSON）⇒ **None**，
+      调用方据此**不执行**工具并回"参数被截断"回执（绝不当成空参数执行）
+    """
     fn = call.get("function")
     if not isinstance(fn, dict):
+        return None
+    raw = fn.get("arguments")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
         return {}
     with contextlib.suppress(Exception):
-        args = json.loads(fn.get("arguments") or "{}")
+        args = json.loads(raw)
+        if args is None:
+            return {}
         if isinstance(args, dict):
             return args
-    return {}
+    return None
+
+
+def _finish_reason(data: dict[str, Any]) -> str | None:
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return None
+    return choices[0].get("finish_reason")
+
+
+def _looks_failed(receipt: str) -> bool:
+    """工具回执是否在说"没做成"（留痕 ok 字段用，不参与行为判定）。"""
+    return any(marker in receipt for marker in ("写不了", "读不到", "失败", "没有执行", "没有名为"))
 
 
 class DeepSeekBackend(LLMBackend):
@@ -255,11 +293,17 @@ class DeepSeekBackend(LLMBackend):
         # P0-R11/T-007：最近一次失败原因（chain 据此写进 expression_log.validation，
         # 让"她这次为什么只说罐装话"可查——此前 reason 恒为 null）
         self._last_error: str | None = None
+        # T-014（O1）：工具调用留痕回调（由表达服务注入，写入 thought_log kind='tool'）
+        self._tool_observer: ToolObserver | None = None
 
     @property
     def last_error(self) -> str | None:
         """最近一次失败的可读原因（成功时清空）。"""
         return self._last_error
+
+    def set_tool_observer(self, observer: ToolObserver | None) -> None:
+        """注入工具调用留痕回调（T-014/O1）；不注入时只做工具本身。"""
+        self._tool_observer = observer
 
     def _fail(self, reason: str) -> None:
         self._last_error = reason
@@ -307,11 +351,29 @@ class DeepSeekBackend(LLMBackend):
             return None
 
         messages = self._messages(instruction)
+        retried_truncation = False
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 data = await asyncio.to_thread(self._post, self._payload(messages, tools=tools))
+                finish_reason = _finish_reason(data)
                 message = _first_message(data)
                 calls = message.get("tool_calls")
+                # T-014：参数被 max_tokens 截断（finish_reason=length）⇒ 先用更大预算重试一次
+                if (
+                    finish_reason == "length"
+                    and isinstance(calls, list)
+                    and calls
+                    and not retried_truncation
+                ):
+                    retried_truncation = True
+                    log.warning("工具回合参数被截断（finish_reason=length）⇒ 更大预算重试一次")
+                    data = await asyncio.to_thread(
+                        self._post,
+                        self._payload(messages, tools=tools, max_tokens=TOOL_RETRY_MAX_TOKENS),
+                    )
+                    finish_reason = _finish_reason(data)
+                    message = _first_message(data)
+                    calls = message.get("tool_calls")
                 if not isinstance(calls, list) or not calls:
                     text = _content_or_none(data)
                     if text is None:
@@ -326,12 +388,19 @@ class DeepSeekBackend(LLMBackend):
                         "tool_calls": calls,
                     }
                 )
+                truncated = finish_reason == "length"
                 for call in calls:
+                    if truncated:
+                        # 仍被截断：**绝不执行**（参数是半截 JSON，执行等于拿空参数乱做）
+                        receipt = TRUNCATED_TOOL_RECEIPT
+                        await self._notify_tool(call, False, receipt, finish_reason, 0.0)
+                    else:
+                        receipt = await self._run_call(call, run_tool, finish_reason)
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": str(call.get("id") or ""),
-                            "content": await self._run_call(call, run_tool),
+                            "content": receipt,
                         }
                     )
         except Exception as exc:
@@ -342,21 +411,75 @@ class DeepSeekBackend(LLMBackend):
         log.warning("DeepSeek 工具回合超出上限（%d），放弃本轮", MAX_TOOL_ROUNDS)
         return None
 
-    async def _run_call(self, call: dict[str, Any], run_tool: ToolRunner) -> str:
-        """执行一次工具调用：recall / adopt / disclaim / forget / restore——把能力递到她手上。
+    async def _notify_tool(
+        self,
+        call: dict[str, Any],
+        ok: bool,
+        receipt: str,
+        finish_reason: str | None,
+        elapsed_ms: float,
+    ) -> None:
+        """把一次工具调用留痕（O1）交出去；回调失败只记日志，绝不影响表达。"""
+        observer = self._tool_observer
+        if observer is None:
+            return
+        fn = call.get("function")
+        name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
+        raw_args = fn.get("arguments") if isinstance(fn, dict) else None
+        record = {
+            "ts": time.time(),
+            "tool": name,
+            "ok": bool(ok),
+            "args_len": len(str(raw_args or "")),
+            "finish_reason": finish_reason,
+            "result_head": str(receipt or "")[:60],
+            "elapsed_ms": round(float(elapsed_ms), 1),
+        }
+        try:
+            maybe = observer(record)
+            if inspect.isawaitable(maybe):
+                await maybe
+        except Exception:
+            log.warning("工具调用留痕回调失败（不影响表达）", exc_info=True)
+
+    async def _run_call(
+        self,
+        call: dict[str, Any],
+        run_tool: ToolRunner,
+        finish_reason: str | None = None,
+    ) -> str:
+        """执行一次工具调用：recall / adopt / ... / write_note——把能力递到她手上。
 
         工具本身失败不应毁掉这次开口——返回"没结果"让她照常说话。
+        T-014：参数不是合法 JSON（典型：被截断）⇒ **不执行**，回明确回执。
         """
         fn = call.get("function")
         name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
+        started = time.monotonic()
         if name not in _TOOL_NAMES:
-            return f"（没有名为 {name} 的能力）"
+            receipt = f"（没有名为 {name} 的能力）"
+            await self._notify_tool(call, False, receipt, finish_reason, 0.0)
+            return receipt
+        args = _tool_args(call)
+        if args is None:
+            receipt = TRUNCATED_TOOL_RECEIPT
+            await self._notify_tool(call, False, receipt, finish_reason, 0.0)
+            return receipt
         try:
-            result = await run_tool(name, _tool_args(call))
+            result = await run_tool(name, args)
+            ok = bool(result) and not _looks_failed(str(result))
         except Exception:
             log.warning("%s 执行失败", name, exc_info=True)
-            return _NO_RECALL_TEXT
-        return result or _NO_RECALL_TEXT
+            receipt = _NO_RECALL_TEXT
+            await self._notify_tool(
+                call, False, receipt, finish_reason, (time.monotonic() - started) * 1000.0
+            )
+            return receipt
+        receipt = str(result or _NO_RECALL_TEXT)
+        await self._notify_tool(
+            call, ok, receipt, finish_reason, (time.monotonic() - started) * 1000.0
+        )
+        return receipt
 
     def _messages(self, instruction: dict[str, Any]) -> list[dict[str, Any]]:
         """system 段 = 身份段 + 表达层人设；user 段 = 她要翻译的结构化状态。
@@ -375,12 +498,16 @@ class DeepSeekBackend(LLMBackend):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        # T-014：工具回合用独立预算（8192 = 模型上限、不设人为限制）；
+        # 单轮说话仍是 200（她说话的节奏/长度一个字都不改）。
+        tokens = max_tokens if max_tokens is not None else (TOOL_MAX_TOKENS if tools else 200)
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": 1.1,
-            "max_tokens": 200,
+            "max_tokens": tokens,
             "stream": False,
         }
         if tools:

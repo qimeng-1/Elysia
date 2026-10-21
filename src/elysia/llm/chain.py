@@ -331,9 +331,21 @@ class LLMChain:
         self._on_degrade = on_degrade
         self._template: dict[str, Any] = {"name": "default"}
         self._tool_runner: ToolRunner | None = None
+        self._tool_observer: Any = None
 
     def set_template(self, template: dict[str, Any]) -> None:
         self._template = template
+
+    def set_tool_observer(self, observer: Any) -> None:
+        """T-014（O1）：把工具调用留痕回调转发给主声后端（不支持的后端忽略）。
+
+        回调由表达服务提供（落 `thought_log kind='tool'`）；后端在每次工具调用后
+        把 `{tool, ok, args_len, finish_reason, result_head, elapsed_ms}` 交给它。
+        """
+        self._tool_observer = observer
+        setter = getattr(self._main, "set_tool_observer", None)
+        if callable(setter):
+            setter(observer)
 
     def set_tool_runner(self, runner: ToolRunner | None) -> None:
         """装配工具执行器（每次开口前由表达服务按当下上下文注入）。

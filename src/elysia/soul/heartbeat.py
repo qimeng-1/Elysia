@@ -289,6 +289,9 @@ class SoulHeartbeat:
         ｜ D 离线生活 + 做梦 ｜ E 表达派发 + 结果落库 ｜ F 边界/关系/维护
         """
         self._running = True
+        # D-9：用**持久化**的 last_interaction_ts 当基线——否则重启归零后，
+        # `kv['interaction'].ts > 0` 恒成立，最后一条旧消息会被重放（她多写了两页文件）。
+        self._seed_interaction_baseline()
         # S1b：进程重启时把**未封存的那次交换**直接封存（幂等；失败只记日志，不挡心跳）
         try:
             await seal_pending(self._heartbeat_store, self._state_store, self._clock.now())
@@ -905,6 +908,18 @@ class SoulHeartbeat:
         self._brain_loop.apply_event(
             DesireEvent(kind=SEDIMENT_EVENT_KIND, intensity=pattern.to_event_intensity())
         )
+
+    def _seed_interaction_baseline(self) -> None:
+        """D-9：重启时用持久化的 `last_interaction_ts` 当交互事件基线。
+
+        纯内存态 `_last_interaction_event_ts = 0.0` 重启归零 ⇒ `kv['interaction'].ts > 0`
+        恒成立 ⇒ 最后一条旧消息被当成新消息重放（2026-10-21 真机：20:01 的话被
+        20:50/21:30 两次重启各处理一次）。基线取 `TimeSense` 里**持久化**的值，
+        因此：旧消息不再触发；**停机期间新到的消息（ts > 旧 ts）仍会触发**。
+        """
+        persisted = float(getattr(self._timesense.state, "last_interaction_ts", 0.0) or 0.0)
+        if persisted > self._last_interaction_event_ts:
+            self._last_interaction_event_ts = persisted
 
     async def _sync_body_status(self, now: float) -> None:
         """身体在场状态 → TimeSenseState + 难受检测 + 交互事件 → 感受层。"""

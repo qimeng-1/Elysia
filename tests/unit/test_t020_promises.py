@@ -253,18 +253,27 @@ async def test_abandonment_expires_promise(tmp_path: Path) -> None:
         await store.close()
 
 
+def test_real_machine_sentence_after_comma_is_captured() -> None:
+    """T-020c 真机句：前面的「不催我」与写作无关，后半截「写完喊你」必须被捕获。"""
+    assert detect_promise("嗯，知道了，不催我正好～那我就慢慢写，写完喊你。") is not None
+
+
 def test_detect_promise_and_abandonment() -> None:
-    # T-020b 负例：过去时 / 否定 / 无力 ⇒ 不是承诺
+    # T-020b/T-020c 负例：过去时 / 否定 / 无力 ⇒ 不是承诺（否定只认写作动词附近）
     assert detect_promise("我写不出来。") is None
-    assert detect_promise("这题我写不下去。") is None
+    assert detect_promise("我写不下去。") is None
     assert detect_promise("我写完了。") is None
+    assert detect_promise("我写好了。") is None
     assert detect_promise("我昨天写过了。") is None
-    assert detect_promise("我写得慢。") is None
+    assert detect_promise("我还没写完呢。") is None
+    assert detect_promise("我一个字都没写。") is None
+    assert detect_promise("我写不动了。") is None
+    assert detect_promise("我没写完，别催。") is None
     # 正例
     assert detect_promise("我这就写下来给你看。") is not None
     assert detect_promise("我待会儿写好给你") is not None
 
-    # 放弃：普通「算了」不算；必须有写作语境或封闭式说法
+    # 放弃：普通「算了」不算；必须有写作语境或封闭式说法（T-020b 语义不回退）
     assert is_abandonment("算了，别管它。") is False
     assert is_abandonment("那个方案算了。") is False
     assert is_abandonment("算了，不写了。") is True

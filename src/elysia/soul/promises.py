@@ -25,26 +25,36 @@ PROMISE_TTL_S = 48.0 * 3600.0  # 惰性过期
 MAX_PENDING_PROMISES = 3
 PROMISE_GOAL_CHARS = 120
 
-# 承诺检测（T-020b 收紧）：
+# 承诺检测（T-020b 收紧；T-020c 子句级 + 否定只作用到写作动词）：
 # (A) 时间/意愿线索 + 写：「我这就写」「我现在去写」「我待会儿动笔」
 # (B) 写 + 结果承诺：「我…写下来/写完/写好/写一篇/写给你」
 # (C) 「写完喊你 / 写好给你」
-# 但**排除**过去时（我写了/写完了/写过了）与否定/无力（写不出来/写不下去/写不好/写得慢）。
+# **否定/过去时只认这些"写作动词附近"的形态**，不再用整句 `[不没]` 否决
+# （真机：「不催我正好～那我就慢慢写，写完喊你」不能被前面的"不"误杀）。
 _TIME_HINT = r"(?:这就|现在|马上|立刻|待会儿|待会|一会儿|一会|晚点|回头|之后)"
 _PROMISE_TIME = re.compile(rf"我{_TIME_HINT}(?:就)?(?:去)?(?:写|动笔|码字)")
 _PROMISE_RESULT = re.compile(r"我.{0,12}写(?:下来|完|好|一篇|一段|一页|给你)")
 _PROMISE_FOLLOWUP = re.compile(r"写(?:完|好)(?:了)?(?:就|再)?(?:给|喊|告诉|拿给)你")
-_PAST_RE = re.compile(r"(?:已经)?写(?:了|过|完了|好了)|写过了|已经写了")
-_NEG_RE = re.compile(r"[不没]|出不来|不下去|不了|难|写不动")
+# 拒绝用：写作动词附近的否定/过去时（本句含这些即不是承诺；保守，宁可不记）
+_REJECT_RE = re.compile(
+    r"(?:写不|写没|没写|不想写|不写了|不肯写|懒得写|写不动|写完了|写好了|写过了|已经写了)"
+)
 
 # 明确放弃（同句出现写作语境，或封闭式说法）；普通「算了」不算
 _ABANDON_CLOSED = re.compile(r"(?:不写了|不写啦|写不动了|懒得写|不想写了|先搁着|先放着|这事算了)")
 _ABANDON_WRITE_CTX = re.compile(r"(?:写|稿|文|笔)")
+# 先按句切（用于"返回整句原话"），再在句内按子句/破折号切（承诺常在逗号之后）
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
+_CLAUSE_SPLIT = re.compile(r"[，,；;、～~…—]+")
 
 
 def detect_promise(text: str) -> str | None:
-    """从她这次说的话里找一句"我要写"的承诺原话；没有返回 None（T-020b 收紧）。"""
+    """从她这次说的话里找一句"我要写"的承诺原话；没有返回 None。
+
+    T-020c：否定/过去时按**写作动词附近**的形态判定（不在整句里见「不」就否决）；
+    模式在**子句级**匹配（支持「…不催我正好～那我就慢慢写，写完喊你」），
+    但返回**整句**（≤120 字）作为承诺原话。
+    """
     raw = str(text or "").strip()
     if not raw:
         return None
@@ -52,15 +62,19 @@ def detect_promise(text: str) -> str | None:
         sentence = sentence.strip()
         if not sentence:
             continue
-        # 过去/已完成、或否定/无力 ⇒ 不是承诺
-        if _PAST_RE.search(sentence) or _NEG_RE.search(sentence):
+        # 句内出现"写作动词附近的否定/过去时" ⇒ 这一句不算承诺（保守）
+        if _REJECT_RE.search(sentence):
             continue
-        if (
-            _PROMISE_TIME.search(sentence)
-            or _PROMISE_RESULT.search(sentence)
-            or _PROMISE_FOLLOWUP.search(sentence)
-        ):
-            return sentence[:PROMISE_GOAL_CHARS]
+        for clause in _CLAUSE_SPLIT.split(sentence):
+            clause = clause.strip()
+            if not clause:
+                continue
+            if (
+                _PROMISE_TIME.search(clause)
+                or _PROMISE_RESULT.search(clause)
+                or _PROMISE_FOLLOWUP.search(clause)
+            ):
+                return sentence[:PROMISE_GOAL_CHARS]
     return None
 
 

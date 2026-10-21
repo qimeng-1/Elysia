@@ -407,8 +407,20 @@ class DeepSeekBackend(LLMBackend):
             self._fail(f"工具回合网络层（{type(exc).__name__}）: {exc}")
             log.warning("DeepSeek 工具回合失败，判定不可用：%s", exc)
             return None
-        self._fail(f"工具回合超出上限（{MAX_TOOL_ROUNDS} 轮）")
-        log.warning("DeepSeek 工具回合超出上限（%d），放弃本轮", MAX_TOOL_ROUNDS)
+        # T-015：工具轮用尽 ≠ 这次开口失败——**强制补一个"不带 tools"的说话轮**。
+        # 真机事故（2026-10-21 19:35）：write_note 已真的写成功，但 3 轮全花在工具上，
+        # 没有一轮留给她说话 ⇒ 返回 None ⇒ 降级成微声罐装句，她以为自己失败。
+        try:
+            data = await asyncio.to_thread(self._post, self._payload(messages, tools=None))
+            text = _content_or_none(data)
+            if text is not None:
+                self._last_error = None
+                return text
+            self._fail("说话轮正文为空")
+        except Exception as exc:
+            self._fail(f"说话轮网络层（{type(exc).__name__}）: {exc}")
+            log.warning("DeepSeek 说话轮失败，判定不可用：%s", exc)
+        log.warning("DeepSeek 工具回合超出上限（%d）且说话轮无正文，放弃本轮", MAX_TOOL_ROUNDS)
         return None
 
     async def _notify_tool(

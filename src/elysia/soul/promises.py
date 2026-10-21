@@ -30,6 +30,13 @@ T-020e（真机再取证）：条件①成立时，肯定信号要放宽到**子
 而 T-020d 的信号表只认「算数/还写/这就写」这类更长形式。放宽的形式：
 「写 / 写吧 / 写呀」整子句、「今晚/今晚就写」、「写进…文件夹 / 写在…里 / 写下来」、
 「我写 / 我这就写 / 接着写 / 继续写」；每条都要求该子句**不含**拒绝/推脱/无力词。
+
+T-021（用户硬要求 2026-10-22「答应的事就动手；答应了不做，比不做更糟」）：
+捕获与提醒之间还差最后一公里——她收到提醒后只说「我去写」，没有调用
+`write_note`。本模块因此提供"第二拍"的领域件：`forced_write_prompt`（那一句强制
+写作指令）、`next_forced_write_promise`（挑该补拍的 pending 承诺，同一承诺两次
+强制尝试间隔 ≥10 分钟）与 `formed_log_text`（成文留痕）。**正文永远由她自己写**
+（`write_note` 的 text 参数来自她那一次 LLM 调用），程序只负责递工具与记结果。
 """
 
 from __future__ import annotations
@@ -384,6 +391,50 @@ def promise_hint(promises: list[str]) -> str:
     """提醒指令（写进 payload 文本；不是命令：写/推迟/说不写都合法）。"""
     joined = "；".join(f"「{item}」" for item in promises)
     return (
-        f"（你答应过的事还没做：{joined}。"
-        "这一轮你可以用 write_note 写完它；也可以直接说你不写了——两条都算数。）"
+        f"你答应过的事还没做：{joined}。"
+        "现在就用 write_note 写完它；不想写就明说不写了——两条都算数。"
     )
+
+
+# ── T-021：承诺第二拍（答应的事当场写完）────────────────────────────
+# 同一个 promise 两次强制尝试之间至少隔 10 分钟（下一轮再试；不设次数配额）。
+FORCED_WRITE_COOLDOWN_S = 600.0
+# 同一回合最多补 1 次（一回合只挑一条承诺，不做轮询扫描）。
+MAX_FORCED_WRITES_PER_TURN = 1
+
+
+def forced_write_prompt(goal: str) -> str:
+    """第二拍的指令（**只说这一句**；正文由她在 write_note 的参数里自己写）。"""
+    return (
+        f"你答应过要写：「{str(goal).strip()}」。"
+        "现在用 write_note 写完它；正文你自己写，写它是什么样就是什么样。"
+    )
+
+
+def formed_log_text(path: str) -> str:
+    """承诺兑现时落 `thought_log kind='promise'` 的那一行。"""
+    return f"已成文：{str(path).strip()}"
+
+
+async def next_forced_write_promise(
+    store: Any,
+    now: float,
+    *,
+    cooldown_s: float = FORCED_WRITE_COOLDOWN_S,
+) -> dict[str, Any] | None:
+    """挑一条该补第二拍的 pending 承诺；没有/都在冷却里 ⇒ None。
+
+    - 只看 48h 内的 pending（先做惰性过期——过期的承诺不该再追着要）；
+    - 同一承诺的两次强制尝试间隔 ≥ `cooldown_s`（用 `attempts`/`last_attempt_ts`
+      现成字段，不新增表结构）：刚失败过的下一轮自动跳过，十分钟后再试；
+    - 旧的就先补（`recent_pending_promises` 按创建时间升序）。
+    """
+    await store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)
+    rows = await store.recent_pending_promises(
+        float(now) - PROMISE_TTL_S, limit=MAX_PENDING_PROMISES
+    )
+    for row in rows:
+        last_attempt = row.get("last_attempt_ts")
+        if last_attempt is None or float(now) - float(last_attempt) >= float(cooldown_s):
+            return dict(row)
+    return None

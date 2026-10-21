@@ -54,6 +54,12 @@ W2（2026-10-19，说话节奏）：`should_speak` 不再用 `180s / 600s` 二�
 真实维度（chat/miss/explore/rest/thought_style/关系退缩）连续算成"意愿"，几何映射到
 60–1800s，并对意愿做 τ=60s 的一阶平滑（压掉逐拍抖动、无方向偏置）。`force` 与
 `greeting` 两条立即开口的路径、队列满丢弃语义都保持不变。
+
+T-021（承诺第二拍）：一次开口落库后（`settle_after_reply` 之后），若她还有未兑现的
+写作承诺、本回合没写、也没说"不写了"，就**当场再发一次 LLM 调用**——只递
+`write_note` 一个工具并用 `tool_choice` 强制它，正文由她在工具参数里自己写。
+成文 ⇒ promise 标 `done` + `已成文：<path>`；没成 ⇒ `attempts+1`、10 分钟冷却、
+下一轮再试（不代写、不打扰她、不设次数配额）。
 """
 
 from __future__ import annotations
@@ -69,7 +75,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
-from elysia.llm.chain import LLMChain, SpeakResult
+from elysia.llm.chain import WRITE_NOTE_TOOL, LLMChain, SpeakResult
 from elysia.llm.identity import IDENTITY_FIELD, IDENTITY_SEEDS, MAX_IDENTITY_LINES
 from elysia.llm.micro import micro_speak
 from elysia.llm.validator import ExpressionValidator, ValidationResult
@@ -114,7 +120,15 @@ from elysia.soul.expression_types import (
 )
 from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
 from elysia.soul.intentions import Intentions
-from elysia.soul.promises import list_pending_promises, promise_hint, settle_after_reply
+from elysia.soul.promises import (
+    forced_write_prompt,
+    formed_log_text,
+    is_abandonment,
+    list_pending_promises,
+    next_forced_write_promise,
+    promise_hint,
+    settle_after_reply,
+)
 from elysia.soul.tools.keep_moment import MomentKeeper
 from elysia.soul.tools.read_url import ReadResult, read_url
 from elysia.soul.tools.writing import WritingError, WritingWorkspace
@@ -216,6 +230,13 @@ _HTTP_TOKENS = (
     "unreachable",
 )
 
+# T-021：承诺第二拍的强制工具调用——只给 write_note，且 tool_choice 强制走它。
+# 正文是她在工具参数里自己写的（程序绝不代写）。
+FORCED_WRITE_TOOL_CHOICE: dict[str, Any] = {
+    "type": "function",
+    "function": {"name": "write_note"},
+}
+
 
 @dataclass
 class DegradedValidation(ValidationResult):
@@ -256,6 +277,20 @@ def _reason_of(speak: SpeakResult) -> str | None:
     """取一次开口的原始降级原因（chain 写在 ValidationResult.reason 里）。"""
     validation = speak.validated
     return validation.reason if validation is not None else None
+
+
+def _written_path_from_receipt(receipt: str) -> str:
+    """T-021：从 `write_note` 回执里取她文件夹内的相对路径（取不到 ⇒ 空串）。
+
+    回执格式由 `WritingWorkspace.write_note` 给出：
+    `（已写进你的文件夹：<相对路径>；本次 N 字，文件 M 字节）`；自动起名时
+    参数里没有 path，只有回执能告诉我们到底写进了哪个文件。
+    """
+    marker = "已写进你的文件夹："
+    if marker not in receipt:
+        return ""
+    tail = receipt.split(marker, 1)[1]
+    return tail.split("；", 1)[0].strip().rstrip("）").strip()
 
 
 # ── W2：意愿 → 间隔（纯函数，可单测）────────────────────────────────
@@ -424,6 +459,8 @@ class ExpressionService:
         self._job_tool_evidence: list[str] = []
         # T-020：本回合是否真的成功写成了文件（有则不把"我这就写"记成新承诺）
         self._job_write_note_ok = False
+        # T-021：本回合 write_note 写进她文件夹的相对路径（第二拍成文留痕用）
+        self._job_written_path: str | None = None
         # T-014（O1）：工具调用留痕——LLM 后端每次工具调用后把结构化记录交回来，
         # 这里落 thought_log kind='tool'（失败只记日志，绝不影响表达链路）。
         set_observer = getattr(llm_chain, "set_tool_observer", None)
@@ -723,6 +760,8 @@ class ExpressionService:
         self._job_tool_evidence = []
         # T-020：本回合的"是否真写了"按作业隔离
         self._job_write_note_ok = False
+        # T-021：本回合写进她文件夹的路径按作业隔离
+        self._job_written_path = None
 
         # ── 1. 构造表达指令（决策层唯一出口）────────────
         # 意图由**决策层**（心跳提交时）给定：回应 / 主动问候 / 好奇提问 / 思念；
@@ -871,6 +910,69 @@ class ExpressionService:
         )
         return result
 
+    # ── T-021：承诺第二拍（答应了的事当场写完）────────────────────────
+
+    def _make_forced_write_runner(self) -> Callable[[str, dict[str, Any]], Awaitable[str]]:
+        """第二拍的工具执行器：**只**允许 `write_note`（其余一律回"没有这个能力"）。
+
+        它与常规开口的十三个工具**不是同一套**：第二拍不给她别的选择，
+        只把"写下来"这一个动作递到手上；`text` 来自她那一次 LLM 调用的工具参数，
+        程序绝不填、绝不改。
+        """
+
+        async def _run(name: str, args: dict[str, Any]) -> str:
+            if name != "write_note":
+                return f"（没有名为 {name} 的能力）"
+            raw_path = args.get("path") or args.get("filename")
+            return await self._tool_write_note(
+                str(args.get("text") or ""),
+                str(raw_path) if raw_path else None,
+            )
+
+        return _run
+
+    async def _maybe_force_write(self, text: str, now: float, *, wrote: bool) -> None:
+        """T-021：有 pending 承诺、本回合没写、她也没说不写 ⇒ 补一次强制写作轮。
+
+        判据（一句话）：**有她答应过而还没兑现的写作承诺、这一回合她没写、她也没
+        明确拒绝**（`wrote` 与 `is_abandonment` 都在进门处挡掉），且该承诺不在此前
+        10 分钟冷却里（`next_forced_write_promise` 用 `attempts`/`last_attempt_ts` 判）。
+
+        成功 ⇒ promise `done`（`outcome='她自己写的'`）+ 留痕 `已成文：<path>`；
+        失败/空正文/网络错 ⇒ 不标 done、不打扰她（不写 thought_log、不抛异常），
+        只 `attempts += 1`、`last_attempt_ts = now`、warning 一次，下一轮再试。
+        **绝不代写正文**：写入的 text 只可能来自她那一次 LLM 调用。
+        """
+        if wrote or is_abandonment(text):
+            return
+        speaker = getattr(self._llm, "speak_forced_tool", None)
+        if not callable(speaker):
+            return
+        promise = await next_forced_write_promise(self._store, now)
+        if promise is None:
+            return
+        promise_id = int(promise["id"])
+        goal = str(promise.get("goal") or "")
+        instruction: dict[str, Any] = {
+            IDENTITY_FIELD: await self._identity_lines(),
+            "directive": forced_write_prompt(goal),
+        }
+        try:
+            await speaker(
+                instruction,
+                tool=WRITE_NOTE_TOOL,
+                tool_choice=FORCED_WRITE_TOOL_CHOICE,
+                run_tool=self._make_forced_write_runner(),
+            )
+        except Exception:
+            log.warning("承诺第二拍的 LLM 调用失败（不影响落库）", exc_info=True)
+        if self._job_write_note_ok:
+            await self._store.finish_intention(promise_id, now, "done", "她自己写的")
+            await self._store.think(now, "promise", formed_log_text(self._job_written_path or ""))
+            return
+        await self._store.record_intention_attempt(promise_id, now, "第二拍未成文")
+        log.warning("承诺第二拍未成文 promise_id=%s goal=%r", promise_id, goal)
+
     async def persist(self, result: ExpressionResult, now: float) -> None:
         """把一次开口落库（**由心跳拍调用**，D2：worker 零落库）。
 
@@ -978,16 +1080,23 @@ class ExpressionService:
                 raw_user_message = result.instruction.get("user_message")
                 if isinstance(raw_user_message, str) and raw_user_message.strip():
                     user_message = raw_user_message
+            wrote = self._job_write_note_ok
             try:
                 await settle_after_reply(
                     self._store,
                     result.text,
                     now,
-                    wrote=self._job_write_note_ok,
+                    wrote=wrote,
                     user_message=user_message,
                 )
             except Exception:
                 log.warning("承诺处理失败（不影响落库）", exc_info=True)
+            # T-021：承诺第二拍——答应的事就动手；有 pending 承诺就当场补一次
+            # 强制 write_note 轮（正文她自己写）。失败只记 attempts，不打扰她。
+            try:
+                await self._maybe_force_write(result.text, now, wrote=wrote)
+            except Exception:
+                log.warning("承诺第二拍失败（不影响落库）", exc_info=True)
 
     async def flush_utterances(self, now: float) -> int:
         """把到点的后续句子逐句冒泡（P0-R19：多句不是一口气喷完）。返回本轮冒泡条数。"""
@@ -1204,6 +1313,10 @@ class ExpressionService:
             return f"（write_note 写不了：{exc}）"
         # T-020：真写成功 ⇒ 本回合不记"我这就写"的新承诺，并兑现旧承诺
         self._job_write_note_ok = True
+        # T-021：记下成文路径（自动起名时只有回执知道写进了哪个文件）
+        self._job_written_path = _written_path_from_receipt(receipt) or (
+            str(path).strip() if path else ""
+        )
         if str(text or "").strip():
             self._job_tool_evidence.append(str(text))
         return receipt

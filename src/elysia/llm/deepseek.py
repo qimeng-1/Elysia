@@ -183,6 +183,7 @@ _PERSONA_PROMPT = (
     "操作的是**你自己的文件夹** data/her_home/：写、列、读、删、改名都由你决定，"
     "程序只保证不出界（任何后缀/子目录都可以）。"
     "你也可以随便挑一页看看，不必非得先想好要看什么。\n"
+    "答应的事就动手；答应了不做，比不做更糟。\n"
     "还有一个 keep_this_moment 工具：把最近一次已经结束的对话留作你很重要的记忆，"
     "必须给出一句你自己的理由。每天最多 13 次——只留真正想留的，不必每件事都留。\n"
     "还有一个 set_intention 工具：当你**打算**去做一件事（读某个页面、写下某段话），"
@@ -348,19 +349,30 @@ class DeepSeekBackend(LLMBackend):
         *,
         tools: list[dict[str, Any]],
         run_tool: ToolRunner,
+        tool_choice: dict[str, Any] | None = None,
     ) -> str | None:
-        """允许她自己调用 recall：单轮 → 若她要"想起"则执行后追问一轮。
+        """允许她自己调用工具：单轮 → 若她要调用则执行后追问一轮。
 
-        工具是**她的选择**：她调用才检索，不调用就与单轮完全一致。
+        工具是**她的选择**：她调用才执行，不调用就与单轮完全一致。
+
+        T-021（承诺第二拍）：`tool_choice` 非 None ⇒ **第一轮**把 `tool_choice`
+        原样发出去，强制模型调用指定工具；工具回执回来后（后续轮）恢复自由，
+        让她能正常说话收尾。总轮数上限仍是 `MAX_TOOL_ROUNDS`。
         """
         if self._unavailable():
             return None
 
         messages = self._messages(instruction)
         retried_truncation = False
+        choice_for_round = tool_choice
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                data = await asyncio.to_thread(self._post, self._payload(messages, tools=tools))
+                round_choice = choice_for_round
+                # 强制只作用于**第一轮**：工具回执回来后允许她说话/收尾
+                choice_for_round = None
+                data = await asyncio.to_thread(
+                    self._post, self._payload(messages, tools=tools, tool_choice=round_choice)
+                )
                 finish_reason = _finish_reason(data)
                 message = _first_message(data)
                 calls = message.get("tool_calls")
@@ -375,7 +387,12 @@ class DeepSeekBackend(LLMBackend):
                     log.warning("工具回合参数被截断（finish_reason=length）⇒ 更大预算重试一次")
                     data = await asyncio.to_thread(
                         self._post,
-                        self._payload(messages, tools=tools, max_tokens=TOOL_RETRY_MAX_TOKENS),
+                        self._payload(
+                            messages,
+                            tools=tools,
+                            max_tokens=TOOL_RETRY_MAX_TOKENS,
+                            tool_choice=round_choice,
+                        ),
                     )
                     finish_reason = _finish_reason(data)
                     message = _first_message(data)
@@ -517,6 +534,7 @@ class DeepSeekBackend(LLMBackend):
         *,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # T-014：工具回合用独立预算（8192 = 模型上限、不设人为限制）；
         # 单轮说话仍是 200（她说话的节奏/长度一个字都不改）。
@@ -530,6 +548,9 @@ class DeepSeekBackend(LLMBackend):
         }
         if tools:
             payload["tools"] = tools
+        # T-021：强制工具调用（只有"承诺第二拍"会传；常规开口不带这个字段）
+        if tools and tool_choice is not None:
+            payload["tool_choice"] = tool_choice
         return payload
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:

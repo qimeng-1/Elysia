@@ -23,6 +23,10 @@ P3-W2：工具增至四个——再加 `forget`（不想再想起某件事）+ `
 W3（2026-10-19）：工具增至**七个**——再加 `read_url`（只读白名单内的外部资料）与
 `write_note`（写进她自己的 `data/her_writing/`）。两者都是**她的动作**：用不用、
 写不写由她决定（C 方案），程序只保证"叫得动 + 安全"。
+
+T-021（承诺第二拍）：`speak_forced_tool` 是**唯一**会强制 `tool_choice` 的入口——
+只递一个工具（`write_note`）并指定它，用于"她答应过的事当场写完"的补拍。
+常规开口的十三个工具与多轮工具能力**一字不改**（默认 `tool_choice=None`）。
 """
 
 from __future__ import annotations
@@ -66,8 +70,13 @@ class ToolCapableBackend(Protocol):
         *,
         tools: list[dict[str, Any]],
         run_tool: ToolRunner,
+        tool_choice: dict[str, Any] | None = None,
     ) -> str | None:
-        """跑完工具回合后返回自然语言；失败/超轮数 → None（触发降级）。"""
+        """跑完工具回合后返回自然语言；失败/超轮数 → None（触发降级）。
+
+        `tool_choice`（T-021：承诺第二拍）：非 None 时要求后端**强制**模型调用
+        指定工具（只作用于第一轮；工具回执回来后允许她正常说话）。
+        """
         ...
 
 
@@ -465,6 +474,32 @@ class LLMChain:
                 run_tool=self._tool_runner,
             )
         return await main.complete(instruction, self._template)
+
+    async def speak_forced_tool(
+        self,
+        instruction: dict[str, Any],
+        *,
+        tool: dict[str, Any],
+        tool_choice: dict[str, Any],
+        run_tool: ToolRunner,
+    ) -> str | None:
+        """T-021：**强制工具轮**——只递一个工具，且 `tool_choice` 指定它。
+
+        用于"承诺第二拍"：模型必须产出一次该工具的调用（写不写、写什么由她决定，
+        正文是她在工具参数里自己写的——程序绝不代写）。工具回执之后沿用
+        `complete_with_tools` 的多轮能力（总轮数上限仍是 `MAX_TOOL_ROUNDS`）。
+        主声不具备工具能力（次声/测试替身）⇒ 返回 None，调用方按"没写成"处理。
+        """
+        main = self._main
+        if main is None or not isinstance(main, ToolCapableBackend):
+            return None
+        return await main.complete_with_tools(
+            instruction,
+            self._template,
+            tools=[tool],
+            run_tool=run_tool,
+            tool_choice=tool_choice,
+        )
 
     async def speak(self, instruction: dict[str, Any]) -> SpeakResult:
         """按三级顺序尝试，返回第一个通过校验的表达。

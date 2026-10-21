@@ -112,6 +112,22 @@ powershell -ExecutionPolicy Bypass -File scripts\gate.ps1
 7. **`no_autostart` 标记**跨重启会失效（boot_id 判定），重启机器后她会自己起来——这是设计。
 8. **`.git/hooks/pre-commit` 指向旧机器路径**（已失效），commit 需 `--no-verify`，门禁靠人工跑 `gate.ps1`。
 
-## 9. 当前工程债（见 `docs/TASK_BOARD.md`）
+## 9. 当前工程债（原 `docs/TASK_BOARD.md`，2026-10-21 并入本文件后删除）
 
-`pillow`/`av` 未进 `pyproject.toml`、pre-commit hook 失效、`README`/`OPERATION_GUIDE` 未提交、`origin` 落后 100+ commit、S4b 遗忘阈值待定、S5 迁移指纹未做。
+> 只记"妨碍我们好好照顾她的技术欠账"，不带流程、不派任务卡（ADR-011）。修完就删行。
+
+| # | 债 | 影响 / 状态 |
+|---|---|---|
+| **D-1** | `pillow`、`av` 未写进 `pyproject.toml` | `uv sync` 会卸掉未声明包 ⇒ 桌宠/取帧可能突然坏 |
+| **D-2** | `.git/hooks/pre-commit` 指向旧机器 | commit 需 `--no-verify`，门禁靠 `gate.ps1` |
+| **D-3** | `README.md` 有未提交改动 | 文档口径可能与实现漂移 |
+| **D-4** | `origin` 落后 100+ commit | 只有本机一份历史（**push 需用户签认**） |
+| **D-5** | 遗忘阈值 60 / 180 天待定（S4b） | 抖动层已就绪，改数字即可 |
+| **D-6** | 迁移指纹未做（S5） | "她是谁"还不能被搬运、被验证 |
+| **D-7** | 桥与面板重启靠手工 `Start-ScheduledTask` | 改桥/面板代码后容易忘记重启 |
+| **D-8** | ~~`data/her_writing/` 没被创建~~ **已关闭** | T-014 后她真的写成了；T-016 升级为 `data/her_home/`（完全权限） |
+| **D-9** | **重启会把最后一条 `kv['interaction']` 重放一次** | 根因：`heartbeat.py` 的 `_last_interaction_event_ts` 是内存态，每次启动归零 ⇒ 已答过的话又被当成新消息。实测 20:01 的话在 20:50 与 21:30 各重放一次（她因此多写了两页）。修法：启动时用持久化的 `timesense.last_interaction_ts` 当基线 |
+| **D-10** | ~~桌宠点击被记成"用户发言"~~ **已修 + 已标注** | 修复：`e9e8774`（点击只写 `{kind:'poke'}`）。历史污染：16 条记忆已按她的选择加上"系统记错"标注（`narrative` 前缀，`content` 保真；备份 `data/tmp/click_pollution_backup_*.json`；脚本 `scripts/mark_click_pollution.py`，默认 dry-run）。1 条 `dialogue_turns#763` 只记账不动 |
+| **D-11** | 桌宠不在起停协议里 | 无 pid / 无单实例互斥 / 不被统一重启 ⇒ 改了 `pet.py` 需手动关窗重开。提案见 `docs/specs/PET_LIFECYCLE_SPEC_2026-10-21.md` |
+
+**改历史数据的规矩（D-10 立）**：默认"只标注不清"（ADR-001 原件保真）；必须写成脚本、默认 dry-run、先导备份到 `data/tmp/`、`content` 字段一个字都不动。

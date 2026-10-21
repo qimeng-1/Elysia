@@ -13,6 +13,17 @@
 3. 兑现/关闭：本回合成功 `write_note` ⇒ 最近 24h 的 pending 承诺标 `done`；
    她明确放弃 ⇒ 标 `expired`；48h 未兑现 ⇒ 读取时惰性 `expired`。
 4. Worker 跳过 `kind='promise'`（只能由她本人兑现）。
+
+T-020d（真机取证 2026-10-22 00:38–00:59）：显式自诺的句式太窄——真机她答
+「算数。说过的就写」「还写。你睡你的，写完这句我就接着写」「放在我自己的文件夹里，
+好。」，一条都没命中，因此"捕获→提醒"在真机没跑起来。新增一条**上下文判据**
+（与显式自诺**取并集**，显式优先、上下文兜底）：
+
+    用户这一轮在请她写（`has_write_request`）+ 她给了肯定答复（且没拒绝/推脱）
+    + 本回合没有成功的 `write_note` ⇒ 记一条承诺。
+
+`detect_contextual_promise` 只回答"记不记、记什么"；去重（同一请求/同一原话只留
+一条）在 `capture_promise` 里做。放弃/兑现/过期语义完全不变。
 """
 
 from __future__ import annotations
@@ -46,6 +57,42 @@ _ABANDON_WRITE_CTX = re.compile(r"(?:写|稿|文|笔)")
 # 先按句切（用于"返回整句原话"），再在句内按子句/破折号切（承诺常在逗号之后）
 _SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?；;\n])")
 _CLAUSE_SPLIT = re.compile(r"[，,；;、～~…—]+")
+
+# ── T-020d：上下文判据（用户请她写 + 她肯定答复）─────────────────────
+# 用户这轮**在请她写**：写作动词必须带宾语/结果/方向（单独一个「写」不算，否则
+# 「写代码」也算）；技术语境（写代码/写程序/写脚本）明确排除，其余从宽。
+_WRITE_REQUEST = re.compile(
+    r"(?:"
+    r"帮我写|替我写|给我写|请你写|请写|再写|多写|重新写|接着写"
+    r"|写一下|写下|写下来|写点|写些|写一篇|写一段|写一封|写一张|写一份|写个"
+    r"|写完|写成|写进|写上|写出来|写出|写给我|写给我看"
+    r"|落成文件|存个文件|存成文件|写成文件|整个文件"
+    r"|写.{0,4}(?:文章|稿子|稿|故事|诗|信|笔记|日记|散文)"
+    r")"
+)
+_WRITE_REQUEST_TECH = re.compile(r"(?:写.{0,3}代码|写程序|写函数|写脚本|写测试)")
+
+# 她的回复给的肯定答复：强信号子句级匹配；「好/行/嗯」这类单字必须**整子句**
+# 才算（避免「好像/只好/好多」误判），且整句是反问（以 ？ 收尾）时不算。
+_AFFIRM_STRONG = re.compile(
+    r"(?:算数|还写|接着写|慢慢写|我写|这就|待会儿|待会|一会|马上"
+    r"|写好|写完|会写|会的|好呀|好啊|好的|行吧|可以|当然"
+    r"|答应|说到做到|说话算话|一言为定)"
+)
+_AFFIRM_BARE = frozenset({"好", "行", "可以", "嗯", "嗯嗯", "好呀", "好啊", "好的", "好呢", "行吧"})
+
+# 拒绝/推脱：整段回复里出现任一即不记（放弃语义另由 `is_abandonment` 处理）。
+# 注意「还没写完」不是拒绝——只拦明确的"不写/不打算写"。
+_REFUSAL = re.compile(
+    r"(?:不写|不想写|不会写|不肯写|不打算写|写不了|写不动|写不出|写不出来"
+    r"|算了|再说吧|以后吧|改天|下次吧|没空|懒得|先搁着|先放着|缓一缓"
+    r"|不行|不可以|别写|不会的|说不准|不好说)"
+)
+
+# 记 goal 时的拼装格式（她原话太短时补上"用户请我写什么"，否则她下次看不懂）
+_CONTEXT_GOAL_PREFIX = "用户请我写："
+_CONTEXT_GOAL_MIDDLE = "／我说："
+CONTEXT_REQUEST_CHARS = 30
 
 
 def detect_promise(text: str) -> str | None:
@@ -95,18 +142,161 @@ def is_abandonment(text: str) -> bool:
     return False
 
 
+# ── T-020d：上下文判据（纯函数，可单测）──────────────────────────────
+
+
+def has_write_request(user_message: str) -> bool:
+    """用户/另一个 agent 这一轮是否在**请她写东西**（上下文判据的条件 1）。
+
+    判据：写作动词必须带宾语/结果/方向——「写一下 / 写下 / 写下来 / 写一篇 /
+    写点 / 写完 / 写成 / 写进 / 写上 / 帮我写 / 写给我看 / 落成文件 / 存个文件」
+    以及「写文章/写故事/写信…」。**单独一个「写」字不算**；「写代码/写程序/
+    写脚本/写测试」这类技术语境明确排除（那不是请她写笔记）。其余从宽。
+    """
+    raw = str(user_message or "").strip()
+    if not raw:
+        return False
+    if _WRITE_REQUEST_TECH.search(raw):
+        return False
+    return _WRITE_REQUEST.search(raw) is not None
+
+
+def _strip_punct(clause: str) -> str:
+    return clause.strip(" \t\r\n。！!？?…—～~、；;，,")
+
+
+def _sentence_has_affirmation(sentence: str) -> bool:
+    """这一句里有没有肯定答复（「算数/还写/好呀/可以/嗯」…）。"""
+    asks = sentence.rstrip().endswith(("？", "?"))
+    for clause in _CLAUSE_SPLIT.split(sentence):
+        core = _strip_punct(clause)
+        if not core:
+            continue
+        if core in _AFFIRM_BARE and not asks:
+            return True
+        if _AFFIRM_STRONG.search(core):
+            return True
+    return False
+
+
+def _affirming_sentence(text: str) -> str | None:
+    """返回第一句含肯定答复的原话（保留原句，≤120 字）；没有返回 None。"""
+    for sentence in _SENTENCE_SPLIT.split(str(text or "")):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if _sentence_has_affirmation(sentence):
+            return sentence[:PROMISE_GOAL_CHARS]
+    return None
+
+
+def _contextual_goal(user_message: str, her_sentence: str) -> str:
+    """拼 goal：`用户请我写：<请求摘要 30 字>／我说：<她的肯定原话>`（≤120）。
+
+    她原话太短（如只有一个「好。」）时，单看记不清楚在答应什么——补上用户的请求，
+    下次提醒她自己兑现时才看得懂。
+    """
+    request = " ".join(str(user_message or "").split())[:CONTEXT_REQUEST_CHARS]
+    prefix = f"{_CONTEXT_GOAL_PREFIX}{request}{_CONTEXT_GOAL_MIDDLE}"
+    budget = PROMISE_GOAL_CHARS - len(prefix)
+    if budget <= 0:
+        return (prefix + her_sentence)[:PROMISE_GOAL_CHARS]
+    return (prefix + her_sentence[:budget])[:PROMISE_GOAL_CHARS]
+
+
+def detect_contextual_promise(
+    user_message: str,
+    her_text: str,
+    *,
+    wrote: bool,
+) -> str | None:
+    """上下文判据（T-020d）：用户请她写 + 她给了肯定答复 ⇒ 返回要记的 goal。
+
+    只在**显式自诺**（`detect_promise`）没命中时兜底。四个条件同时成立才记：
+    ① 用户这轮在请她写（`has_write_request`）；
+    ② 她的回复有肯定答复（`_affirming_sentence`）且整段**没有**拒绝/推脱
+       （`_REFUSAL`）——既不肯定也不拒绝（转移话题/反问）⇒ 不记；
+    ③ 本回合没有成功的 `write_note`（`wrote=True` ⇒ 不记）；
+    ④ 同一请求/同一原话的去重由 `capture_promise` 负责（本函数不碰库）。
+    """
+    if wrote:
+        return None
+    if not has_write_request(user_message):
+        return None
+    her = str(her_text or "").strip()
+    if not her or _REFUSAL.search(her):
+        return None
+    sentence = _affirming_sentence(her)
+    if sentence is None:
+        return None
+    return _contextual_goal(user_message, sentence)
+
+
+# ── T-020d：去重（同一请求/同一原话连问两轮只记一条）─────────────────
+
+
+def _squash(text: str) -> str:
+    return "".join(str(text or "").split())
+
+
+def _goal_request_key(goal: str) -> str | None:
+    """从拼装过的 goal 里抽出"用户请我写什么"（用于跨轮去重）；不是拼装格式返回 None。"""
+    squashed = _squash(goal)
+    prefix = _squash(_CONTEXT_GOAL_PREFIX)
+    if not squashed.startswith(prefix):
+        return None
+    rest = squashed[len(prefix) :]
+    middle = _squash(_CONTEXT_GOAL_MIDDLE)
+    if middle in rest:
+        rest = rest.split(middle, 1)[0]
+    return rest or None
+
+
+def _same_promise(goal: str, existing_goal: str) -> bool:
+    """两条承诺是否"高度相似"：相同、一方包含另一方，或同一用户的同一请求。"""
+    left, right = _squash(goal), _squash(existing_goal)
+    if not left or not right:
+        return False
+    if left == right or left in right or right in left:
+        return True
+    left_request, right_request = _goal_request_key(left), _goal_request_key(right)
+    return bool(
+        left_request
+        and right_request
+        and (left_request in right_request or right_request in left_request)
+    )
+
+
+async def _is_duplicate_promise(store: Any, goal: str, now: float) -> bool:
+    """最近 48h 内已有 pending 的相似承诺 ⇒ 不新增（同一请求连问两轮只记一条）。"""
+    rows = await store.recent_pending_promises(
+        float(now) - PROMISE_TTL_S, limit=MAX_PENDING_PROMISES * 2
+    )
+    return any(_same_promise(goal, str(row.get("goal") or "")) for row in rows)
+
+
 async def capture_promise(
     store: Any,
     text: str,
     now: float,
     *,
     wrote: bool,
+    user_message: str | None = None,
 ) -> int | None:
-    """捕获承诺并落库；本回合已经真写了 ⇒ 不记。返回新意图 id 或 None。"""
+    """捕获承诺并落库；本回合已经真写了 ⇒ 不记。返回新意图 id 或 None。
+
+    显式自诺（`detect_promise`）优先；没命中再看上下文判据
+    （`detect_contextual_promise`，需要 `user_message`）。已有相似的 pending
+    承诺 ⇒ 不重复记。
+    """
     if wrote:
         return None
     goal = detect_promise(text)
+    if goal is None and user_message:
+        goal = detect_contextual_promise(user_message, text, wrote=wrote)
     if goal is None:
+        return None
+    if await _is_duplicate_promise(store, goal, now):
         return None
     intention_id = await store.add_intention(
         float(now), goal=goal, action="write_note", target=None, kind="promise"
@@ -121,9 +311,13 @@ async def settle_after_reply(
     now: float,
     *,
     wrote: bool,
+    user_message: str | None = None,
     window_s: float = PROMISE_WINDOW_S,
 ) -> dict[str, Any]:
-    """一次开口落库后的承诺处理：兑现 / 放弃 / 捕获（三者互斥，不代写）。"""
+    """一次开口落库后的承诺处理：兑现 / 放弃 / 捕获（三者互斥，不代写）。
+
+    `user_message` 是用户这一轮的原话（上下文判据要它；None ⇒ 只看显式自诺）。
+    """
     since = float(now) - float(window_s)
     if wrote:
         await store.close_pending_promises(float(now), since, status="done", outcome="她写了")
@@ -133,7 +327,7 @@ async def settle_after_reply(
             float(now), since, status="expired", outcome="她自己说不写了", limit=1
         )
         return {"closed": "expired", "captured": None}
-    intention_id = await capture_promise(store, text, now, wrote=False)
+    intention_id = await capture_promise(store, text, now, wrote=False, user_message=user_message)
     return {"closed": None, "captured": intention_id}
 
 

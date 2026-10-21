@@ -971,9 +971,20 @@ class ExpressionService:
                 },
             )
             # T-020（N1）：说出口的承诺 → 记下/兑现/放弃（不代写、不改她的话）
+            # T-020d：上下文判据需要"用户这一轮的原话"——payload 里带着它
+            # （`run_job` 在 1a 步注入 `job.user_message`），这里取回落库拍用。
+            user_message: str | None = None
+            if result.instruction:
+                raw_user_message = result.instruction.get("user_message")
+                if isinstance(raw_user_message, str) and raw_user_message.strip():
+                    user_message = raw_user_message
             try:
                 await settle_after_reply(
-                    self._store, result.text, now, wrote=self._job_write_note_ok
+                    self._store,
+                    result.text,
+                    now,
+                    wrote=self._job_write_note_ok,
+                    user_message=user_message,
                 )
             except Exception:
                 log.warning("承诺处理失败（不影响落库）", exc_info=True)

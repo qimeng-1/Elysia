@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from elysia.tts.backend import TTSSynthesizer
 from elysia.tts.breaker import VramBreaker
@@ -31,6 +32,9 @@ class TTSResult:
     text: str
     audio: bytes | None
     source: str  # "cache" | "synthesis" | "muted"
+    # T-018：这次出声对应的 wav 磁盘路径（缓存命中或刚合成后都存在）。
+    # 桌宠**只播她这一句**靠它，不再猜"最新 mtime"。
+    audio_path: Path | None = None
 
 
 class TTSChain:
@@ -62,7 +66,12 @@ class TTSChain:
 
         hit = self._cache.get(req.text, req.emotion, req.speed)
         if hit is not None:
-            return TTSResult(text=req.text, audio=hit, source="cache")
+            return TTSResult(
+                text=req.text,
+                audio=hit,
+                source="cache",
+                audio_path=self._cache.path_for(req.text, req.emotion, req.speed),
+            )
 
         audio = await self._synth.synthesize(req.text, req.emotion, req.speed)
         if audio is None:
@@ -70,7 +79,12 @@ class TTSChain:
             return TTSResult(text=req.text, audio=None, source="muted")
 
         self._cache.put(req.text, req.emotion, req.speed, audio)
-        return TTSResult(text=req.text, audio=audio, source="synthesis")
+        return TTSResult(
+            text=req.text,
+            audio=audio,
+            source="synthesis",
+            audio_path=self._cache.path_for(req.text, req.emotion, req.speed),
+        )
 
     async def prewarm(self, phrases: list[tuple[str, str, float]]) -> None:
         """低负载期预合成高频短语（§7.1）。best-effort，失败不抛出。"""

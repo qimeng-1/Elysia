@@ -671,6 +671,31 @@ class SoulHeartbeat:
             if result.status in (STATUS_FAILED, STATUS_TIMEOUT):
                 self.record_error()
             await self._expression.persist(result, ts)
+            # T-018：出声归属——把**她这一句**对应的 wav 写给桌宠同步播放。
+            # 前提：桌宠只是视觉形象、不是她的身体；出声是她自己的决定，桌宠只同步播放。
+            # 写失败只记日志（绝不影响落库/开口）。
+            await self._publish_expression_audio(result, ts)
+
+    async def _publish_expression_audio(self, result: ExpressionResult, now: float) -> None:
+        """T-018：写 `kv['expression_audio']`（她这一句的 wav 归属）。"""
+        tts = result.tts
+        if tts is None or tts.audio_path is None or not result.text:
+            return
+        path = Path(tts.audio_path)
+        try:
+            if not path.is_file():
+                return
+            await self._state_store.save_json(
+                "expression_audio",
+                {
+                    "ts": float(result.order_key[1] or now),
+                    "path": str(path),
+                    "text_head": str(result.text)[:40],
+                    "voice": True,
+                },
+            )
+        except Exception:
+            self._stage_failed("E:write_expression_audio")
 
     async def _feel_memories(self, output: BrainOutput) -> None:
         """P3-O 记忆的感受路径：被"心境共鸣"唤起 → 只推心情，不进入她的话。

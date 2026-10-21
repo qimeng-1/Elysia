@@ -562,7 +562,9 @@ class PetWindow(QMainWindow):
         # HEVC 缺失会打红色 stderr 警告；仅播 wav 用不到视频编码器，故首次出声才创建。
         self._player: QMediaPlayer | None = None
         self._audio_output: QAudioOutput | None = None
-        self._last_played_audio = ""  # 去重：同一 wav 不重复播放
+        # T-018：出声归属——只播 `kv['expression_audio']` 里**她这一句**的 wav，
+        # 不再按 mtime 猜"最新缓存文件"。同一条 ts 只播一次。
+        self._last_played_audio_ts = 0.0
 
         # ── 定时器 ──
         self._timer = QTimer(self)
@@ -1040,6 +1042,16 @@ class PetWindow(QMainWindow):
         except Exception:
             return None
 
+    def _read_state_kv(self, key: str) -> Any:
+        """读 `state.db` 的 `kv[key]`（JSON 解码）；读不到返回 None。"""
+        try:
+            row = self.conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            return json.loads(row[0])
+        except Exception:
+            return None
+
     def _latest_thought(self) -> None:
         try:
             rows = self.conn_hb.execute(
@@ -1076,32 +1088,39 @@ class PetWindow(QMainWindow):
         self._bubble.raise_()
         self._bubble_until = time.time() + BUBBLE_SHOW_S
         if play_audio:
-            self._play_latest_audio()
+            self._play_her_audio()
 
-    def _play_latest_audio(self) -> None:
-        """播放 TTS 缓存中最新合成的 wav（同一时刻刚合成，时序对应本次表达）。
+    def _play_her_audio(self) -> None:
+        """T-018：只播**她这一句**的声音（读 `kv['expression_audio']`，不 glob mtime）。
 
-        缓存 key = SHA256(文本+情绪+语速)，桌宠无法反推，故直接取最新写入文件；
-        prewarm 未启用时缓存全部来自实时合成，最新即本次开口。失败静默降级为仅气泡。
+        前提：桌宠不是她的身体（她看不见它），只是给用户的视觉形象；
+        **出声是她自己的决定，桌宠只负责同步播放**。因此这里只读、不写
+        `kv['interaction']`（红线：桌宠永远不许写进她的耳朵）。
+        同一条 `ts` 只播一次；文件不存在/ts 不新 ⇒ 不播。
         """
         try:
-            cache_dir = _PROJECT_ROOT / "data" / "cache" / "tts"
-            wavs = sorted(cache_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if not wavs:
+            payload = self._read_state_kv("expression_audio")
+            if not isinstance(payload, dict):
                 return
-            path = str(wavs[0])
-            if path == self._last_played_audio:
+            ts = float(payload.get("ts") or 0.0)
+            if ts <= self._last_played_audio_ts:
                 return
-            # 懒初始化播放器：首次出声才创建，避免启动期 MFT 探测警告
-            if self._player is None:
-                self._audio_output = QAudioOutput(self)
-                self._player = QMediaPlayer(self)
-                self._player.setAudioOutput(self._audio_output)
-            self._last_played_audio = path
-            self._player.setSource(QUrl.fromLocalFile(path))
-            self._player.play()
+            path = str(payload.get("path") or "")
+            if not path or not Path(path).is_file():
+                return
+            self._last_played_audio_ts = ts
+            self._play_audio_path(path)
         except Exception:
             pass
+
+    def _play_audio_path(self, path: str) -> None:
+        """实际播放一个 wav（懒初始化播放器）。测试可注入此钩子计数。"""
+        if self._player is None:
+            self._audio_output = QAudioOutput(self)
+            self._player = QMediaPlayer(self)
+            self._player.setAudioOutput(self._audio_output)
+        self._player.setSource(QUrl.fromLocalFile(path))
+        self._player.play()
 
     # ── 交互 ──────────────────────────────────────────
     #

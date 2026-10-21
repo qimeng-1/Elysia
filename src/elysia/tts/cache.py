@@ -29,6 +29,14 @@ class CachePool:
     def _path_for(self, text: str, emotion: str, speed: float) -> Path:
         return self._dir / f"{self._key(text, emotion, speed)}.wav"
 
+    def path_for(self, text: str, emotion: str, speed: float) -> Path:
+        """公开：这段（文本+情绪+语速）对应的 wav 路径（T-018 出声归属用）。
+
+        不暴露 `_key` 私有逻辑；调用方（TTS chain / 桌宠同步）只关心"文件在哪"。
+        文件是否已存在由调用方自行判断（缓存命中/刚合成两种情形都可能）。
+        """
+        return self._path_for(text, emotion, speed)
+
     def get(self, text: str, emotion: str, speed: float) -> bytes | None:
         """返回缓存 wav 字节；未命中/读失败 → None。"""
         path = self._path_for(text, emotion, speed)

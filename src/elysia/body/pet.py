@@ -1104,6 +1104,17 @@ class PetWindow(QMainWindow):
             pass
 
     # ── 交互 ──────────────────────────────────────────
+    #
+    # ⚠️ 为什么点击**不写 text**（2026-10-21 止血）：
+    #   灵魂把 `kv('interaction')` 里任何非空 `text` 当成**用户说的话**
+    #   （`soul/heartbeat.py` → `_pending_user_message` → `record_user_message`），
+    #   所以旧写法 `_write_interaction("（点击）")` 会在她的对话历史里留下
+    #   一句「（点击）」——实测已污染 1 条 `dialogue_turns` + 15 条 interaction 记忆
+    #   + 1 条 exchange 记忆。**点击是摸她，不是说话** ⇒ 只写 ts + kind。
+    #
+    # ⚠️ 另一条：poke **不能覆盖**她还没读到的那句话（旧 F8）。
+    #   已读判定用灵魂自己的回执：`timesense.last_interaction_ts`
+    #   （灵魂每拍消费 interaction 后把它推进到该条的 ts）。
 
     def _on_character_click(self) -> None:
         """点击角色 → 从**回应池**里随机播一个 + 物理弹跳 + 交互事件。"""
@@ -1112,7 +1123,7 @@ class PetWindow(QMainWindow):
             available = [c for c in CLICK_POOL if self._clip_player.has_clip(c)]
             if available:
                 self._clip_player.play_once(random.choice(available))
-        self._write_interaction("（点击）")
+        self._write_poke()
         self._happy_until = time.time() + CLICK_HAPPY_S
         self._canvas.poke()
         self._canvas.set_emotion("happy")
@@ -1123,19 +1134,60 @@ class PetWindow(QMainWindow):
         现在有真实回复了，不再弹"听到啦"确认气泡——回复气泡由灵魂表达
         管线产生（thought_log），认证反馈留给气泡自身即可。
         """
-        self._write_interaction(text)
+        self._write_interaction(text, kind="say")
         self._canvas.poke()
         self._canvas.set_emotion("happy")
 
-    def _write_interaction(self, text: str) -> None:
+    def _write_poke(self) -> None:
+        """记录"有人摸了摸她"：**不写 text**，且不覆盖未读的用户消息。"""
+        if self._standalone:
+            return
+        if self._has_unread_user_message():
+            # 宁可少记一个 poke，也不能把你刚说的话吃掉
+            return
+        self._write_interaction(None, kind="poke")
+
+    def _has_unread_user_message(self) -> bool:
+        """`kv('interaction')` 里那条**用户消息**，灵魂是否还没消费。
+
+        判定：消息 `ts` > `timesense.last_interaction_ts` ⇒ 未读。
+        不是用户的话（无 text，例如上一次 poke）⇒ 无可保护，返回 False。
+        读不到/读失败 ⇒ 当作**未读**（保护用户的话优先）。
+        """
+        try:
+            row = self.conn.execute("SELECT value FROM kv WHERE key = 'interaction'").fetchone()
+            if row is None:
+                return False
+            payload = json.loads(row[0])
+            if not str(payload.get("text") or "").strip():
+                return False
+            msg_ts = float(payload.get("ts") or 0.0)
+            if msg_ts <= 0:
+                return False
+            seen_row = self.conn.execute("SELECT value FROM kv WHERE key = 'timesense'").fetchone()
+            if seen_row is None:
+                return True
+            seen = float(json.loads(seen_row[0]).get("last_interaction_ts") or 0.0)
+            return msg_ts > seen
+        except Exception:
+            return True
+
+    def _write_interaction(self, text: str | None, *, kind: str) -> None:
+        """写交互行（`kv('interaction')`）。
+
+        `text` **只在人真的说了话**时才写 —— 灵魂把非空 text 当用户发言，
+        会落进 `dialogue_turns` 与记忆。`kind`（`say` / `poke`）给分道留标记。
+        """
         # 纯桌宠模式：**不写库**。交互记录是"给灵魂的输入通道"，
         # 只看桌宠时不该在她的状态库里留下痕迹。
         if self._standalone:
             return
-        payload = json.dumps({"ts": time.time(), "text": text})
+        payload: dict[str, Any] = {"ts": time.time(), "kind": kind}
+        if text is not None:
+            payload["text"] = text
         self.conn.execute(
             "INSERT OR REPLACE INTO kv (key, value) VALUES ('interaction', ?)",
-            (payload,),
+            (json.dumps(payload),),
         )
         self.conn.commit()
 

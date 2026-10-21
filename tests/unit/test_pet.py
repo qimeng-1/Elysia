@@ -156,3 +156,84 @@ async def test_pet_reads_p1_fields(tmp_path: Path, qapp: QApplication) -> None:
         assert payload.get("brain_action") == "think_quiet"
     finally:
         pet.close()
+
+
+def _read_interaction(db: Path) -> dict:
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute("SELECT value FROM kv WHERE key = 'interaction'").fetchone()
+        assert row is not None
+        return json.loads(row[0])
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_click_is_not_a_user_utterance(tmp_path: Path, qapp: QApplication) -> None:
+    """点击只记 poke、**不写 text**。
+
+    取消测试：把 `_write_poke` 改回 `_write_interaction("（点击）")` ⇒ 本用例红
+    （灵魂会把「（点击）」当用户发言写进 `dialogue_turns` 与记忆，实测已污染 16 条）。
+    """
+    ss = StateStore(tmp_path / "state.db")
+    await ss.start()
+    await ss.close()
+
+    pet = PetWindow(tmp_path / "state.db", tmp_path / "heartbeat.db")
+    try:
+        pet._on_character_click()
+        data = _read_interaction(tmp_path / "state.db")
+        assert data.get("kind") == "poke"
+        assert "text" not in data, "点击不得写 text —— 灵魂会把它当成用户说的话"
+        assert isinstance(data["ts"], float)
+    finally:
+        pet.close()
+
+
+@pytest.mark.asyncio
+async def test_poke_does_not_clobber_unread_message(tmp_path: Path, qapp: QApplication) -> None:
+    """她还没读到的那句话，不能被一下点击吃掉（旧 F8 单键覆盖）。
+
+    取消测试：删掉 `_write_poke` 里的 `_has_unread_user_message()` 判断 ⇒ 本用例红。
+    """
+    ss = StateStore(tmp_path / "state.db")
+    await ss.start()
+    await ss.close()
+
+    pet = PetWindow(tmp_path / "state.db", tmp_path / "heartbeat.db")
+    try:
+        pet._submit_interaction("你好爱莉")
+        pet._on_character_click()  # 灵魂尚未消费（timesense 里没有 last_interaction_ts）
+        data = _read_interaction(tmp_path / "state.db")
+        assert data["text"] == "你好爱莉", "点击把你的话覆盖掉了"
+        assert "kind" in data and data["kind"] == "say"
+    finally:
+        pet.close()
+
+
+@pytest.mark.asyncio
+async def test_poke_written_after_message_consumed(tmp_path: Path, qapp: QApplication) -> None:
+    """已读（`timesense.last_interaction_ts` 已推进）⇒ poke 正常写，且仍不带 text。"""
+    ss = StateStore(tmp_path / "state.db")
+    await ss.start()
+    await ss.close()
+
+    pet = PetWindow(tmp_path / "state.db", tmp_path / "heartbeat.db")
+    try:
+        pet._submit_interaction("你好爱莉")
+        sent = _read_interaction(tmp_path / "state.db")["ts"]
+        conn = sqlite3.connect(tmp_path / "state.db")
+        conn.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES ('timesense', ?)",
+            (json.dumps({"last_interaction_ts": sent}),),
+        )
+        conn.commit()
+        conn.close()
+
+        pet._on_character_click()
+        data = _read_interaction(tmp_path / "state.db")
+        assert data.get("kind") == "poke"
+        assert "text" not in data
+        assert data["ts"] > sent
+    finally:
+        pet.close()

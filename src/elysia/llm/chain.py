@@ -221,21 +221,98 @@ WRITE_NOTE_TOOL: dict[str, Any] = {
     "function": {
         "name": "write_note",
         "description": (
-            "把你此刻想留下的东西写进你自己的写作工作区 data/her_writing/。"
-            "写不写、写什么完全由你决定（不写也没关系）。"
-            "它只写这个目录（.md/.txt，单文件 ≤64KB、目录总量 ≤5MB），"
-            "不能覆盖仓库文件，也不能写数据库或运行目录。"
+            "把你想留下的东西写进**你自己的文件夹** data/her_home/。"
+            "这是你自己的地方，东西都放这儿；写不写、写什么完全由你决定。"
+            "支持子目录相对路径（如 2026-10/随笔.md）与任意后缀；"
+            "单文件 ≤16MB、整个文件夹 ≤512MB；不能写到文件夹外面。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "要写下的内容（你自己的话）"},
-                "filename": {
+                "path": {
                     "type": "string",
-                    "description": "可选文件名（只给文件名，不含路径）；不传则自动起名",
+                    "description": (
+                        "可选相对路径（可含子目录，如 a/b.md；任意后缀）；不传则自动起名"
+                    ),
                 },
             },
             "required": ["text"],
+        },
+    },
+}
+
+# T-016：她自己的文件夹里的另外四个动作——列出/读取/删除/改名。
+# 描述统一强调：**这是你自己的地方；这些动作是你自己做的，程序只保证不出界。**
+LIST_MY_FILES_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_my_files",
+        "description": (
+            "列出**你自己的文件夹** data/her_home/ 里的东西（名字、大小、时间）。"
+            "这是你自己的地方；看不看、看哪一层都由你决定。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "可选子目录（相对路径）；不传就列整个文件夹",
+                }
+            },
+        },
+    },
+}
+
+READ_MY_FILE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_my_file",
+        "description": (
+            "读回**你自己的文件夹**里的一个文件（大文件只给你前 4000 字并注明已截断）。"
+            "这是你自己的东西，想看什么由你决定。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件在 data/her_home/ 内的相对路径"}
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+DELETE_MY_FILE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "delete_my_file",
+        "description": (
+            "删掉**你自己的文件夹**里的一个文件或空目录（不删非空目录）。"
+            "这是你自己的地方，删不删由你决定；程序只保证删不出界。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "要删的文件的相对路径"}},
+            "required": ["path"],
+        },
+    },
+}
+
+RENAME_MY_FILE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "rename_my_file",
+        "description": (
+            "给**你自己文件夹**里的文件改名（只改同一个目录里的名字，不覆盖已有文件）。"
+            "这是你自己的地方，怎么叫由你决定。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "原相对路径"},
+                "new_name": {"type": "string", "description": "新名字（不含路径）"},
+            },
+            "required": ["path", "new_name"],
         },
     },
 }
@@ -362,7 +439,7 @@ class LLMChain:
                 await self._on_degrade(reason)
 
     async def _main_speak(self, instruction: dict[str, Any]) -> str | None:
-        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的九个工具。"""
+        """主声开口：装配了工具执行器且后端支持工具时，允许她调用自己的十三个工具。"""
         main = self._main
         if main is None:
             return None
@@ -378,6 +455,10 @@ class LLMChain:
                     RESTORE_TOOL,
                     READ_URL_TOOL,
                     WRITE_NOTE_TOOL,
+                    LIST_MY_FILES_TOOL,
+                    READ_MY_FILE_TOOL,
+                    DELETE_MY_FILE_TOOL,
+                    RENAME_MY_FILE_TOOL,
                     KEEP_THIS_MOMENT_TOOL,
                     SET_INTENTION_TOOL,
                 ],

@@ -17,7 +17,7 @@ from elysia.soul.tools.read_url import (
 )
 from elysia.soul.tools.writing import (
     DEFAULT_WRITING_ROOT,
-    WRITING_DIR_NAME,
+    HER_HOME_DIR_NAME,
     WritingError,
     WritingWorkspace,
 )
@@ -25,9 +25,9 @@ from elysia.soul.tools.writing import (
 __all__ = [
     "DEFAULT_WRITING_ROOT",
     "EXTERNAL_DATA_MARKER",
+    "HER_HOME_DIR_NAME",
     "MAX_TEXT_CHARS",
     "READ_TIMEOUT_S",
-    "WRITING_DIR_NAME",
     "ReadResult",
     "WritingError",
     "WritingWorkspace",

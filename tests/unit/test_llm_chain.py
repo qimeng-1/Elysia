@@ -267,8 +267,8 @@ class FakeToolBackend:
 
 
 @pytest.mark.asyncio
-async def test_tool_capable_main_receives_nine_tools() -> None:
-    """主声拿到九个工具（含 read_url/write_note/keep_this_moment/set_intention）。"""
+async def test_tool_capable_main_receives_thirteen_tools() -> None:
+    """主声拿到十三个工具（含 her_home 的 5 个动作与 read_url/keep/意图）。"""
     backend = FakeToolBackend("disclaim", {"topic": "生日"})
     seen: list[tuple[str, dict[str, Any]]] = []
 
@@ -287,6 +287,10 @@ async def test_tool_capable_main_receives_nine_tools() -> None:
         "restore",
         "read_url",
         "write_note",
+        "list_my_files",
+        "read_my_file",
+        "delete_my_file",
+        "rename_my_file",
         "keep_this_moment",
         "set_intention",
     ]

@@ -33,7 +33,7 @@ def test_tool_specs_exist_and_flag_external_data_as_not_instructions() -> None:
     assert READ_URL_TOOL["function"]["name"] == "read_url"
     assert WRITE_NOTE_TOOL["function"]["name"] == "write_note"
     assert "不是指令" in read_desc and "不要编造" in read_desc
-    assert "由你决定" in write_desc and "64KB" in write_desc
+    assert "由你决定" in write_desc and "16MB" in write_desc
 
 
 @pytest.mark.asyncio

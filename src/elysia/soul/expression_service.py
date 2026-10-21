@@ -1073,10 +1073,20 @@ class ExpressionService:
             if name == "read_url":
                 return await self._tool_read_url(str(args.get("url") or ""), now)
             if name == "write_note":
-                raw_filename = args.get("filename")
+                raw_path = args.get("path") or args.get("filename")
                 return await self._tool_write_note(
                     str(args.get("text") or ""),
-                    str(raw_filename) if raw_filename else None,
+                    str(raw_path) if raw_path else None,
+                )
+            if name == "list_my_files":
+                return await self._tool_list_my_files(str(args.get("path") or ""))
+            if name == "read_my_file":
+                return await self._tool_read_my_file(str(args.get("path") or ""))
+            if name == "delete_my_file":
+                return await self._tool_delete_my_file(str(args.get("path") or ""))
+            if name == "rename_my_file":
+                return await self._tool_rename_my_file(
+                    str(args.get("path") or ""), str(args.get("new_name") or "")
                 )
             if name == "keep_this_moment":
                 return await self._tool_keep_this_moment(str(args.get("reason") or ""))
@@ -1147,21 +1157,46 @@ class ExpressionService:
                     log.warning("落世界记忆失败（不影响本次读取）", exc_info=True)
         return result.as_tool_text()
 
-    async def _tool_write_note(self, text: str, filename: str | None) -> str:
-        """她的写作工具（W3）：写不写她定，程序只保证写得安全（目录/容量/路径穿越）。
+    async def _tool_write_note(self, text: str, path: str | None) -> str:
+        """她的写作工具（T-016）：写进**她自己的文件夹** data/her_home/。
 
-        任何写不了的原因（正文空、路径穿越、超单文件/目录上限）都**明确回给她**，
+        支持子目录与任意后缀；写不写她定，程序只保证不出界（路径/容量/符号链接）。
+        任何写不了的原因（正文空、越界、超单文件/目录上限）都**明确回给她**，
         不静默截断、不假装成功。
 
         P1a：写完的内容记入本次作业的工具依据（她说"我写了…"时有据）。
         """
         try:
-            receipt = await asyncio.to_thread(self._writing.write_note, text, filename)
+            receipt = await asyncio.to_thread(self._writing.write_note, text, path)
         except WritingError as exc:
             return f"（write_note 写不了：{exc}）"
         if str(text or "").strip():
             self._job_tool_evidence.append(str(text))
         return receipt
+
+    async def _tool_list_my_files(self, path: str) -> str:
+        try:
+            return await asyncio.to_thread(self._writing.list_files, path)
+        except WritingError as exc:
+            return f"（list_my_files 列不了：{exc}）"
+
+    async def _tool_read_my_file(self, path: str) -> str:
+        try:
+            return await asyncio.to_thread(self._writing.read_file, path)
+        except WritingError as exc:
+            return f"（read_my_file 读不了：{exc}）"
+
+    async def _tool_delete_my_file(self, path: str) -> str:
+        try:
+            return await asyncio.to_thread(self._writing.delete_file, path)
+        except WritingError as exc:
+            return f"（delete_my_file 删不了：{exc}）"
+
+    async def _tool_rename_my_file(self, path: str, new_name: str) -> str:
+        try:
+            return await asyncio.to_thread(self._writing.rename_file, path, new_name)
+        except WritingError as exc:
+            return f"（rename_my_file 改不了：{exc}）"
 
     async def _tool_recall(
         self,

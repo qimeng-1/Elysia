@@ -93,7 +93,7 @@ powershell -ExecutionPolicy Bypass -File scripts\gate.ps1
 | 她进程日志 | `data/logs/soul.log` / `soul.err*.log` / `body.*` |
 | 看门狗 | `data/logs/watchdog.log`（每次巡视一行） |
 | 桥/面板 | `data/logs/telegram_bridge.log` |
-| 她的写作区 | `data/her_writing/`（gitignored；单文件 ≤64KB、总量 ≤5MB） |
+| 她的文件夹（她的地方） | `data/her_home/`（gitignored；她在里面完全权限：任意后缀/子目录/列出/读取/改名/删除；单文件 ≤16MB、总 ≤512MB；路径穿越与符号链接逃逸一律拒绝。旧 `data/her_writing/` 已迁入） |
 | 语音缓存 | `data/cache/tts_voice/` |
 
 ## 8. 已知的坑（都真机踩过）

@@ -10,6 +10,7 @@
 
 用法：python scripts/mark_click_pollution.py [--apply]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,7 +22,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "data" / "heartbeat.db"
 BACKUP_DIR = ROOT / "data" / "tmp"
-MARK = "（这条是系统记错的：内容来自桌宠窗口的鼠标点击，被误当成「你身边那个人说的话」记了下来——不是发生过的话。）"
+MARK = (
+    "（这条是系统记错的：内容来自桌宠窗口的鼠标点击，"
+    "被误当成「你身边那个人说的话」记了下来——不是发生过的话。）"
+)
 MARKER_PREFIX = "（系统记错"
 
 
@@ -50,7 +54,8 @@ def main() -> int:
     ).fetchall()
     print(f"\n受影响对话轮次：{len(turn)} 条（本轮只记账，不改；原件保真）")
     for t in turn:
-        print(f"  #{t['id']} {time.strftime('%m-%d %H:%M', time.localtime(t['ts']))} text={t['text']!r}")
+        stamp = time.strftime("%m-%d %H:%M", time.localtime(t["ts"]))
+        print(f"  #{t['id']} {stamp} text={t['text']!r}")
 
     if not args.apply:
         print("\n[dry-run] 没写任何东西。加 --apply 才写。")
@@ -74,7 +79,6 @@ def main() -> int:
     print(f"\n备份：{backup}")
 
     changed = 0
-    now = time.time()
     for r in rows:
         old = str(r["narrative"] or "")
         if old.startswith(MARKER_PREFIX):

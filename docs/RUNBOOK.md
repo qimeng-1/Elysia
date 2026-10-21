@@ -38,6 +38,11 @@ powershell -ExecutionPolicy Bypass -File scripts\soul.ps1 stop
 
 ## 2. 重启协议（代码改动后）
 
+> **本轮起（2026-10-21）：重启她只从总领窗（Lead）做。**
+> 现在有两个窗口在派发改动（总领窗 + 桌宠窗），两边同时重启会互相踩：进程判活、`kv['interaction']` 未读记账、`--no-verify` 下的半新半旧代码。
+> 其他窗口改完代码后：`gate.ps1` 全绿 + commit + 把"要重启"写进任务板，由总领窗统一执行重启与真机验证。
+> 已知副作用见任务板 **D-9**：重启会把最后一条 `kv['interaction']` 重放一次（`_last_interaction_event_ts` 是内存态、每次启动归零，不入库）。
+
 1. 门禁全绿（见 §3）且已 commit。
 2. `soul.ps1 stop` → 等 3 秒 → 分离式 `start -Body` → 等 22 秒。
 3. 验证：

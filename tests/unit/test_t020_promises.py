@@ -540,3 +540,152 @@ def test_detect_contextual_promise_guards() -> None:
     assert captured is not None and "写一下爱莉希雅" in captured
     assert has_write_request("帮我写一篇爱莉希雅")
     assert not has_write_request("写")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# T-020e：条件①成立时，肯定信号放宽到"子句的核心动词就是写"
+#
+# 真机漏检（T-020d 上线后）：用户请她写，她答「写。今晚就写在文件夹里，天亮前
+# 它会在。」——最直接的肯定就是「写。」，而 T-020d 只认「算数/还写/这就写」这类
+# 更长的形式，于是 0 条 promise。以下每条都做过取消测试（见各自 docstring）。
+# ══════════════════════════════════════════════════════════════════════
+
+_REAL_MACHINE_WRITE_REQUEST = "那篇爱莉希雅——你要是还没写，今晚就写一下吧，写进你自己的文件夹里。"
+
+
+async def _assert_single_pending_promise(store: HeartbeatStore) -> tuple[Any, ...]:
+    rows = await _promise_rows(store)
+    assert len(rows) == 1, f"应记且只记 1 条承诺，实际 {len(rows)} 条：{rows}"
+    goal, action, kind, status, target = rows[0]
+    assert (kind, status, action, target) == ("promise", "pending", "write_note", None)
+    assert len(goal) <= 120
+    return goal, action, kind, status, target
+
+
+# ── 真机句「写。今晚就写在文件夹里，天亮前它会在。」──────────────
+@pytest.mark.asyncio
+async def test_contextual_capture_write_core_clause_real_machine(tmp_path: Path) -> None:
+    """用户请她写 + 她答「写。今晚就写在文件夹里…」⇒ 记 1 条。
+
+    取消测试：把 `_sentence_has_affirmation` 里的 T-020e 放宽判据还原
+    （不再认子句级「写」）⇒ 本用例红。
+    """
+    service, store, state = await _service(tmp_path)
+    try:
+        await _say(
+            service,
+            user_message=_REAL_MACHINE_WRITE_REQUEST,
+            her_text="写。今晚就写在文件夹里，天亮前它会在。",
+        )
+        goal, *_ = await _assert_single_pending_promise(store)
+        assert "写" in goal
+    finally:
+        await state.close()
+        await store.close()
+
+
+# ── 「好，我写。」───────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_contextual_capture_write_core_clause_wo_xie(tmp_path: Path) -> None:
+    """用户请她写 + 她答「好，我写。」⇒ 记 1 条。
+
+    取消测试：把「我写」从 `_AFFIRM_STRONG` 删掉、并去掉裸「好」的整子句肯定
+    ⇒ 本用例红。
+    """
+    service, store, state = await _service(tmp_path)
+    try:
+        await _say(service, user_message=_REAL_MACHINE_WRITE_REQUEST, her_text="好，我写。")
+        goal, *_ = await _assert_single_pending_promise(store)
+        assert "我写" in goal
+    finally:
+        await state.close()
+        await store.close()
+
+
+# ── 「今晚就写。」───────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_contextual_capture_write_core_clause_tonight(tmp_path: Path) -> None:
+    """用户请她写 + 她答「今晚就写。」⇒ 记 1 条。
+
+    取消测试：还原 T-020e 放宽判据（去掉时间 + 写作动作的子句模式）⇒ 本用例红。
+    """
+    service, store, state = await _service(tmp_path)
+    try:
+        await _say(service, user_message=_REAL_MACHINE_WRITE_REQUEST, her_text="今晚就写。")
+        goal, *_ = await _assert_single_pending_promise(store)
+        assert "今晚就写" in goal
+    finally:
+        await state.close()
+        await store.close()
+
+
+# ── 「不写。」⇒ 拒绝，不记 ──────────────────────────────────────
+@pytest.mark.asyncio
+async def test_contextual_capture_write_core_clause_rejects_bu_xie(tmp_path: Path) -> None:
+    """用户请她写 + 她答「不写。」⇒ 不记（拒绝优先于子句级"写"）。
+
+    取消测试：把子句级写作动作退化成"含『写』字就算肯定"、并去掉逐子句拒绝闸
+    ⇒ 本用例红。
+    """
+    service, store, state = await _service(tmp_path)
+    try:
+        await _say(service, user_message=_REAL_MACHINE_WRITE_REQUEST, her_text="不写。")
+        rows = await _promise_rows(store)
+        assert not rows, f"她答『不写』，却记了承诺：{rows}"
+    finally:
+        await state.close()
+        await store.close()
+
+
+# ── 「写不出来。」⇒ 无力，不记 ──────────────────────────────────
+@pytest.mark.asyncio
+async def test_contextual_capture_write_core_clause_rejects_wu_li(tmp_path: Path) -> None:
+    """用户请她写 + 她答「写不出来。」⇒ 不记（无力不是肯定）。
+
+    取消测试：同上（去掉逐子句拒绝闸 + 把判据退化成"含『写』字"）⇒ 本用例红。
+    """
+    service, store, state = await _service(tmp_path)
+    try:
+        await _say(service, user_message=_REAL_MACHINE_WRITE_REQUEST, her_text="写不出来。")
+        rows = await _promise_rows(store)
+        assert not rows, f"她答『写不出来』，却记了承诺：{rows}"
+    finally:
+        await state.close()
+        await store.close()
+
+
+# ── 没有写作请求时，「写。」也不算承诺 ─────────────────────────────
+@pytest.mark.asyncio
+async def test_contextual_capture_write_core_clause_needs_request(tmp_path: Path) -> None:
+    """用户只是闲聊（「你在干嘛」）+ 她答「写。」⇒ 不记（条件①不成立）。
+
+    取消测试：跳过 `has_write_request`（不再要求"用户这轮在请她写"）⇒ 本用例红。
+    """
+    service, store, state = await _service(tmp_path)
+    try:
+        await _say(service, user_message="你在干嘛", her_text="写。")
+        rows = await _promise_rows(store)
+        assert not rows, f"用户没请她写，却记了承诺：{rows}"
+    finally:
+        await state.close()
+        await store.close()
+
+
+def test_write_core_clause_guards() -> None:
+    """T-020e 纯函数面：放宽后的形式认、拒绝/无力不认、①不成立不认。"""
+    assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "写。", wrote=False) is not None
+    assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "写吧", wrote=False) is not None
+    assert (
+        detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "写下来。", wrote=False) is not None
+    )
+    assert (
+        detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "写在文件夹里。", wrote=False)
+        is not None
+    )
+    assert (
+        detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "继续写。", wrote=False) is not None
+    )
+    assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "不写。", wrote=False) is None
+    assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "写不出来。", wrote=False) is None
+    assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "今晚就写？", wrote=False) is None
+    assert detect_contextual_promise("你在干嘛", "写。", wrote=False) is None

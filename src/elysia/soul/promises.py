@@ -24,6 +24,12 @@ T-020d（真机取证 2026-10-22 00:38–00:59）：显式自诺的句式太窄�
 
 `detect_contextual_promise` 只回答"记不记、记什么"；去重（同一请求/同一原话只留
 一条）在 `capture_promise` 里做。放弃/兑现/过期语义完全不变。
+
+T-020e（真机再取证）：条件①成立时，肯定信号要放宽到**子句的核心动词就是写**——
+真机她答「写。今晚就写在文件夹里，天亮前它会在。」，最直接的肯定就是「写。」，
+而 T-020d 的信号表只认「算数/还写/这就写」这类更长形式。放宽的形式：
+「写 / 写吧 / 写呀」整子句、「今晚/今晚就写」、「写进…文件夹 / 写在…里 / 写下来」、
+「我写 / 我这就写 / 接着写 / 继续写」；每条都要求该子句**不含**拒绝/推脱/无力词。
 """
 
 from __future__ import annotations
@@ -75,7 +81,7 @@ _WRITE_REQUEST_TECH = re.compile(r"(?:写.{0,3}代码|写程序|写函数|写脚
 # 她的回复给的肯定答复：强信号子句级匹配；「好/行/嗯」这类单字必须**整子句**
 # 才算（避免「好像/只好/好多」误判），且整句是反问（以 ？ 收尾）时不算。
 _AFFIRM_STRONG = re.compile(
-    r"(?:算数|还写|接着写|慢慢写|我写|这就|待会儿|待会|一会|马上"
+    r"(?:算数|还写|接着写|继续写|慢慢写|我写|这就|待会儿|待会|一会|马上"
     r"|写好|写完|会写|会的|好呀|好啊|好的|行吧|可以|当然"
     r"|答应|说到做到|说话算话|一言为定)"
 )
@@ -87,6 +93,20 @@ _REFUSAL = re.compile(
     r"(?:不写|不想写|不会写|不肯写|不打算写|写不了|写不动|写不出|写不出来"
     r"|算了|再说吧|以后吧|改天|下次吧|没空|懒得|先搁着|先放着|缓一缓"
     r"|不行|不可以|别写|不会的|说不准|不好说)"
+)
+
+# T-020e：条件①成立时，肯定信号**放宽到"子句的核心动词就是写"**。
+# 真机漏检：「写。今晚就写在文件夹里，天亮前它会在。」——最直接的肯定就是
+# 「写。」，而 T-020d 的信号表只认「算数/还写/这就写」这类更长形式。
+_WRITE_CORE = re.compile(r"^(?:嗯|好)?[，,]?写(?:吧|呀|啊|啦|哦|呢)?$")
+_WRITE_TIME = re.compile(r"(?:今晚|今天|现在|待会儿|马上|明天|天亮前|睡前).{0,8}写")
+_WRITE_ACTION = re.compile(
+    r"(?:写进.{0,12}(?:文件夹|文件|目录)|写在.{0,12}(?:文件夹|文件|里)"
+    r"|写下来|写成文件|落成文件)"
+)
+# 放宽判据后，再逐子句挡一次拒绝/推脱/无力（「不写」「写不出来」不能算肯定）
+_WRITE_CLAUSE_REFUSAL = re.compile(
+    r"(?:不写|不想写|写不出|写不动|写不了|算了|再说吧|改天|没空|懒得|先搁着)"
 )
 
 # 记 goal 时的拼装格式（她原话太短时补上"用户请我写什么"，否则她下次看不懂）
@@ -165,8 +185,19 @@ def _strip_punct(clause: str) -> str:
     return clause.strip(" \t\r\n。！!？?…—～~、；;，,")
 
 
+def _clause_is_write_affirmation(core: str) -> bool:
+    """T-020e：子句的核心就是写作动作（「写」「今晚就写」「写进文件夹」）。
+
+    只用于**用户已明确请她写**（条件①成立）的语境；该子句含拒绝/推脱/无力词
+    （「不写」「写不出来」）⇒ 不算肯定。
+    """
+    if not core or _WRITE_CLAUSE_REFUSAL.search(core):
+        return False
+    return bool(_WRITE_CORE.match(core) or _WRITE_TIME.search(core) or _WRITE_ACTION.search(core))
+
+
 def _sentence_has_affirmation(sentence: str) -> bool:
-    """这一句里有没有肯定答复（「算数/还写/好呀/可以/嗯」…）。"""
+    """这一句里有没有肯定答复（「算数/还写/好呀/可以/嗯」…，T-020e 放宽到「写」）。"""
     asks = sentence.rstrip().endswith(("？", "?"))
     for clause in _CLAUSE_SPLIT.split(sentence):
         core = _strip_punct(clause)
@@ -175,6 +206,8 @@ def _sentence_has_affirmation(sentence: str) -> bool:
         if core in _AFFIRM_BARE and not asks:
             return True
         if _AFFIRM_STRONG.search(core):
+            return True
+        if not asks and _clause_is_write_affirmation(core):
             return True
     return False
 
@@ -214,7 +247,8 @@ def detect_contextual_promise(
 
     只在**显式自诺**（`detect_promise`）没命中时兜底。四个条件同时成立才记：
     ① 用户这轮在请她写（`has_write_request`）；
-    ② 她的回复有肯定答复（`_affirming_sentence`）且整段**没有**拒绝/推脱
+    ② 她的回复有肯定答复（`_affirming_sentence`；T-020e：条件①成立时还认
+       「写 / 今晚就写 / 写进文件夹」这类子句级写作动作）且整段**没有**拒绝/推脱
        （`_REFUSAL`）——既不肯定也不拒绝（转移话题/反问）⇒ 不记；
     ③ 本回合没有成功的 `write_note`（`wrote=True` ⇒ 不记）；
     ④ 同一请求/同一原话的去重由 `capture_promise` 负责（本函数不碰库）。

@@ -770,6 +770,10 @@ class HeartbeatStore(_AsyncSQLite):
         return self._memory_row_to_dict(rows[0]) if rows else None
 
     # ── P3：她的意图（"打算做"跨时间存活）───────────────────────────
+    # T-020：`kind='promise'` 是她**口头承诺**（只能由她本人兑现，worker 一律跳过）；
+    # 只有这四种才是"可代做"的意图。
+    EXECUTABLE_INTENTION_KINDS = ("task", "surprise", "conceal", "play")
+
     @staticmethod
     def _intention_row(row: tuple[Any, ...]) -> dict[str, Any]:
         return {
@@ -814,9 +818,11 @@ class HeartbeatStore(_AsyncSQLite):
         return self._intention_row(rows[0]) if rows else None
 
     async def next_pending_intention(self) -> dict[str, Any] | None:
-        """最早一条 pending 意图（执行器一次只拿一条）。"""
+        """最早一条**可代做**的 pending 意图（T-020：`promise` 一律跳过）。"""
         rows = await self.execute_raw(
-            "SELECT * FROM intentions WHERE status = 'pending' ORDER BY created_ts, id LIMIT 1"
+            "SELECT * FROM intentions WHERE status = 'pending'"
+            " AND kind IN (?, ?, ?, ?) ORDER BY created_ts, id LIMIT 1",
+            tuple(self.EXECUTABLE_INTENTION_KINDS),
         )
         return self._intention_row(rows[0]) if rows else None
 
@@ -869,6 +875,59 @@ class HeartbeatStore(_AsyncSQLite):
             (float(since), int(limit)),
         )
         return [self._memory_row_to_dict(row) for row in rows]
+
+    # ── T-020：她的口头承诺（kind='promise'，只能由她本人兑现）───────
+    async def recent_pending_promises(
+        self, since: float, *, limit: int = 3
+    ) -> list[dict[str, Any]]:
+        rows = await self.execute_raw(
+            "SELECT * FROM intentions WHERE kind = 'promise' AND status = 'pending'"
+            " AND created_ts >= ? ORDER BY created_ts, id LIMIT ?",
+            (float(since), int(limit)),
+        )
+        return [self._intention_row(row) for row in rows]
+
+    async def close_pending_promises(
+        self,
+        now: float,
+        since: float,
+        *,
+        status: str,
+        outcome: str,
+        limit: int | None = None,
+    ) -> None:
+        """关闭最近 `since` 之后的 pending 承诺（done/expired；`limit=1` 只关最新一条）。"""
+
+        def _close(conn: sqlite3.Connection) -> None:
+            sql = (
+                "UPDATE intentions SET status = ?, outcome = ?, finished_ts = ?"
+                " WHERE id IN (SELECT id FROM intentions"
+                " WHERE kind = 'promise' AND status = 'pending' AND created_ts >= ?"
+                " ORDER BY created_ts DESC, id DESC"
+            )
+            params: list[Any] = [status, outcome, float(now), float(since)]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(int(limit))
+            sql += ")"
+            conn.execute(sql, tuple(params))
+            conn.commit()
+
+        await self.submit(_close)
+
+    async def expire_stale_promises(self, now: float, *, ttl_s: float = 48 * 3600.0) -> None:
+        """48 小时未兑现 ⇒ 惰性判定 expired（读取时判定，不新增定时器）。"""
+
+        def _expire(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE intentions SET status = 'expired', outcome = '48 小时未兑现',"
+                " finished_ts = ? WHERE kind = 'promise' AND status = 'pending'"
+                " AND created_ts < ?",
+                (float(now), float(now) - float(ttl_s)),
+            )
+            conn.commit()
+
+        await self.submit(_expire)
 
     async def count_memories(self, level: str | None = None) -> int:
         if level is None:

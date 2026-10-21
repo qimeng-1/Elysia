@@ -114,6 +114,7 @@ from elysia.soul.expression_types import (
 )
 from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
 from elysia.soul.intentions import Intentions
+from elysia.soul.promises import list_pending_promises, promise_hint, settle_after_reply
 from elysia.soul.tools.keep_moment import MomentKeeper
 from elysia.soul.tools.read_url import ReadResult, read_url
 from elysia.soul.tools.writing import WritingError, WritingWorkspace
@@ -421,6 +422,8 @@ class ExpressionService:
         self._on_recall = on_recall
         # P1a：本次作业内**成功**工具结果（反编造的依据之一；run_job 开头清空）
         self._job_tool_evidence: list[str] = []
+        # T-020：本回合是否真的成功写成了文件（有则不把"我这就写"记成新承诺）
+        self._job_write_note_ok = False
         # T-014（O1）：工具调用留痕——LLM 后端每次工具调用后把结构化记录交回来，
         # 这里落 thought_log kind='tool'（失败只记日志，绝不影响表达链路）。
         set_observer = getattr(llm_chain, "set_tool_observer", None)
@@ -718,6 +721,8 @@ class ExpressionService:
         now = job.created_ts
         # P1a：证据按作业隔离（同一 worker 串行执行，不会串台）
         self._job_tool_evidence = []
+        # T-020：本回合的"是否真写了"按作业隔离
+        self._job_write_note_ok = False
 
         # ── 1. 构造表达指令（决策层唯一出口）────────────
         # 意图由**决策层**（心跳提交时）给定：回应 / 主动问候 / 好奇提问 / 思念；
@@ -799,6 +804,15 @@ class ExpressionService:
         except Exception:
             log.warning("装配 recent_discoveries 失败", exc_info=True)
             payload["recent_discoveries"] = []
+        # T-020：她答应过、还没做的事——递回她手上（是提醒，不是命令）
+        try:
+            promises = await list_pending_promises(self._store, now)
+            payload["pending_promises"] = promises
+            if promises:
+                payload["pending_promises_hint"] = promise_hint(promises)
+        except Exception:
+            log.warning("装配 pending_promises 失败", exc_info=True)
+            payload["pending_promises"] = []
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)
@@ -956,6 +970,13 @@ class ExpressionService:
                     "certainty": CERTAINTY_CERTAIN,
                 },
             )
+            # T-020（N1）：说出口的承诺 → 记下/兑现/放弃（不代写、不改她的话）
+            try:
+                await settle_after_reply(
+                    self._store, result.text, now, wrote=self._job_write_note_ok
+                )
+            except Exception:
+                log.warning("承诺处理失败（不影响落库）", exc_info=True)
 
     async def flush_utterances(self, now: float) -> int:
         """把到点的后续句子逐句冒泡（P0-R19：多句不是一口气喷完）。返回本轮冒泡条数。"""
@@ -1170,6 +1191,8 @@ class ExpressionService:
             receipt = await asyncio.to_thread(self._writing.write_note, text, path)
         except WritingError as exc:
             return f"（write_note 写不了：{exc}）"
+        # T-020：真写成功 ⇒ 本回合不记"我这就写"的新承诺，并兑现旧承诺
+        self._job_write_note_ok = True
         if str(text or "").strip():
             self._job_tool_evidence.append(str(text))
         return receipt

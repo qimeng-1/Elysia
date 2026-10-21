@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,9 @@ class _FakeBackend:
     """主声替身：常规开口走 `complete`；第二拍走 `complete_with_tools`（记录拿到什么）。
 
     `forced_text` 就是"她自己在工具参数里写的正文"——测试用它证明程序没有代写。
+    `delay_s`：第二拍的假延迟（T-021b 用它证明 persist 从不等 LLM）。
+    `forced_writes`：按顺序给出多次第二拍的（正文, 路径）——并发/多承诺用例用。
+    `forced_gate`：单飞用例的确定性闸门（第二拍进入后先 set `forced_started`，再等它放行）。
     """
 
     def __init__(
@@ -53,11 +58,18 @@ class _FakeBackend:
         forced_text: str | None = HER_TEXT,
         forced_path: str | None = "爱莉希雅.md",
         forced_raises: bool = False,
+        delay_s: float = 0.0,
+        forced_writes: list[tuple[str, str | None]] | None = None,
+        forced_gate: asyncio.Event | None = None,
     ) -> None:
         self.reply = reply
         self.forced_text = forced_text
         self.forced_path = forced_path
         self.forced_raises = forced_raises
+        self.delay_s = delay_s
+        self.forced_writes = list(forced_writes or [])
+        self.forced_gate = forced_gate
+        self.forced_started = asyncio.Event()
         self.complete_calls = 0
         self.tool_rounds = 0
         self.seen_tools: list[list[dict[str, Any]]] = []
@@ -84,13 +96,22 @@ class _FakeBackend:
         self.seen_tool_choice.append(tool_choice)
         self.seen_response_format.append(response_format)
         self.seen_instructions.append(instruction)
+        self.forced_started.set()
+        if self.forced_gate is not None:
+            await self.forced_gate.wait()
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
         if self.forced_raises:
             raise RuntimeError("第二拍网络层炸了")
-        if self.forced_text is None:
+        if self.forced_writes:
+            text, path = self.forced_writes.pop(0)
+        else:
+            text, path = self.forced_text, self.forced_path
+        if text is None:
             return None  # 空正文：模型没有写
-        args: dict[str, Any] = {"text": self.forced_text}
-        if self.forced_path:
-            args["path"] = self.forced_path
+        args: dict[str, Any] = {"text": text}
+        if path:
+            args["path"] = path
         await run_tool("write_note", args)
         return "写好了，你去看看。"
 
@@ -152,8 +173,13 @@ async def _turn(
     now: float,
     user_message: str | None = None,
     wrote: bool = False,
+    wait_forced: bool = True,
 ) -> None:
-    """真实链路：worker 段（run_job，一次 LLM 开口）→ 心跳落库段（persist）。"""
+    """真实链路：worker 段（run_job，一次 LLM 开口）→ 心跳落库段（persist）。
+
+    T-021b 之后第二拍跑在后台任务里：默认等它结束（"这一回合真正走完"）；
+    要验证 persist 立即返回/单飞时传 `wait_forced=False`。
+    """
     backend = service._llm._main  # type: ignore[attr-defined]
     assert isinstance(backend, _FakeBackend)
     backend.reply = reply
@@ -162,6 +188,8 @@ async def _turn(
     if wrote:
         service._job_write_note_ok = True
     await service.persist(result, now=now)
+    if wait_forced:
+        await service.wait_forced_write()
 
 
 # ── 1. 有 pending + 她说「我去写」+ 没写 ⇒ 第二拍强制 write_note ─────
@@ -471,3 +499,169 @@ def test_promise_hint_tells_her_to_act_now() -> None:
 
 def test_forced_write_cooldown_is_ten_minutes() -> None:
     assert FORCED_WRITE_COOLDOWN_S == 600.0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# T-021b：第二拍移出心跳拍（persist 只投递；后台单飞）
+#
+# 取消测试（每条都能红）：
+# - 把 `_maybe_force_write` 改回同步 await ⇒ 用例 1 红（persist 被 1s 延迟拖住）；
+# - 去掉单飞判据（每次都 create_task）⇒ 用例 3 红（后端被调 2 次）；
+# - 去掉任务内 try/except ⇒ 用例 4 红（task.exception() 非 None）；
+# - 第二拍改回复用作业级 `_job_write_note_ok`/`_job_written_path` ⇒ 用例 5 红。
+# ══════════════════════════════════════════════════════════════════════
+
+
+async def _pending_result(
+    service: ExpressionService, *, reply: str = "我去写。", now: float = T0 + 1
+) -> ExpressionResult:
+    backend = service._llm._main  # type: ignore[attr-defined]
+    assert isinstance(backend, _FakeBackend)
+    backend.reply = reply
+    result = await service.run_job(_job())
+    assert result.text
+    return result
+
+
+# ── 1. persist 立即返回（不等第二拍）────────────────────────────────
+@pytest.mark.asyncio
+async def test_persist_returns_immediately_while_second_beat_runs(tmp_path: Path) -> None:
+    """假后端给第二拍 1s 延迟 ⇒ persist 用时 <0.2s，随后能等到任务完成。
+
+    取消测试：把 `_maybe_force_write` 改回同步 `await speaker(...)` ⇒ persist 被拖
+    1s（本用例红）。
+    """
+    backend = _FakeBackend(delay_s=1.0)
+    service, store, workspace = await _service(tmp_path, backend)
+    try:
+        pid = await _pending_promise(store)
+        result = await _pending_result(service)
+
+        started = time.monotonic()
+        await service.persist(result, now=T0 + 1)
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.2, f"persist 在等第二拍：{elapsed:.2f}s（心跳会被拖住）"
+        assert service.forced_write_task is not None, "第二拍没有被投递"
+
+        await service.wait_forced_write()
+        intention = await store.get_intention(pid)
+        assert intention is not None and intention["status"] == "done"
+        written = workspace.read_file("爱莉希雅.md")
+        assert written.strip() == HER_TEXT.strip()
+    finally:
+        await store.close()
+
+
+# ── 2. 后台任务可被 await（文件落盘 + promise done）─────────────────
+@pytest.mark.asyncio
+async def test_background_task_handle_can_be_awaited(tmp_path: Path) -> None:
+    """用可注入的 task 句柄等第二拍（不 sleep 猜）：文件落盘、promise done。"""
+    backend = _FakeBackend(delay_s=0.05)
+    service, store, workspace = await _service(tmp_path, backend)
+    try:
+        pid = await _pending_promise(store)
+        result = await _pending_result(service)
+        await service.persist(result, now=T0 + 1)
+        task = service.forced_write_task
+        assert task is not None
+        await task  # 直接 await 句柄，不 sleep
+        assert task.done()
+        intention = await store.get_intention(pid)
+        assert intention is not None and intention["status"] == "done"
+        assert workspace.read_file("爱莉希雅.md").strip() == HER_TEXT.strip()
+    finally:
+        await store.close()
+
+
+# ── 3. 单飞：连续两次触发只起一个任务 ───────────────────────────────
+@pytest.mark.asyncio
+async def test_single_flight_only_one_second_beat_at_a_time(tmp_path: Path) -> None:
+    """第二拍在跑时又触发一次 ⇒ 跳过（不排队、不堆积）：后端只被调 1 次。
+
+    用 `asyncio.Event` 闸门让"第一拍还在跑"成为确定状态（不靠 sleep 猜时序）。
+
+    取消测试：去掉 `_maybe_force_write` 里"已有任务在跑就跳过"的判据 ⇒ 第二个任务
+    也会跑（`tool_rounds == 2`，本用例红）。
+    """
+    gate = asyncio.Event()
+    backend = _FakeBackend(forced_gate=gate)
+    service, store, _workspace = await _service(tmp_path, backend)
+    try:
+        await _pending_promise(store)
+        await _turn(service, reply="我去写。", now=T0 + 1, wait_forced=False)
+        await backend.forced_started.wait()  # 第一拍确定已经在跑（卡在闸门上）
+        task = service.forced_write_task
+        assert task is not None and not task.done()
+
+        await _turn(service, reply="我去写。", now=T0 + 2, wait_forced=False)
+        assert backend.tool_rounds == 1, "第二拍没有单飞（又起了一个任务）"
+
+        gate.set()
+        await service.wait_forced_write()
+        assert backend.tool_rounds == 1, "第二拍没有单飞（触发了多次）"
+    finally:
+        gate.set()
+        await store.close()
+
+
+# ── 4. 后台任务抛异常 ⇒ 不影响 persist / 后续心跳 ────────────────────
+@pytest.mark.asyncio
+async def test_background_failure_does_not_leak(tmp_path: Path) -> None:
+    """假后端在第二拍抛错 ⇒ persist 正常返回、任务异常被吞、后续 tick 正常。"""
+    backend = _FakeBackend(forced_raises=True)
+    service, store, _workspace = await _service(tmp_path, backend)
+    try:
+        pid = await _pending_promise(store)
+        result = await _pending_result(service)
+        await service.persist(result, now=T0 + 1)  # 不抛
+        task = service.forced_write_task
+        assert task is not None
+        await service.wait_forced_write()
+        assert task.done()
+        assert task.exception() is None, "后台任务异常没有被吞掉"
+
+        intention = await store.get_intention(pid)
+        assert intention is not None and intention["status"] == "pending"
+        assert intention["attempts"] == 1
+
+        # 后续心跳拍照常：再跑一次开口不炸
+        next_result = await service.run_job(_job())
+        assert next_result.text
+        await service.persist(next_result, now=T0 + 30)
+    finally:
+        await store.close()
+
+
+# ── 5. 并发安全：第二拍用独立上下文，不碰作业级字段 ─────────────────
+@pytest.mark.asyncio
+async def test_second_beat_context_does_not_touch_job_state(tmp_path: Path) -> None:
+    """两条不同 pending 承诺先后成文 ⇒ 各自写对、互不覆盖，作业级字段不被污染。
+
+    取消测试：把 `_forced_write_note` 改回用 `self._job_write_note_ok` /
+    `self._job_written_path` 记录 ⇒ 本用例对"作业级字段仍为 False/None"的断言红。
+    """
+    backend = _FakeBackend(
+        forced_writes=[("A 的正文：早上那篇", "a.md"), ("B 的正文：刚才那篇", "b.md")]
+    )
+    service, store, workspace = await _service(tmp_path, backend)
+    try:
+        older = await store.add_intention(
+            T0 - 200, goal="早上说要写的那篇", action="write_note", target=None, kind="promise"
+        )
+        newer = await _pending_promise(store, goal="刚才说要写的那篇")
+
+        await _turn(service, reply="我去写。", now=T0 + 1)  # 先补旧的
+        await _turn(service, reply="我去写。", now=T0 + 2)  # 再补新的
+
+        assert backend.tool_rounds == 2
+        older_row = await store.get_intention(int(older))
+        newer_row = await store.get_intention(int(newer))
+        assert older_row is not None and older_row["status"] == "done"
+        assert newer_row is not None and newer_row["status"] == "done"
+        assert workspace.read_file("a.md").strip() == "A 的正文：早上那篇"
+        assert workspace.read_file("b.md").strip() == "B 的正文：刚才那篇"
+        # 第二拍绝不写作业级状态（它属于心跳拍上的"这一次开口"）
+        assert service._job_write_note_ok is False
+        assert service._job_written_path is None
+    finally:
+        await store.close()

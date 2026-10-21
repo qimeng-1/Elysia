@@ -60,6 +60,11 @@ T-021（承诺第二拍）：一次开口落库后（`settle_after_reply` 之后
 `write_note` 一个工具并用 `tool_choice` 强制它，正文由她在工具参数里自己写。
 成文 ⇒ promise 标 `done` + `已成文：<path>`；没成 ⇒ `attempts+1`、10 分钟冷却、
 下一轮再试（不代写、不打扰她、不设次数配额）。
+
+T-021b（2026-10-22）：那次 LLM 调用**不再同步跑在心跳拍里**——`persist` 只做判定 +
+`create_task` 投递（后台单飞：同一时刻最多一个第二拍在跑，已有一个就跳过本次）；
+任务自带 try/except 与独立上下文（不碰作业级 `_job_*` 字段），心跳拍因此永不等
+DeepSeek（正常 2–10s、上限 30s）。
 """
 
 from __future__ import annotations
@@ -71,7 +76,7 @@ import logging
 import math
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from elysia.core.state_store import HeartbeatStore
@@ -240,6 +245,20 @@ FORCED_WRITE_TOOL_CHOICE: dict[str, Any] = {
 # D-15 第二层（尽力而为）：强制写作轮尝试受约束输出（JSON 对象）。
 # 后端不支持会回 400 ⇒ deepseek 自动去掉它重试并在本进程内熔断——绝不搞坏正常开口。
 FORCED_WRITE_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+
+
+@dataclass
+class _ForcedWriteContext:
+    """T-021b：第二拍自己的小上下文（**绝不复用**作业级 `_job_*` 字段）。
+
+    第二拍跑在后台任务里，而心跳拍可能同时在处理下一个作业；作业级字段属于
+    "这一次开口"，第二拍是另一件事——成文与否、写进哪个文件都记在这里，
+    任务结束即丢弃，因此并发不会串台。
+    """
+
+    ok: bool = False
+    path: str | None = None
+    evidence: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -465,6 +484,8 @@ class ExpressionService:
         self._job_write_note_ok = False
         # T-021：本回合 write_note 写进她文件夹的相对路径（第二拍成文留痕用）
         self._job_written_path: str | None = None
+        # T-021b：第二拍的后台任务句柄（单飞：同一时刻最多一个在跑；persist 从不等它）
+        self._forced_write_task: asyncio.Task[None] | None = None
         # T-014（O1）：工具调用留痕——LLM 后端每次工具调用后把结构化记录交回来，
         # 这里落 thought_log kind='tool'（失败只记日志，绝不影响表达链路）。
         set_observer = getattr(llm_chain, "set_tool_observer", None)
@@ -914,73 +935,137 @@ class ExpressionService:
         )
         return result
 
-    # ── T-021：承诺第二拍（答应了的事当场写完）────────────────────────
+    # ── T-021 / T-021b：承诺第二拍（答应了的事当场写完，后台单飞）──────────
 
-    def _make_forced_write_runner(self) -> Callable[[str, dict[str, Any]], Awaitable[str]]:
-        """第二拍的工具执行器：**只**允许 `write_note`（其余一律回"没有这个能力"）。
+    @property
+    def forced_write_task(self) -> asyncio.Task[None] | None:
+        """当前在跑的第二拍后台任务（None = 没有）。测试/关停时可 await。"""
+        return self._forced_write_task
 
-        它与常规开口的十三个工具**不是同一套**：第二拍不给她别的选择，
-        只把"写下来"这一个动作递到手上；`text` 来自她那一次 LLM 调用的工具参数，
-        程序绝不填、绝不改。
+    async def wait_forced_write(self) -> None:
+        """等当前第二拍跑完（没有任务立即返回；测试/优雅关停用，别用 sleep 猜）。"""
+        task = self._forced_write_task
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _make_forced_write_runner(
+        self, context: _ForcedWriteContext
+    ) -> Callable[[str, dict[str, Any]], Awaitable[str]]:
+        """第二拍的工具执行器：**只**允许 `write_note`，结果写进**它自己的上下文**。
+
+        它与常规开口的十三个工具不是同一套；`text` 来自她那一次 LLM 调用的工具参数，
+        程序绝不填、绝不改。成文与否记在 `context` 里（**不碰**作业级 `_job_*` 字段）：
+        第二拍跑在后台任务里，心跳拍可能同时在处理下一个作业，串台会把
+        "这一回合她写了没"弄脏。
         """
 
         async def _run(name: str, args: dict[str, Any]) -> str:
             if name != "write_note":
                 return f"（没有名为 {name} 的能力）"
             raw_path = args.get("path") or args.get("filename")
-            return await self._tool_write_note(
+            return await self._forced_write_note(
+                context,
                 str(args.get("text") or ""),
                 str(raw_path) if raw_path else None,
             )
 
         return _run
 
+    async def _forced_write_note(
+        self, context: _ForcedWriteContext, text: str, path: str | None
+    ) -> str:
+        """第二拍写盘（上下文自洽）：成功只记 `context`，不碰 `_job_write_note_ok`。"""
+        try:
+            receipt = await asyncio.to_thread(self._writing.write_note, text, path)
+        except WritingError as exc:
+            return f"（write_note 写不了：{exc}）"
+        context.ok = True
+        context.path = _written_path_from_receipt(receipt) or (str(path).strip() if path else "")
+        if str(text or "").strip():
+            context.evidence.append(str(text))
+        return receipt
+
     async def _maybe_force_write(self, text: str, now: float, *, wrote: bool) -> None:
-        """T-021：有 pending 承诺、本回合没写、她也没说不写 ⇒ 补一次强制写作轮。
+        """T-021b：判定 + **投递**（不 await LLM）——第二拍跑在后台任务里。
 
         判据（一句话）：**有她答应过而还没兑现的写作承诺、这一回合她没写、她也没
         明确拒绝**（`wrote` 与 `is_abandonment` 都在进门处挡掉），且该承诺不在此前
         10 分钟冷却里（`next_forced_write_promise` 用 `attempts`/`last_attempt_ts` 判）。
 
-        成功 ⇒ promise `done`（`outcome='她自己写的'`）+ 留痕 `已成文：<path>`；
-        失败/空正文/网络错 ⇒ 不标 done、不打扰她（不写 thought_log、不抛异常），
-        只 `attempts += 1`、`last_attempt_ts = now`、warning 一次，下一轮再试。
-        **绝不代写正文**：写入的 text 只可能来自她那一次 LLM 调用。
+        **单飞**：同一时刻最多一个第二拍在跑；已有一个就跳过本次（不排队堆积）。
+        心跳拍因此**永不等 LLM**（真机 DeepSeek 正常 2–10s、上限 30s）。
         """
         if wrote or is_abandonment(text):
             return
         speaker = getattr(self._llm, "speak_forced_tool", None)
         if not callable(speaker):
             return
+        if self._forced_write_task is not None and not self._forced_write_task.done():
+            return
         promise = await next_forced_write_promise(self._store, now)
         if promise is None:
             return
+        task = asyncio.get_running_loop().create_task(self._run_forced_write(promise, now, speaker))
+        self._forced_write_task = task
+        task.add_done_callback(self._on_forced_write_done)
+
+    def _on_forced_write_done(self, task: asyncio.Task[None]) -> None:
+        """任务结束时复位单飞标志；异常已由任务内吞掉（这里只兜底记日志）。"""
+        if self._forced_write_task is task:
+            self._forced_write_task = None
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:  # 理论上到不了（任务内已 try/except），兜底不上抛
+            log.warning("承诺第二拍后台任务异常（已吞掉）：%s", error)
+
+    async def _run_forced_write(
+        self,
+        promise: dict[str, Any],
+        now: float,
+        speaker: Callable[..., Awaitable[str | None]],
+    ) -> None:
+        """后台第二拍：强制 write_note 轮；任何失败都吞掉，绝不影响心跳。
+
+        成功 ⇒ promise `done`（`outcome='她自己写的'`）+ 留痕 `已成文：<path>`；
+        失败/空正文/网络错 ⇒ 不标 done、不打扰她，只 `attempts += 1`、
+        `last_attempt_ts = now`、warning 一次，下一轮再试。
+        **绝不代写正文**：写入的 text 只可能来自她那一次 LLM 调用。
+        """
         promise_id = int(promise["id"])
         goal = str(promise.get("goal") or "")
-        instruction: dict[str, Any] = {
-            IDENTITY_FIELD: await self._identity_lines(),
-            "directive": forced_write_prompt(goal),
-        }
+        context = _ForcedWriteContext()
         try:
+            instruction: dict[str, Any] = {
+                IDENTITY_FIELD: await self._identity_lines(),
+                "directive": forced_write_prompt(goal),
+            }
             await speaker(
                 instruction,
                 tool=WRITE_NOTE_TOOL,
                 tool_choice=FORCED_WRITE_TOOL_CHOICE,
-                run_tool=self._make_forced_write_runner(),
+                run_tool=self._make_forced_write_runner(context),
                 # D-15 第二层：尽力约束工具参数结构；后端不支持会自动退化
                 response_format=FORCED_WRITE_RESPONSE_FORMAT,
             )
         except Exception:
-            log.warning("承诺第二拍的 LLM 调用失败（不影响落库）", exc_info=True)
-        if self._job_write_note_ok:
-            await self._store.finish_intention(promise_id, now, "done", "她自己写的")
-            await self._store.think(now, "promise", formed_log_text(self._job_written_path or ""))
-            return
-        await self._store.record_intention_attempt(promise_id, now, "第二拍未成文")
-        log.warning("承诺第二拍未成文 promise_id=%s goal=%r", promise_id, goal)
+            log.warning("承诺第二拍的 LLM 调用失败（不影响心跳）", exc_info=True)
+        try:
+            if context.ok:
+                await self._store.finish_intention(promise_id, now, "done", "她自己写的")
+                await self._store.think(now, "promise", formed_log_text(context.path or ""))
+            else:
+                await self._store.record_intention_attempt(promise_id, now, "第二拍未成文")
+                log.warning("承诺第二拍未成文 promise_id=%s goal=%r", promise_id, goal)
+        except Exception:
+            log.warning("承诺第二拍落库失败（不影响心跳）", exc_info=True)
 
     async def persist(self, result: ExpressionResult, now: float) -> None:
         """把一次开口落库（**由心跳拍调用**，D2：worker 零落库）。
+
+        T-021b：第二拍（承诺补写）只在这里**判定 + 投递后台任务**，绝不 await LLM——
+        心跳拍不会被一次写作拖住；单飞保证同一时刻最多一个第二拍在跑。
 
         `now` 取**落库拍**的时刻：它是唯一的写入时间轴，「她说了什么」与
         「用户说了什么」因此在同一拍内相邻、顺序确定、一处可查。

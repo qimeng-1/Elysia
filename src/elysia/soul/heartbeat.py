@@ -395,6 +395,9 @@ class SoulHeartbeat:
                 # （面向时间体验）——将来若其中一个语义变了，另一个不会静默跟着坏。
                 self._timesense.state.last_seen_ts = now
                 await self._state_store.save_json("timesense", to_payload(self._timesense.state))
+                # T-019：心情外化（层 1：只读快照，零行为改变）。
+                # 只给桌宠"慢半拍地同步表情"用——不参与她的欲望/开口/记忆。
+                await self._write_her_mood(now, brain_output, mode=mode, summary=summary)
 
                 # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──
                 # 此前 create() 全仓 0 调用者 ⇒ 回滚这条路是断的（文档却写"已落地"）。
@@ -696,6 +699,41 @@ class SoulHeartbeat:
             )
         except Exception:
             self._stage_failed("E:write_expression_audio")
+
+    async def _write_her_mood(
+        self,
+        now: float,
+        output: BrainOutput | None,
+        *,
+        mode: Mode,
+        summary: dict[str, Any],
+    ) -> None:
+        """T-019：把心情快照写进 `kv['her_mood']`（**只读外化，零行为改变**）。
+
+        桌宠只拿它做"变换级微动"（位移/缩放/微小倾斜），慢半拍同步；
+        不因为写快照而影响开口/欲望/记忆——这里不调用任何决策路径。
+        """
+        if output is None:
+            return
+        try:
+            await self._state_store.save_json(
+                "her_mood",
+                {
+                    "ts": float(now),
+                    "feelings": dict(output.feelings.to_dict()),
+                    "will": {
+                        "direction": str(output.will.direction),
+                        "strength": round(float(output.will.strength), 3),
+                        "thought_style": round(float(output.will.thought_style), 3),
+                        "anim_bias": round(float(output.will.anim_bias), 3),
+                    },
+                    "desire": dict(output.desire.to_dict()),
+                    "mode": mode.value,
+                    "day_phase": str(summary.get("day_phase", "day")),
+                },
+            )
+        except Exception:
+            self._stage_failed("C:write_her_mood")
 
     async def _feel_memories(self, output: BrainOutput) -> None:
         """P3-O 记忆的感受路径：被"心境共鸣"唤起 → 只推心情，不进入她的话。

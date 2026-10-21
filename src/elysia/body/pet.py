@@ -173,6 +173,95 @@ EMOTION_PARAMS = {
 
 POKE_STRENGTH = 0.09
 
+# ── T-019：心情外化（层 1）——纯函数、慢半拍、只做变换级微动 ─────────
+# 桌宠**不是她的身体**（她看不见它），只是给用户的视觉形象。
+# 这里只把 `kv['her_mood']` 映射成渲染参数；不改变素材、不新增帧、不抢在她情绪前面。
+MOOD_POSE_DEFAULTS: dict[str, float] = {
+    "lean": 0.0,  # 身体倾斜（度）
+    "gaze_x": 0.0,  # 视线/身体水平偏移（px，变换级）
+    "gaze_y": 0.0,  # 视线/身体垂直偏移（px）
+    "breath_amp": 1.0,  # 呼吸幅度倍率
+    "blink_hz": 1.0,  # 眨眼频率（当前无眼部素材，保留给以后）
+    "sway": 1.0,  # 摇摆幅度倍率
+    "scale": 1.0,  # 整体缩放倍率
+}
+# 每秒最多变化多少（限速：宁可慢半拍，绝不许抢在她情绪前面）
+MOOD_POSE_RATES: dict[str, float] = {
+    "lean": 12.0,
+    "gaze_x": 30.0,
+    "gaze_y": 24.0,
+    "breath_amp": 0.5,
+    "blink_hz": 1.0,
+    "sway": 2.0,
+    "scale": 0.15,
+}
+
+
+def _approach(prev: float, target: float, max_step: float) -> float:
+    delta = float(target) - float(prev)
+    if delta > max_step:
+        return float(prev) + max_step
+    if delta < -max_step:
+        return float(prev) - max_step
+    return float(target)
+
+
+def mood_to_pose(
+    mood: dict[str, Any],
+    prev_pose: dict[str, float] | None,
+    dt: float,
+) -> dict[str, float]:
+    """T-019：心情快照 → 渲染参数（**纯函数**，带惯性 + 限速）。
+
+    映射（尽量朴素、可解释）：
+    - miss 高 ⇒ 朝用户方向倾一点/靠近；
+    - rest 高 ⇒ 低头、呼吸变慢变浅、眨眼变少；
+    - explore / curiosity 高 ⇒ 左右看、摇摆大一点；
+    - chat 高 ⇒ 前倾；
+    - sa 低（难受）⇒ 缩一点、眨眼变少。
+    每拍每个参数的变化 ≤ `MOOD_POSE_RATES[key] * dt`；`prev_pose` 参与（惯性）。
+    """
+    raw_feelings = mood.get("feelings")
+    feelings = raw_feelings if isinstance(raw_feelings, dict) else {}
+    raw_desire = mood.get("desire")
+    desire = raw_desire if isinstance(raw_desire, dict) else {}
+
+    def _f(name: str, default: float = 0.0) -> float:
+        value = feelings.get(name)
+        return float(value) if isinstance(value, (int, float)) else default
+
+    chat = _f("chat", 0.5)
+    miss = _f("miss", 0.2)
+    explore = _f("explore", 0.45)
+    curiosity = _f("curiosity", 0.0)
+    rest = _f("rest", 0.05)
+    sa = float(desire.get("sa", 20.0)) if isinstance(desire.get("sa"), (int, float)) else 20.0
+    sad = max(0.0, min(1.0, (60.0 - sa) / 60.0))  # sa 低 = 难受程度
+
+    target = {
+        "lean": 10.0 * max(0.0, chat - 0.5) + 6.0 * max(0.0, miss - 0.3) - 8.0 * rest,
+        "gaze_x": 6.0 * max(-1.0, min(1.0, (curiosity - 0.3) * 2.0)),
+        "gaze_y": 8.0 * rest + 3.0 * max(0.0, miss - 0.3) - 2.0 * curiosity,
+        "breath_amp": 1.0 + 0.35 * rest - 0.25 * sad,
+        "blink_hz": 0.8 + 0.6 * (1.0 - rest) - 0.3 * sad,
+        "sway": 1.0 + 1.2 * max(0.0, explore - 0.45) + 0.4 * max(0.0, curiosity - 0.3),
+        "scale": 1.0 - 0.06 * sad,
+    }
+    # 尽量落在温和区间（素材观感不被拉爆）
+    target["breath_amp"] = max(0.5, min(1.6, target["breath_amp"]))
+    target["blink_hz"] = max(0.2, min(2.0, target["blink_hz"]))
+    target["sway"] = max(0.5, min(2.5, target["sway"]))
+    target["scale"] = max(0.9, min(1.05, target["scale"]))
+
+    step_dt = max(0.0, min(float(dt), 5.0))
+    base = prev_pose if isinstance(prev_pose, dict) else MOOD_POSE_DEFAULTS
+    pose: dict[str, float] = {}
+    for key, default in MOOD_POSE_DEFAULTS.items():
+        prev = float(base.get(key, default))
+        rate = MOOD_POSE_RATES[key] * (step_dt if step_dt > 0 else 1.0)
+        pose[key] = round(_approach(prev, target.get(key, default), rate), 4)
+    return pose
+
 
 class _CharacterWidget(QWidget):
     """连续物理动画角色：呼吸缩放 + 左右摇摆 + 上下浮动 + 点击弹跳。
@@ -218,6 +307,8 @@ class _CharacterWidget(QWidget):
         self._drag_phase = 0.0
         # 朝向：+1 朝右（素材原本方向）、-1 朝左（水平镜像）
         self._facing = 1
+        # T-019：心情外化的渲染参数（由 PetWindow 用 mood_to_pose 缓慢喂入）
+        self._pose: dict[str, float] = dict(MOOD_POSE_DEFAULTS)
 
         # fallback 状态变量
         self._beat_phase = 0.0
@@ -242,6 +333,15 @@ class _CharacterWidget(QWidget):
     def set_facing(self, facing: int) -> None:
         """设置朝向（+1 朝右 / -1 朝左）。只影响绘制，不需要额外素材。"""
         self._facing = -1 if facing < 0 else 1
+        self.update()
+
+    def set_pose(self, pose: dict[str, float]) -> None:
+        """T-019：设置心情渲染参数（只做变换级微动：位移/缩放/微小倾斜）。"""
+        if not isinstance(pose, dict):
+            return
+        for key in MOOD_POSE_DEFAULTS:
+            if key in pose and isinstance(pose[key], (int, float)):
+                self._pose[key] = float(pose[key])
         self.update()
 
     def set_emotion(self, key: str) -> None:
@@ -409,6 +509,13 @@ class _CharacterWidget(QWidget):
             float_y += DRAG_FLOAT_AMP_PX * drag_g * math.sin(self._drag_phase)
             rot += DRAG_SWAY_DEG * drag_g * math.sin(self._drag_phase * 0.63)
 
+        # T-019：心情外化——只在变换级叠加微动（不改素材、不新增帧）。
+        pose = self._pose
+        lean = float(pose.get("lean", 0.0))
+        gaze_x = float(pose.get("gaze_x", 0.0))
+        gaze_y = float(pose.get("gaze_y", 0.0))
+        scale *= max(0.9, min(1.1, float(pose.get("scale", 1.0))))
+
         frame, prev, alpha = (
             self._player.current_blend() if self._player is not None else (None, None, 1.0)
         )
@@ -418,8 +525,8 @@ class _CharacterWidget(QWidget):
         pw, ph = pixmap.width(), pixmap.height()
 
         t = QTransform()
-        t.translate(cw / 2, ch / 2 + float_y)
-        t.rotate(rot)
+        t.translate(cw / 2 + gaze_x, ch / 2 + float_y + gaze_y)
+        t.rotate(rot + lean)
         # `_facing` 为 -1 时水平镜像（漫游向左时用）——她只有朝右的素材，靠镜像出朝左
         t.scale(scale * self._facing, scale)
         t.translate(-pw / 2, -ph / 2)
@@ -565,6 +672,9 @@ class PetWindow(QMainWindow):
         # T-018：出声归属——只播 `kv['expression_audio']` 里**她这一句**的 wav，
         # 不再按 mtime 猜"最新缓存文件"。同一条 ts 只播一次。
         self._last_played_audio_ts = 0.0
+        # T-019：心情外化——渲染参数惯性（慢半拍）
+        self._mood_pose: dict[str, float] | None = None
+        self._last_mood_pose_ts = 0.0
 
         # ── 定时器 ──
         self._timer = QTimer(self)
@@ -833,6 +943,9 @@ class PetWindow(QMainWindow):
                 desire=payload.get("desire"),
             )
 
+            # T-019：心情外化（只读 kv；慢半拍、限速、变换级微动）
+            self._apply_mood_pose()
+
             # 读取最新念头（P2 表达气泡随 _latest_thought 更新）
             self._latest_thought()
 
@@ -841,6 +954,21 @@ class PetWindow(QMainWindow):
                 self._bubble.hide()
         except Exception:
             pass
+
+    def _apply_mood_pose(self) -> None:
+        """T-019：读 `kv['her_mood']` → 缓慢同步渲染参数（**只读，不写任何 kv**）。
+
+        红线：桌宠永远不许写进她的耳朵（`kv['interaction']`）——这里是只读路径，
+        不调用 `_write_interaction`。
+        """
+        mood = self._read_state_kv("her_mood")
+        if not isinstance(mood, dict):
+            return
+        now = time.time()
+        dt = now - self._last_mood_pose_ts if self._last_mood_pose_ts > 0 else 1.0
+        self._last_mood_pose_ts = now
+        self._mood_pose = mood_to_pose(mood, self._mood_pose, dt)
+        self._canvas.set_pose(self._mood_pose)
 
     def _wander_clip(self) -> str:
         """这套服装里用哪个片段漫游（`run` 优先，其次 Spine 烘焙的 `walk`）。"""

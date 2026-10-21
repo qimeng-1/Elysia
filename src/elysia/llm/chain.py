@@ -71,11 +71,15 @@ class ToolCapableBackend(Protocol):
         tools: list[dict[str, Any]],
         run_tool: ToolRunner,
         tool_choice: dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str | None:
         """跑完工具回合后返回自然语言；失败/超轮数 → None（触发降级）。
 
         `tool_choice`（T-021：承诺第二拍）：非 None 时要求后端**强制**模型调用
         指定工具（只作用于第一轮；工具回执回来后允许她正常说话）。
+
+        `response_format`（D-15 第二层：受约束输出）：非 None 时尝试让后端约束
+        输出结构；不支持的后端应**优雅退化**（去掉它重试/忽略），绝不因此失败。
         """
         ...
 
@@ -482,6 +486,7 @@ class LLMChain:
         tool: dict[str, Any],
         tool_choice: dict[str, Any],
         run_tool: ToolRunner,
+        response_format: dict[str, Any] | None = None,
     ) -> str | None:
         """T-021：**强制工具轮**——只递一个工具，且 `tool_choice` 指定它。
 
@@ -489,6 +494,9 @@ class LLMChain:
         正文是她在工具参数里自己写的——程序绝不代写）。工具回执之后沿用
         `complete_with_tools` 的多轮能力（总轮数上限仍是 `MAX_TOOL_ROUNDS`）。
         主声不具备工具能力（次声/测试替身）⇒ 返回 None，调用方按"没写成"处理。
+
+        D-15 第二层：`response_format` 可选——后端支持就约束输出结构，不支持就
+        优雅退化（后端负责去掉重试/熔断），绝不影响正常开口。
         """
         main = self._main
         if main is None or not isinstance(main, ToolCapableBackend):
@@ -499,6 +507,7 @@ class LLMChain:
             tools=[tool],
             run_tool=run_tool,
             tool_choice=tool_choice,
+            response_format=response_format,
         )
 
     async def speak(self, instruction: dict[str, Any]) -> SpeakResult:

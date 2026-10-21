@@ -62,6 +62,7 @@ class _FakeBackend:
         self.tool_rounds = 0
         self.seen_tools: list[list[dict[str, Any]]] = []
         self.seen_tool_choice: list[dict[str, Any] | None] = []
+        self.seen_response_format: list[dict[str, Any] | None] = []
         self.seen_instructions: list[dict[str, Any]] = []
 
     async def complete(self, instruction: dict[str, Any], prompt_template: dict[str, Any]) -> str:
@@ -76,10 +77,12 @@ class _FakeBackend:
         tools: list[dict[str, Any]],
         run_tool: Any,
         tool_choice: dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str | None:
         self.tool_rounds += 1
         self.seen_tools.append(tools)
         self.seen_tool_choice.append(tool_choice)
+        self.seen_response_format.append(response_format)
         self.seen_instructions.append(instruction)
         if self.forced_raises:
             raise RuntimeError("第二拍网络层炸了")
@@ -182,6 +185,9 @@ async def test_second_beat_forces_write_note_and_fulfills_promise(tmp_path: Path
             "function": {"name": "write_note"},
         }, "第二拍必须强制指定 write_note"
         assert backend.seen_instructions[0].get("directive"), "第二拍没有给她那一句指令"
+        assert backend.seen_response_format[0] == {"type": "json_object"}, (
+            "第二拍应尝试受约束输出（D-15；后端不支持会自动退化）"
+        )
 
         intention = await store.get_intention(pid)
         assert intention is not None and intention["status"] == "done"

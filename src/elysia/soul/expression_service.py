@@ -237,6 +237,10 @@ FORCED_WRITE_TOOL_CHOICE: dict[str, Any] = {
     "function": {"name": "write_note"},
 }
 
+# D-15 第二层（尽力而为）：强制写作轮尝试受约束输出（JSON 对象）。
+# 后端不支持会回 400 ⇒ deepseek 自动去掉它重试并在本进程内熔断——绝不搞坏正常开口。
+FORCED_WRITE_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+
 
 @dataclass
 class DegradedValidation(ValidationResult):
@@ -963,6 +967,8 @@ class ExpressionService:
                 tool=WRITE_NOTE_TOOL,
                 tool_choice=FORCED_WRITE_TOOL_CHOICE,
                 run_tool=self._make_forced_write_runner(),
+                # D-15 第二层：尽力约束工具参数结构；后端不支持会自动退化
+                response_format=FORCED_WRITE_RESPONSE_FORMAT,
             )
         except Exception:
             log.warning("承诺第二拍的 LLM 调用失败（不影响落库）", exc_info=True)

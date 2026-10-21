@@ -38,8 +38,22 @@ from urllib import request
 
 from elysia.llm.chain import LLMBackend, ToolRunner
 from elysia.llm.identity import IDENTITY_FIELD, compose_identity, identity_lines
+from elysia.soul.tools.schema import invalid_args_receipt, validate_tool_args
 
 log = logging.getLogger("elysia.llm.deepseek")
+
+# D-15 第二层（受约束输出）进程级熔断：后端一旦对 response_format 回 400，
+# 本进程内不再尝试——"想用高级特性"绝不能把她正常的开口搞坏。
+_RESPONSE_FORMAT_DISABLED = False
+
+
+def _disable_response_format() -> bool:
+    """熔断 response_format；返回是否**首次**熔断（用来只警告一次）。"""
+    global _RESPONSE_FORMAT_DISABLED
+    first = not _RESPONSE_FORMAT_DISABLED
+    _RESPONSE_FORMAT_DISABLED = True
+    return first
+
 
 # 工具调用留痕回调（O1）：每次工具调用把一条结构化记录交出去（落 thought_log）。
 # 返回 Awaitable 时会被 await；回调失败绝不影响表达链路。
@@ -350,6 +364,7 @@ class DeepSeekBackend(LLMBackend):
         tools: list[dict[str, Any]],
         run_tool: ToolRunner,
         tool_choice: dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str | None:
         """允许她自己调用工具：单轮 → 若她要调用则执行后追问一轮。
 
@@ -358,6 +373,10 @@ class DeepSeekBackend(LLMBackend):
         T-021（承诺第二拍）：`tool_choice` 非 None ⇒ **第一轮**把 `tool_choice`
         原样发出去，强制模型调用指定工具；工具回执回来后（后续轮）恢复自由，
         让她能正常说话收尾。总轮数上限仍是 `MAX_TOOL_ROUNDS`。
+
+        D-15（受约束输出，尽力而为）：`response_format` 非 None ⇒ 只加到**第一轮**
+        的 payload；后端回 400 不支持 ⇒ 自动去掉它重试一次、只警告一次，并熔断到
+        本进程结束（`_RESPONSE_FORMAT_DISABLED`）——绝不因为高级特性搞坏正常开口。
         """
         if self._unavailable():
             return None
@@ -365,13 +384,21 @@ class DeepSeekBackend(LLMBackend):
         messages = self._messages(instruction)
         retried_truncation = False
         choice_for_round = tool_choice
+        format_for_round = response_format
+        if format_for_round is not None and _RESPONSE_FORMAT_DISABLED:
+            format_for_round = None
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 round_choice = choice_for_round
-                # 强制只作用于**第一轮**：工具回执回来后允许她说话/收尾
+                round_format = format_for_round
+                # 强制工具/受约束输出都只作用于**第一轮**：工具回执回来后允许她说话/收尾
                 choice_for_round = None
-                data = await asyncio.to_thread(
-                    self._post, self._payload(messages, tools=tools, tool_choice=round_choice)
+                format_for_round = None
+                data = await self._post_tool_payload(
+                    messages,
+                    tools=tools,
+                    tool_choice=round_choice,
+                    response_format=round_format,
                 )
                 finish_reason = _finish_reason(data)
                 message = _first_message(data)
@@ -385,25 +412,41 @@ class DeepSeekBackend(LLMBackend):
                 ):
                     retried_truncation = True
                     log.warning("工具回合参数被截断（finish_reason=length）⇒ 更大预算重试一次")
-                    data = await asyncio.to_thread(
-                        self._post,
-                        self._payload(
-                            messages,
-                            tools=tools,
-                            max_tokens=TOOL_RETRY_MAX_TOKENS,
-                            tool_choice=round_choice,
-                        ),
+                    data = await self._post_tool_payload(
+                        messages,
+                        tools=tools,
+                        tool_choice=round_choice,
+                        response_format=round_format,
+                        max_tokens=TOOL_RETRY_MAX_TOKENS,
                     )
                     finish_reason = _finish_reason(data)
                     message = _first_message(data)
                     calls = message.get("tool_calls")
                 if not isinstance(calls, list) or not calls:
-                    text = _content_or_none(data)
-                    if text is None:
-                        self._fail("响应正文为空")
-                    else:
-                        self._last_error = None
-                    return text
+                    # D-15 第二层兜底：受约束输出可能让模型"不敢"调工具（200 但没 tool_calls）。
+                    # 只在这种"强制轮 + 带了 response_format"的场合去掉它再给一次机会，并熔断。
+                    if round_format is not None and round_choice is not None:
+                        if _disable_response_format():
+                            log.warning(
+                                "强制轮没有产出工具调用（疑似 response_format 干扰）"
+                                "⇒ 去掉该参数重试一次，本进程内不再尝试"
+                            )
+                        data = await self._post_tool_payload(
+                            messages,
+                            tools=tools,
+                            tool_choice=round_choice,
+                            response_format=None,
+                        )
+                        finish_reason = _finish_reason(data)
+                        message = _first_message(data)
+                        calls = message.get("tool_calls")
+                    if not isinstance(calls, list) or not calls:
+                        text = _content_or_none(data)
+                        if text is None:
+                            self._fail("响应正文为空")
+                        else:
+                            self._last_error = None
+                        return text
                 messages.append(
                     {
                         "role": "assistant",
@@ -446,6 +489,40 @@ class DeepSeekBackend(LLMBackend):
         log.warning("DeepSeek 工具回合超出上限（%d）且说话轮无正文，放弃本轮", MAX_TOOL_ROUNDS)
         return None
 
+    async def _post_tool_payload(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        tool_choice: dict[str, Any] | None,
+        response_format: dict[str, Any] | None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """发一轮工具请求；带 `response_format` 且后端 400 ⇒ 去掉它重试一次。
+
+        D-15 第二层：受约束输出是**尽力而为**——不支持就优雅退化（并熔断到进程结束），
+        绝不让"想用高级特性"把她正常的开口搞坏。
+        """
+        payload = self._payload(
+            messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            tool_choice=tool_choice,
+            response_format=response_format,
+        )
+        try:
+            return await asyncio.to_thread(self._post, payload)
+        except urlerror.HTTPError as exc:
+            if response_format is None or exc.code != 400:
+                raise
+            if _disable_response_format():
+                log.warning("后端不支持 response_format（HTTP 400）⇒ 本进程内不再尝试")
+            # 重试请求**新建** payload（不原地删字段：上一份 payload 可能已被留痕/测试持有）
+            fallback_payload = {
+                key: value for key, value in payload.items() if key != "response_format"
+            }
+            return await asyncio.to_thread(self._post, fallback_payload)
+
     async def _notify_tool(
         self,
         call: dict[str, Any],
@@ -453,15 +530,21 @@ class DeepSeekBackend(LLMBackend):
         receipt: str,
         finish_reason: str | None,
         elapsed_ms: float,
+        *,
+        reason: str | None = None,
     ) -> None:
-        """把一次工具调用留痕（O1）交出去；回调失败只记日志，绝不影响表达。"""
+        """把一次工具调用留痕（O1）交出去；回调失败只记日志，绝不影响表达。
+
+        D-15：参数被 schema 挡下时 `ok=False` 且 `reason='schema:<原因>'`——
+        "为什么没执行"必须可查，不能静默。
+        """
         observer = self._tool_observer
         if observer is None:
             return
         fn = call.get("function")
         name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
         raw_args = fn.get("arguments") if isinstance(fn, dict) else None
-        record = {
+        record: dict[str, Any] = {
             "ts": time.time(),
             "tool": name,
             "ok": bool(ok),
@@ -470,6 +553,8 @@ class DeepSeekBackend(LLMBackend):
             "result_head": str(receipt or "")[:60],
             "elapsed_ms": round(float(elapsed_ms), 1),
         }
+        if reason:
+            record["reason"] = reason
         try:
             maybe = observer(record)
             if inspect.isawaitable(maybe):
@@ -487,6 +572,8 @@ class DeepSeekBackend(LLMBackend):
 
         工具本身失败不应毁掉这次开口——返回"没结果"让她照常说话。
         T-014：参数不是合法 JSON（典型：被截断）⇒ **不执行**，回明确回执。
+        D-15：参数结构不合法（缺字段/空白/类型错/路径含 `..`）⇒ **不执行**，
+        回"参数不合法…没有执行，请补全后重试"，留痕 `ok=False, reason='schema:…'`。
         """
         fn = call.get("function")
         name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
@@ -499,6 +586,19 @@ class DeepSeekBackend(LLMBackend):
         if args is None:
             receipt = TRUNCATED_TOOL_RECEIPT
             await self._notify_tool(call, False, receipt, finish_reason, 0.0)
+            return receipt
+        # D-15 第一层：执行前 schema 校验——不合法就**绝不执行**（绝不再当空参数跑）
+        valid, invalid_reason = validate_tool_args(name, args)
+        if not valid:
+            receipt = invalid_args_receipt(str(invalid_reason or "未知原因"))
+            await self._notify_tool(
+                call,
+                False,
+                receipt,
+                finish_reason,
+                0.0,
+                reason=f"schema:{invalid_reason}",
+            )
             return receipt
         try:
             result = await run_tool(name, args)
@@ -535,6 +635,7 @@ class DeepSeekBackend(LLMBackend):
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
         tool_choice: dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # T-014：工具回合用独立预算（8192 = 模型上限、不设人为限制）；
         # 单轮说话仍是 200（她说话的节奏/长度一个字都不改）。
@@ -551,6 +652,9 @@ class DeepSeekBackend(LLMBackend):
         # T-021：强制工具调用（只有"承诺第二拍"会传；常规开口不带这个字段）
         if tools and tool_choice is not None:
             payload["tool_choice"] = tool_choice
+        # D-15 第二层：受约束输出（只有"承诺第二拍"会传；400 ⇒ `_post_tool_payload` 去掉重试）
+        if response_format is not None:
+            payload["response_format"] = response_format
         return payload
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:

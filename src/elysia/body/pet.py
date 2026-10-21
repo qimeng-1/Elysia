@@ -675,6 +675,10 @@ class PetWindow(QMainWindow):
         # T-019：心情外化——渲染参数惯性（慢半拍）
         self._mood_pose: dict[str, float] | None = None
         self._last_mood_pose_ts = 0.0
+        # T-018b：开窗时把"已播到的 ts"对齐到 kv 现状（**只记账、不播放**）。
+        # 否则 `_last_played_audio_ts = 0.0` 会让上一次的旧那句在第一个气泡时被重播；
+        # 若新那句这次没合成成功（kv 仍是旧 ts），还会张冠李戴。
+        self._align_last_played_audio()
 
         # ── 定时器 ──
         self._timer = QTimer(self)
@@ -1217,6 +1221,21 @@ class PetWindow(QMainWindow):
         self._bubble_until = time.time() + BUBBLE_SHOW_S
         if play_audio:
             self._play_her_audio()
+
+    def _align_last_played_audio(self) -> None:
+        """T-018b：开窗时对齐 `_last_played_audio_ts` 到 `kv['expression_audio']` 现状。
+
+        **只记账、不播放**：旧的那句已经播过了；之后只有 ts 变新才播。
+        standalone（不打开数据库）时直接跳过。
+        """
+        if self._standalone:
+            return
+        try:
+            payload = self._read_state_kv("expression_audio")
+            if isinstance(payload, dict):
+                self._last_played_audio_ts = max(0.0, float(payload.get("ts") or 0.0))
+        except Exception:
+            pass
 
     def _play_her_audio(self) -> None:
         """T-018：只播**她这一句**的声音（读 `kv['expression_audio']`，不 glob mtime）。

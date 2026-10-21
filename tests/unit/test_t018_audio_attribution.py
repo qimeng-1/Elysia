@@ -129,6 +129,51 @@ def _seed_state_db(tmp_path: Path, payload: dict) -> tuple[Path, Path]:
     return state_db, hb_db
 
 
+def test_pet_does_not_replay_old_audio_on_open(tmp_path: Path, qapp: QApplication) -> None:
+    """T-018b：开窗时旧的那句只记账、不播放；之后 ts 变新才播。"""
+    import json
+    import sqlite3
+
+    old = tmp_path / "old.wav"
+    new = tmp_path / "new.wav"
+    old.write_bytes(b"OLD")
+    new.write_bytes(b"NEW")
+
+    state_db, hb_db = _seed_state_db(
+        tmp_path,
+        {"ts": T0 + 1, "path": str(old), "text_head": "上一次那句", "voice": True},
+    )
+    pet = PetWindow(state_db, hb_db)
+    played: list[str] = []
+    pet._play_audio_path = lambda p: played.append(p)  # type: ignore[method-assign]
+    try:
+        pet._play_her_audio()
+        assert played == [], "开窗不得重播上一次的旧音频（只记账）"
+        assert pet._last_played_audio_ts == T0 + 1
+
+        # 新的一句落 kv（ts 变新）⇒ 播一次
+        con = sqlite3.connect(state_db)
+        try:
+            con.execute(
+                "UPDATE kv SET value = ? WHERE key = 'expression_audio'",
+                (
+                    json.dumps(
+                        {"ts": T0 + 2, "path": str(new), "text_head": "新的一句", "voice": True},
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+        pet._play_her_audio()
+        assert played == [str(new)]
+        pet._play_her_audio()
+        assert played == [str(new)], "同一条 ts 只播一次"
+    finally:
+        pet.close()
+
+
 def test_pet_plays_the_attributed_file_not_newest(tmp_path: Path, qapp: QApplication) -> None:
     """取消测试：恢复"取 mtime 最新" ⇒ 会播错文件（本例断言播的是 kv 指定文件）。"""
     her = tmp_path / "her.wav"
@@ -147,11 +192,34 @@ def test_pet_plays_the_attributed_file_not_newest(tmp_path: Path, qapp: QApplica
     played: list[str] = []
     pet._play_audio_path = lambda p: played.append(p)  # type: ignore[method-assign]
     try:
+        # T-018b 起开窗不再重播旧句；这里把 kv 换成**新 ts** 模拟"她刚说出的这一句"
+        import json
+        import sqlite3
+
+        con = sqlite3.connect(state_db)
+        try:
+            con.execute(
+                "UPDATE kv SET value = ? WHERE key = 'expression_audio'",
+                (
+                    json.dumps(
+                        {
+                            "ts": T0 + 2,
+                            "path": str(her),
+                            "text_head": "她这一句",
+                            "voice": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
         pet._play_her_audio()
         assert played == [str(her)], "必须播 kv 指定她那句的文件，而不是最新 mtime"
         # 同一条 ts 再调 ⇒ 只播一次
         pet._play_her_audio()
         assert played == [str(her)]
-        assert pet._last_played_audio_ts == T0 + 1
+        assert pet._last_played_audio_ts == T0 + 2
     finally:
         pet.close()

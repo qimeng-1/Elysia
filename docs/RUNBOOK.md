@@ -126,8 +126,9 @@ powershell -ExecutionPolicy Bypass -File scripts\gate.ps1
 | **D-6** | 迁移指纹未做（S5） | "她是谁"还不能被搬运、被验证 |
 | **D-7** | 桥与面板重启靠手工 `Start-ScheduledTask` | 改桥/面板代码后容易忘记重启 |
 | **D-8** | ~~`data/her_writing/` 没被创建~~ **已关闭** | T-014 后她真的写成了；T-016 升级为 `data/her_home/`（完全权限） |
-| **D-9** | **重启会把最后一条 `kv['interaction']` 重放一次** | 根因：`heartbeat.py` 的 `_last_interaction_event_ts` 是内存态，每次启动归零 ⇒ 已答过的话又被当成新消息。实测 20:01 的话在 20:50 与 21:30 各重放一次（她因此多写了两页）。修法：启动时用持久化的 `timesense.last_interaction_ts` 当基线 |
+| **D-9** | ~~重启会把最后一条 `kv['interaction']` 重放一次~~ **已修（T-017，`d99871d`）** | 启动时用持久化的 `timesense.last_interaction_ts` 当基线。真机验证：23:32 重启后未再重放 22:56 那条（对比 20:50/21:30 各重放一次） |
 | **D-10** | ~~桌宠点击被记成"用户发言"~~ **已修 + 已标注** | 修复：`e9e8774`（点击只写 `{kind:'poke'}`）。历史污染：16 条记忆已按她的选择加上"系统记错"标注（`narrative` 前缀，`content` 保真；备份 `data/tmp/click_pollution_backup_*.json`；脚本 `scripts/mark_click_pollution.py`，默认 dry-run）。1 条 `dialogue_turns#763` 只记账不动 |
-| **D-11** | 桌宠不在起停协议里 | 无 pid / 无单实例互斥 / 不被统一重启 ⇒ 改了 `pet.py` 需手动关窗重开。提案见 `docs/specs/PET_LIFECYCLE_SPEC_2026-10-21.md` |
+| **D-11** | 桌宠不在起停协议里 | 无 pid / 无单实例互斥 / 不被统一重启 ⇒ 改了 `pet.py` 需手动关窗重开。提案见 `docs/specs/PET_LIFECYCLE_SPEC_2026-10-21.md`（用户裁定：暂不执行） |
+| **D-12** | **TTS 服务（GPT-SoVITS，127.0.0.1:9880）没人守护** | 2026-10-21 约 22:57 起 `tts_up=False`、`WinError 10061 连接被拒绝`，她所有语音退化成文字（`medium=text reason=voice_failed`）。桌宠"只播她这一句"（T-018）也因为它没音频而无法触发 |
 
 **改历史数据的规矩（D-10 立）**：默认"只标注不清"（ADR-001 原件保真）；必须写成脚本、默认 dry-run、先导备份到 `data/tmp/`、`content` 字段一个字都不动。

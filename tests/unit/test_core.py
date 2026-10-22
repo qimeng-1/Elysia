@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 import structlog
@@ -13,10 +14,15 @@ from elysia.core.log import get_logger, setup_logging
 from elysia.core.supervisor import SupervisorFatal, supervise
 
 
-def test_settings_defaults() -> None:
+def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     from elysia.core.config import PROJECT_ROOT
 
-    settings = Settings()
+    # 真机装好后 `.env`/系统环境里会有 ELYSIA_*（例如 ELYSIA_TTS_LAUNCHER_PATH）——
+    # 这个用例断言的是**默认值**，必须与本机配置无关，否则换台机器就红。
+    for key in list(os.environ):
+        if key.startswith("ELYSIA_"):
+            monkeypatch.delenv(key)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.log_level == "INFO"
     assert settings.heartbeat_interval_s == 1.0
     assert settings.body_heartbeat_interval_s == 5.0

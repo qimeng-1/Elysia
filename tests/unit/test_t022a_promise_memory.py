@@ -289,7 +289,7 @@ async def test_payload_only_has_her_own_unfinished_things(tmp_path: Path) -> Non
 # ── 5. 兜底提醒：24h 或之后开口 ≥2 次；12h 冷却 ─────────────────────
 @pytest.mark.asyncio
 async def test_fallback_reminder_after_24h_and_cooldown(tmp_path: Path) -> None:
-    """>24h ⇒ 出现一次问句；同一承诺 12h 内不再出现（冷却）。"""
+    """>24h ⇒ 出现一次她记忆口吻的提醒；同一承诺 12h 内不再出现（冷却）。"""
     llm = _FakeLLM("嗯。")
     service, store, _workspace = await _service(tmp_path, llm)
     try:
@@ -306,8 +306,11 @@ async def test_fallback_reminder_after_24h_and_cooldown(tmp_path: Path) -> None:
 
         first = (await service.run_job(_job())).instruction
         reminder = first.get("promise_reminder")
-        assert isinstance(reminder, str) and "这件还算数吗？" in reminder
-        assert "不写也跟我说一声" in reminder
+        # T-029：提醒是她自己的记忆口吻，不是问句/催办
+        assert isinstance(reminder, str) and "我想起来" in reminder
+        assert "我说过要写" in reminder and "还没写" in reminder
+        assert "这件还算数吗？" not in reminder
+        assert "不写也跟我说一声" not in reminder
         # 换一个任务（同一承诺）：12h 冷却内不再出现
         second = (await service.run_job(_job())).instruction
         assert "promise_reminder" not in second
@@ -317,7 +320,7 @@ async def test_fallback_reminder_after_24h_and_cooldown(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_fallback_reminder_after_two_openings(tmp_path: Path) -> None:
-    """承诺之后她已开口 ≥2 次仍未动 ⇒ 兜底问句（不等 24h）。"""
+    """承诺之后她已开口 ≥2 次仍未动 ⇒ 兜底提醒（不等 24h，口吻是她的记忆）。"""
     llm = _FakeLLM("嗯。")
     service, store, _workspace = await _service(tmp_path, llm)
     try:
@@ -332,7 +335,8 @@ async def test_fallback_reminder_after_two_openings(tmp_path: Path) -> None:
 
         payload = (await service.run_job(_job())).instruction
         reminder = payload.get("promise_reminder")
-        assert isinstance(reminder, str) and "这件还算数吗？" in reminder
+        assert isinstance(reminder, str) and "我想起来" in reminder
+        assert "这件还算数吗？" not in reminder
     finally:
         await store.close()
 

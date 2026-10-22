@@ -48,9 +48,17 @@ T-022a（用户 2026-10-22 批准：**自觉性改造**——"承诺的事只要
   "还没写"那条 `superseded_by` 指向它（原件保真）；
 - 正常回合不再出现 `pending_promises` / `pending_promises_hint`，改由
   `unfinished_things` 只放她自己的记忆原句；只有承诺 >24h 或她在这之后已开口 ≥2 次
-  仍未动时，才兜底出现一次问句（同一条 12h 最多一次）；
+  仍未动时，才兜底出现一次**她自己的记忆**（同一条 12h 最多一次）；
 - 强制轮**大量收窄**：只在她这一轮明确说了"马上/这就/今晚就写"这类即时意图时才强制，
   冷却从 10 分钟提到 2 小时；其余交给记忆与下一次开口。
+
+T-029（用户裁定 2026-10-22 21:4x）：兜底提醒的**口吻**改掉——不是催办，是她自己的记忆。
+真机 20:48 证据：旧提醒「你答应过的事还没做：…。这件还算数吗？不写也跟我说一声。」
+进了 payload，她答「在写了，真的在写」「写完就给你看」，而 `data/her_home/` 无新文件、
+无 `write_note` 痕迹——旧文案把"该她交代"摆到了她面前。现在
+`promise_reminder_question` 只说「我想起来：我说过要写「…」，还没写。」：**没有问句、
+不要求表态**；她可以不理，也可以直接说不写了（`is_abandonment` 出口仍在）。
+触发阈值/冷却（24h、开口≥2 次、12h 冷却）**一个字不动**，只改文案。
 """
 
 from __future__ import annotations
@@ -439,9 +447,21 @@ async def unfinished_things(store: Any, now: float, *, limit: int = UNFINISHED_M
 
 
 def promise_reminder_question(goals: list[str]) -> str:
-    """兜底提醒（只在 24h/2 次条件满足时出现；换成一个问句，不是命令）。"""
-    joined = "；".join(f"「{str(item).strip()}」" for item in goals if str(item).strip())
-    return f"你答应过的事还没做：{joined}。这件还算数吗？不写也跟我说一声。"
+    """兜底提醒：**她自己的记忆，不是催办**（T-029，用户裁定 2026-10-22）。
+
+    旧版「你答应过的事还没做：…。这件还算数吗？不写也跟我说一声。」是在要她交代；
+    真机她收到后答「在写了，真的在写」，然后既没有文件、也没有 `write_note` 痕迹。
+    现在只把"我想起我说过要写什么、还没写"递给她：**没有问句、不要求表态**。
+    她可以不理；真想放下时，`is_abandonment` 的出口照旧（直接说不写了）。
+    单条/多条都保持简洁的一句话，不再带"还算数吗/跟我说一声"这类催办语义。
+    """
+    shown = [str(item).strip() for item in goals if str(item).strip()]
+    if not shown:
+        return "我想起来：我说过要写点什么，还没写。"
+    if len(shown) == 1:
+        return f"我想起来：我说过要写「{shown[0]}」，还没写。"
+    rest = "；".join(f"也说过「{item}」" for item in shown[1:])
+    return f"我想起来：我说过要写「{shown[0]}」；{rest}，都还没写。"
 
 
 async def due_promise_reminder(
@@ -449,7 +469,8 @@ async def due_promise_reminder(
 ) -> str | None:
     """T-022a 兜底提醒：承诺 >24h 或之后她已开口 ≥2 次，且同一条 12h 内没提醒过。
 
-    正常回合**不会**出现系统提醒；只有这里返回的非空问句才会进 payload。
+    正常回合**不会**出现系统提醒；只有这里返回的非空文案（她自己的记忆口吻，
+    见 `promise_reminder_question`）才会进 payload。触发阈值与冷却一个字不动。
     冷却记在 kv（`promise_reminder:<id>`），不加表结构。
     """
     await store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)

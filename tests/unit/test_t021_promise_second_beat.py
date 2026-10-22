@@ -487,14 +487,40 @@ async def test_deepseek_regular_tool_round_has_no_tool_choice() -> None:
     assert "tool_choice" not in payloads[0]
 
 
-# ── 提示语文案（T-022a 起降级为兜底问句）──────────────────────────────
-def test_promise_reminder_is_a_question() -> None:
+# ── 提示语文案（T-029：她自己的记忆口吻，不是催办）────────────────────
+def test_promise_reminder_is_her_memory_not_a_demand() -> None:
+    """取消测试：把文案改回「你答应过的事还没做…这件还算数吗？不写也跟我说一声」
+    ⇒ 本用例红（出现问句/催办词）。"""
     from elysia.soul.promises import promise_reminder_question
 
-    text = promise_reminder_question(["我这就写爱莉希雅"])
-    assert "这件还算数吗？" in text
-    assert "不写也跟我说一声" in text
-    assert "现在就用 write_note" not in text
+    single = promise_reminder_question(["我这就写爱莉希雅"])
+    assert single == "我想起来：我说过要写「我这就写爱莉希雅」，还没写。"
+    assert "我想起来" in single and "还没写" in single
+    for banned in ("还算数吗", "跟我说一声", "？", "?", "答应过的事还没做", "write_note"):
+        assert banned not in single, f"提醒不许带催办/问句语义：{banned!r} in {single!r}"
+
+    multi = promise_reminder_question(["爱莉希雅那篇", "星空的诗"])
+    assert multi == "我想起来：我说过要写「爱莉希雅那篇」；也说过「星空的诗」，都还没写。"
+    for banned in ("还算数吗", "跟我说一声", "？", "?"):
+        assert banned not in multi, f"多条提醒同样不许催办：{banned!r} in {multi!r}"
+
+    # 空列表也不许抛/不许退回催办口吻
+    empty = promise_reminder_question([])
+    assert "我想起来" in empty and "还没写" in empty
+    assert "还算数吗" not in empty and "跟我说一声" not in empty
+
+
+def test_reminder_thresholds_untouched_by_tone_change() -> None:
+    """T-029 只改文案：触发阈值/冷却（24h、开口≥2、12h）一个字不动。"""
+    from elysia.soul.promises import (
+        REMINDER_COOLDOWN_S,
+        REMINDER_OPENINGS_MIN,
+        REMINDER_STALE_S,
+    )
+
+    assert REMINDER_STALE_S == 24.0 * 3600.0
+    assert REMINDER_OPENINGS_MIN == 2
+    assert REMINDER_COOLDOWN_S == 12.0 * 3600.0
 
 
 def test_forced_write_cooldown_is_two_hours() -> None:

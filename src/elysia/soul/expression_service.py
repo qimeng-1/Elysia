@@ -106,6 +106,7 @@ from elysia.memory.similarity import same_event
 from elysia.memory.supersede import content_similarity
 from elysia.memory.world import record_world_memory
 from elysia.soul.brain import BrainOutput
+from elysia.soul.claims import reconcile
 from elysia.soul.dialogue import recent_dialogue_window, recent_openings, record_her_bubble
 from elysia.soul.expression import (
     ReplyDecision,
@@ -123,7 +124,7 @@ from elysia.soul.expression_types import (
     ExpressionResult,
     make_job_id,
 )
-from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
+from elysia.soul.honesty import record_claim_stats
 from elysia.soul.intentions import Intentions
 from elysia.soul.promises import (
     OWN_WORDS_FIELD,
@@ -746,7 +747,8 @@ class ExpressionService:
         write_completion_unfounded = (not self._job_write_note_ok) and bool(
             payload.get(OWN_WORDS_FIELD)
         )
-        verdict = rewrite_unfounded_claims(
+        # T-034：两类主张的整轮对账已收进 claims 注册表；这里只传判据与参数。
+        verdict = reconcile(
             speak.text,
             evidence_texts=evidence,
             motive=motive,

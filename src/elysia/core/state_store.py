@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS kv (
 """
 
 _HEARTBEAT_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS heartbeats (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     ts        REAL NOT NULL,
@@ -313,6 +317,24 @@ class _AsyncSQLite:
 
         return await asyncio.to_thread(_run, self._conn)
 
+    # ── kv（T-023：名字缺口 / T-022a：提醒冷却）─────────────────────
+    # 两个库都有 `kv` 表（StateStore 的状态键值 + HeartbeatStore 的轻量旁路），
+    # 读写实现在基类：调用方不必关心"这个键属于哪个库"的接线细节。
+    async def load_json(self, key: str, default: Any = None) -> Any:
+        rows = await self.execute_raw("SELECT value FROM kv WHERE key = ?", (key,))
+        if not rows:
+            return default
+        return json.loads(rows[0][0])
+
+    async def save_json(self, key: str, value: Any) -> None:
+        payload = json.dumps(value, ensure_ascii=False)
+
+        def _save(conn: sqlite3.Connection) -> None:
+            conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, payload))
+            conn.commit()
+
+        await self.submit(_save)
+
     async def close(self) -> None:
         """优雅关闭：**哨兵停写者**（不再以 `cancel()` 为主手段，F7）。
 
@@ -355,21 +377,6 @@ class StateStore(_AsyncSQLite):
 
     def __init__(self, db_path: Path) -> None:
         super().__init__(db_path, schema=_STATE_SCHEMA)
-
-    async def load_json(self, key: str, default: Any = None) -> Any:
-        rows = await self.execute_raw("SELECT value FROM kv WHERE key = ?", (key,))
-        if not rows:
-            return default
-        return json.loads(rows[0][0])
-
-    async def save_json(self, key: str, value: Any) -> None:
-        payload = json.dumps(value, ensure_ascii=False)
-
-        def _save(conn: sqlite3.Connection) -> None:
-            conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, payload))
-            conn.commit()
-
-        await self.submit(_save)
 
 
 class HeartbeatStore(_AsyncSQLite):
@@ -518,6 +525,15 @@ class HeartbeatStore(_AsyncSQLite):
             "SELECT ts FROM dialogue_turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
         )
         return float(rows[0][0]) if rows else None
+
+    # ── T-022a/T-022b：她的"开口"时间轴（提醒兜底 / 未完成之事的时间片）──
+    async def count_openings_since(self, since: float) -> int:
+        """`since` 之后她开口过几次（T-022a 兜底提醒判据：承诺之后已开口 ≥2 次）。"""
+        rows = await self.execute_raw(
+            "SELECT COUNT(*) FROM thought_log WHERE kind = 'expression' AND ts > ?",
+            (float(since),),
+        )
+        return int(rows[0][0]) if rows else 0
 
     async def dialogue_turns(self, limit: int | None = None) -> list[dict[str, Any]]:
         """读最近 `limit` 条对话轮次（按时间**升序**返回；不含 limit 则按时间升序全量）。"""
@@ -768,6 +784,47 @@ class HeartbeatStore(_AsyncSQLite):
             (kind, source_ref, float(since)),
         )
         return self._memory_row_to_dict(rows[0]) if rows else None
+
+    # ── T-022a：承诺记忆（她自己的心事）─────────────────────────────
+    async def find_memory_by_source_ref(self, source_ref: str) -> dict[str, Any] | None:
+        """按来源引用找记忆（T-022a：`promise:<id>` 同一来源只一条）。"""
+        rows = await self.execute_raw(
+            "SELECT * FROM memories WHERE source_ref = ? ORDER BY id DESC LIMIT 1",
+            (str(source_ref),),
+        )
+        return self._memory_row_to_dict(rows[0]) if rows else None
+
+    async def unfinished_promises(self, *, limit: int = 3) -> list[dict[str, Any]]:
+        """未完成的承诺：pending 且她那条"还没写"的记忆未 `superseded`。
+
+        返回意图字段 + 记忆原句（老数据没有对应记忆时 `content` 为空，
+        调用方用 `goal` 兜底）；按承诺创建时间升序（旧事先）。
+        """
+        rows = await self.execute_raw(
+            "SELECT i.id, i.created_ts, i.last_attempt_ts, i.attempts, i.goal,"
+            " m.id, m.content, m.source_ref, m.superseded_by"
+            " FROM intentions i"
+            " LEFT JOIN memories m ON m.source_ref = ('promise:' || i.id)"
+            " WHERE i.kind = 'promise' AND i.status = 'pending'"
+            " AND (m.id IS NULL OR (m.superseded_by IS NULL"
+            " AND m.claim_status != 'rejected' AND m.retention_state != 'suppressed'))"
+            " ORDER BY i.created_ts, i.id LIMIT ?",
+            (int(limit),),
+        )
+        return [
+            {
+                "id": int(row[0]),
+                "created_ts": float(row[1]),
+                "last_attempt_ts": row[2],
+                "attempts": int(row[3]),
+                "goal": str(row[4]) if row[4] is not None else "",
+                "memory_id": int(row[5]) if row[5] is not None else None,
+                "content": str(row[6]) if row[6] is not None else "",
+                "source_ref": str(row[7]) if row[7] is not None else None,
+                "superseded_by": row[8],
+            }
+            for row in rows
+        ]
 
     # ── P3：她的意图（"打算做"跨时间存活）───────────────────────────
     # T-020：`kind='promise'` 是她**口头承诺**（只能由她本人兑现，worker 一律跳过）；

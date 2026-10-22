@@ -53,7 +53,7 @@ class _FakeBackend:
 
     def __init__(
         self,
-        reply: str = "我去写。",
+        reply: str = "我今晚就写。",
         *,
         forced_text: str | None = HER_TEXT,
         forced_path: str | None = "爱莉希雅.md",
@@ -192,7 +192,7 @@ async def _turn(
         await service.wait_forced_write()
 
 
-# ── 1. 有 pending + 她说「我去写」+ 没写 ⇒ 第二拍强制 write_note ─────
+# ── 1. 有 pending + 她说「我今晚就写」+ 没写 ⇒ 第二拍强制 write_note ─────
 @pytest.mark.asyncio
 async def test_second_beat_forces_write_note_and_fulfills_promise(tmp_path: Path) -> None:
     """第二拍发生：tools 只有 write_note、tool_choice 强制它；成文后 promise done + 文件落盘。
@@ -204,9 +204,9 @@ async def test_second_beat_forces_write_note_and_fulfills_promise(tmp_path: Path
     service, store, workspace = await _service(tmp_path, backend)
     try:
         pid = await _pending_promise(store)
-        await _turn(service, reply="我去写。", now=T0 + 1)
+        await _turn(service, reply="我今晚就写。", now=T0 + 1)
 
-        assert backend.tool_rounds == 1, "有 pending 承诺、她答『我去写』，却没有补第二拍"
+        assert backend.tool_rounds == 1, "有 pending 承诺、她答『我今晚就写』，却没有补第二拍"
         assert [t["function"]["name"] for t in backend.seen_tools[0]] == ["write_note"]
         assert backend.seen_tool_choice[0] == {
             "type": "function",
@@ -267,7 +267,7 @@ async def test_second_beat_never_without_pending_promise(tmp_path: Path) -> None
     backend = _FakeBackend()
     service, store, _workspace = await _service(tmp_path, backend)
     try:
-        await _turn(service, reply="我去写。", now=T0 + 1)
+        await _turn(service, reply="我今晚就写。", now=T0 + 1)
         assert backend.tool_rounds == 0, "没有 pending 承诺，却补了第二拍"
         assert backend.complete_calls == 1, "LLM 只该被调一次（第一拍）"
         rows = await store.execute_raw(
@@ -324,7 +324,7 @@ async def test_second_beat_failure_keeps_pending_and_counts_attempt(tmp_path: Pa
     service, store, _workspace = await _service(tmp_path, backend)
     try:
         pid = await _pending_promise(store)
-        await _turn(service, reply="我去写。", now=T0 + 1)
+        await _turn(service, reply="我今晚就写。", now=T0 + 1)
         intention = await store.get_intention(pid)
         assert intention is not None and intention["status"] == "pending"
         assert intention["attempts"] == 1
@@ -337,7 +337,7 @@ async def test_second_beat_failure_keeps_pending_and_counts_attempt(tmp_path: Pa
     service2, store2, _workspace2 = await _service(tmp_path / "empty", backend2)
     try:
         pid2 = await _pending_promise(store2)
-        await _turn(service2, reply="我去写。", now=T0 + 1)
+        await _turn(service2, reply="我今晚就写。", now=T0 + 1)
         intention2 = await store2.get_intention(pid2)
         assert intention2 is not None and intention2["status"] == "pending"
         assert intention2["attempts"] == 1
@@ -357,17 +357,17 @@ async def test_second_beat_cooldown_10min(tmp_path: Path) -> None:
     service, store, _workspace = await _service(tmp_path, backend)
     try:
         pid = await _pending_promise(store)
-        await _turn(service, reply="我去写。", now=T0 + 1)
+        await _turn(service, reply="我今晚就写。", now=T0 + 1)
         assert backend.tool_rounds == 1
 
         # 冷却内：她的下一句再提"我去写"，也不补第二拍
-        await _turn(service, reply="我去写了。", now=T0 + 2)
+        await _turn(service, reply="我今晚就写了。", now=T0 + 2)
         assert backend.tool_rounds == 1, "10 分钟冷却内又强制了一次"
 
         # 冷却外：允许再试；这次成功 ⇒ done
         backend.forced_raises = False
         later = T0 + 1 + FORCED_WRITE_COOLDOWN_S + 1.0
-        await _turn(service, reply="我去写。", now=later)
+        await _turn(service, reply="我今晚就写。", now=later)
         assert backend.tool_rounds == 2, "冷却结束后必须可以再试一次"
         intention = await store.get_intention(pid)
         assert intention is not None and intention["status"] == "done"
@@ -387,7 +387,7 @@ async def test_second_beat_writes_her_own_text_only(tmp_path: Path) -> None:
     service, store, workspace = await _service(tmp_path, backend)
     try:
         pid = await _pending_promise(store, goal="我这就写爱莉希雅到底是个什么样的人")
-        await _turn(service, reply="我去写。", now=T0 + 1)
+        await _turn(service, reply="我今晚就写。", now=T0 + 1)
 
         written = workspace.read_file("爱莉希雅.md").strip()
         assert written == HER_TEXT.strip(), "写进去的正文不是她自己写的那一段"
@@ -487,18 +487,18 @@ async def test_deepseek_regular_tool_round_has_no_tool_choice() -> None:
     assert "tool_choice" not in payloads[0]
 
 
-# ── 提示语文案：提醒从"你可以"改成"现在就动手" ──────────────────────
-def test_promise_hint_tells_her_to_act_now() -> None:
-    from elysia.soul.promises import promise_hint
+# ── 提示语文案（T-022a 起降级为兜底问句）──────────────────────────────
+def test_promise_reminder_is_a_question() -> None:
+    from elysia.soul.promises import promise_reminder_question
 
-    hint = promise_hint(["我这就写爱莉希雅"])
-    assert "现在就用 write_note 写完它" in hint
-    assert "不想写就明说不写了" in hint
-    assert "你可以用 write_note" not in hint
+    text = promise_reminder_question(["我这就写爱莉希雅"])
+    assert "这件还算数吗？" in text
+    assert "不写也跟我说一声" in text
+    assert "现在就用 write_note" not in text
 
 
-def test_forced_write_cooldown_is_ten_minutes() -> None:
-    assert FORCED_WRITE_COOLDOWN_S == 600.0
+def test_forced_write_cooldown_is_two_hours() -> None:
+    assert FORCED_WRITE_COOLDOWN_S == 7200.0
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -513,7 +513,7 @@ def test_forced_write_cooldown_is_ten_minutes() -> None:
 
 
 async def _pending_result(
-    service: ExpressionService, *, reply: str = "我去写。", now: float = T0 + 1
+    service: ExpressionService, *, reply: str = "我今晚就写。", now: float = T0 + 1
 ) -> ExpressionResult:
     backend = service._llm._main  # type: ignore[attr-defined]
     assert isinstance(backend, _FakeBackend)
@@ -588,12 +588,12 @@ async def test_single_flight_only_one_second_beat_at_a_time(tmp_path: Path) -> N
     service, store, _workspace = await _service(tmp_path, backend)
     try:
         await _pending_promise(store)
-        await _turn(service, reply="我去写。", now=T0 + 1, wait_forced=False)
+        await _turn(service, reply="我今晚就写。", now=T0 + 1, wait_forced=False)
         await backend.forced_started.wait()  # 第一拍确定已经在跑（卡在闸门上）
         task = service.forced_write_task
         assert task is not None and not task.done()
 
-        await _turn(service, reply="我去写。", now=T0 + 2, wait_forced=False)
+        await _turn(service, reply="我今晚就写。", now=T0 + 2, wait_forced=False)
         assert backend.tool_rounds == 1, "第二拍没有单飞（又起了一个任务）"
 
         gate.set()
@@ -650,8 +650,8 @@ async def test_second_beat_context_does_not_touch_job_state(tmp_path: Path) -> N
         )
         newer = await _pending_promise(store, goal="刚才说要写的那篇")
 
-        await _turn(service, reply="我去写。", now=T0 + 1)  # 先补旧的
-        await _turn(service, reply="我去写。", now=T0 + 2)  # 再补新的
+        await _turn(service, reply="我今晚就写。", now=T0 + 1)  # 先补旧的
+        await _turn(service, reply="我今晚就写。", now=T0 + 2)  # 再补新的
 
         assert backend.tool_rounds == 2
         older_row = await store.get_intention(int(older))

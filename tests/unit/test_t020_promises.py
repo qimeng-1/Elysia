@@ -137,9 +137,9 @@ async def test_no_capture_when_write_note_succeeded(tmp_path: Path) -> None:
         await store.close()
 
 
-# ── 3. payload 提醒（≤3、无 id） ─────────────────────────
+# ── 3. payload：她自己的"未完成之事"（T-022a：不再有系统提醒字段）──
 @pytest.mark.asyncio
-async def test_payload_carries_pending_promises(tmp_path: Path) -> None:
+async def test_payload_carries_unfinished_things_only(tmp_path: Path) -> None:
     service, store, state = await _service(tmp_path, text="嗯。")
     try:
         await store.add_intention(
@@ -150,13 +150,17 @@ async def test_payload_carries_pending_promises(tmp_path: Path) -> None:
             kind="promise",
         )
         result = await service.run_job(_job("在吗"))
-        promises = result.instruction.get("pending_promises")
-        assert isinstance(promises, list) and promises
-        assert any("我待会儿把那篇写完给你看" in item for item in promises)
-        assert all(isinstance(item, str) for item in promises)
-        hint = result.instruction.get("pending_promises_hint")
-        assert isinstance(hint, str) and "不写" in hint and "write_note" in hint
-        assert len(promises) <= 3
+        payload = result.instruction
+        # T-022a：正常回合不再出现系统提醒字段
+        assert "pending_promises" not in payload
+        assert "pending_promises_hint" not in payload
+        things = payload.get("unfinished_things")
+        assert isinstance(things, list) and things
+        assert any("我待会儿把那篇写完给你看" in item for item in things)
+        assert all(isinstance(item, str) for item in things)
+        assert len(things) <= 3
+        # 正常回合（<24h、之后没开口过）不出现兜底问句
+        assert "promise_reminder" not in payload
     finally:
         await state.close()
         await store.close()

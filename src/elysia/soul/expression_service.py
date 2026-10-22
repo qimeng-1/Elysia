@@ -126,13 +126,15 @@ from elysia.soul.expression_types import (
 from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
 from elysia.soul.intentions import Intentions
 from elysia.soul.promises import (
+    due_promise_reminder,
     forced_write_prompt,
     formed_log_text,
+    has_immediate_write_intent,
     is_abandonment,
-    list_pending_promises,
     next_forced_write_promise,
-    promise_hint,
+    record_written_memory,
     settle_after_reply,
+    unfinished_things,
 )
 from elysia.soul.tools.keep_moment import MomentKeeper
 from elysia.soul.tools.read_url import ReadResult, read_url
@@ -852,7 +854,6 @@ class ExpressionService:
         # S5（库为准）：取的**只有库**——启动时种入的身份种子也在里面，
         # 因此正常运行时它不为空；空列表 = 她此刻真的没有自我认知（她把种子一条条放下了）。
         payload[IDENTITY_FIELD] = await self._identity_lines()
-
         # ── 1c2. S1a：最近真实对话（接得上话的物理基础）─────────
         # 与 `memory_hooks`（撞上的旧记忆）语义不同、两者并存。
         payload["dialogue_context"] = dialogue_context
@@ -868,15 +869,21 @@ class ExpressionService:
         except Exception:
             log.warning("装配 recent_discoveries 失败", exc_info=True)
             payload["recent_discoveries"] = []
-        # T-020：她答应过、还没做的事——递回她手上（是提醒，不是命令）
+        # T-022a：她的未完成之事——**她自己的记忆原句**（不是系统提醒字段）。
+        # 正常回合不再出现 `pending_promises` / `pending_promises_hint`。
         try:
-            promises = await list_pending_promises(self._store, now)
-            payload["pending_promises"] = promises
-            if promises:
-                payload["pending_promises_hint"] = promise_hint(promises)
+            payload["unfinished_things"] = await unfinished_things(self._store, now)
         except Exception:
-            log.warning("装配 pending_promises 失败", exc_info=True)
-            payload["pending_promises"] = []
+            log.warning("装配 unfinished_things 失败", exc_info=True)
+            payload["unfinished_things"] = []
+        # T-022a 兜底：承诺 >24h 或她之后已开口 ≥2 次仍未动 ⇒ 才出现一次问句
+        # （同一条 12h 最多一次；冷却记 kv）
+        try:
+            reminder = await due_promise_reminder(self._store, now)
+            if reminder:
+                payload["promise_reminder"] = reminder
+        except Exception:
+            log.warning("装配 promise_reminder 失败", exc_info=True)
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)
@@ -997,6 +1004,10 @@ class ExpressionService:
         """
         if wrote or is_abandonment(text):
             return
+        # T-022a：强制轮**大量收窄**——只有她这一轮明确说了"马上/这就/今晚就写"
+        # 这类即时意图才允许；"还写/慢慢写/我去写"交给记忆与下一次开口。
+        if not has_immediate_write_intent(text):
+            return
         speaker = getattr(self._llm, "speak_forced_tool", None)
         if not callable(speaker):
             return
@@ -1053,6 +1064,10 @@ class ExpressionService:
             log.warning("承诺第二拍的 LLM 调用失败（不影响心跳）", exc_info=True)
         try:
             if context.ok:
+                # T-022a：成文 ⇒ "我写完了"的自我证据 + 旧的"还没写"记忆 superseded
+                await record_written_memory(
+                    self._store, now, path=context.path, promise_ids=[promise_id]
+                )
                 await self._store.finish_intention(promise_id, now, "done", "她自己写的")
                 await self._store.think(now, "promise", formed_log_text(context.path or ""))
             else:
@@ -1179,11 +1194,13 @@ class ExpressionService:
                     now,
                     wrote=wrote,
                     user_message=user_message,
+                    # T-022a：成文后要落"我写完了"的自我证据（文件名在这里）
+                    written_path=self._job_written_path,
                 )
             except Exception:
                 log.warning("承诺处理失败（不影响落库）", exc_info=True)
-            # T-021：承诺第二拍——答应的事就动手；有 pending 承诺就当场补一次
-            # 强制 write_note 轮（正文她自己写）。失败只记 attempts，不打扰她。
+            # T-022a：第二拍只在她这一轮明确说"马上/这就/今晚就写"时才允许
+            # （强制轮大量收窄；其余交给记忆与下一次开口）。失败只记 attempts。
             try:
                 await self._maybe_force_write(result.text, now, wrote=wrote)
             except Exception:

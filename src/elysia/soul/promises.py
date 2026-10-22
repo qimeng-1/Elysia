@@ -37,6 +37,20 @@ T-021（用户硬要求 2026-10-22「答应的事就动手；答应了不做，�
 写作指令）、`next_forced_write_promise`（挑该补拍的 pending 承诺，同一承诺两次
 强制尝试间隔 ≥10 分钟）与 `formed_log_text`（成文留痕）。**正文永远由她自己写**
 （`write_note` 的 text 参数来自她那一次 LLM 调用），程序只负责递工具与记结果。
+
+T-022a（用户 2026-10-22 批准：**自觉性改造**——"承诺的事只要她能做到，她应该记得、
+应该能自发去做，被推着做不符合期望"）：把"提醒的线索"从系统的 payload 字段搬进
+**她自己的记忆**：
+
+- 捕获时同落一条 `kind='internal'` 的记忆（第一人称、无系统指令），
+  `source_ref='promise:<intention_id>'`，可被正常召回；
+- 任一路径成文后落一条"我把〈文件名〉写完了，是我自己写的"的自我证据，并把
+  "还没写"那条 `superseded_by` 指向它（原件保真）；
+- 正常回合不再出现 `pending_promises` / `pending_promises_hint`，改由
+  `unfinished_things` 只放她自己的记忆原句；只有承诺 >24h 或她在这之后已开口 ≥2 次
+  仍未动时，才兜底出现一次问句（同一条 12h 最多一次）；
+- 强制轮**大量收窄**：只在她这一轮明确说了"马上/这就/今晚就写"这类即时意图时才强制，
+  冷却从 10 分钟提到 2 小时；其余交给记忆与下一次开口。
 """
 
 from __future__ import annotations
@@ -44,10 +58,32 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from elysia.memory.levels import (
+    CERTAINTY_CERTAIN,
+    KIND_INTERNAL,
+    LEVEL_SHALLOW,
+    SOURCE_SELF,
+)
+
 PROMISE_WINDOW_S = 24.0 * 3600.0  # 提醒窗口
 PROMISE_TTL_S = 48.0 * 3600.0  # 惰性过期
 MAX_PENDING_PROMISES = 3
 PROMISE_GOAL_CHARS = 120
+
+# ── T-022a：承诺记忆化 + 自我证据 + 提醒降级 ─────────────────────────
+# 记忆用 `internal`（"内部念头/独处生活"）：她自己的心事，可被记忆检索正常召回；
+# 不用 `world`（那是她读过的外部资料）、不用 `self`（身份段每句在场，不进 hooks）。
+PROMISE_MEMORY_KIND = KIND_INTERNAL
+PROMISE_MEMORY_IMPORTANCE = 0.6  # 值得被想起来（≥0.6 的"心事"档）
+PROMISE_MEMORY_SOURCE_REF_PREFIX = "promise:"
+WRITTEN_MEMORY_SOURCE_REF_PREFIX = "written:"
+# 正常回合的 `unfinished_things`（她自己的原句）最多几条
+UNFINISHED_MAX = 3
+# 兜底提醒：承诺超过 24h，或她在这条承诺之后已开口 ≥2 次仍未动
+REMINDER_STALE_S = 24.0 * 3600.0
+REMINDER_OPENINGS_MIN = 2
+# 同一条承诺的兜底提醒 12 小时最多一次（存 kv，不加表结构）
+REMINDER_COOLDOWN_S = 12.0 * 3600.0
 
 # 承诺检测（T-020b 收紧；T-020c 子句级 + 否定只作用到写作动词）：
 # (A) 时间/意愿线索 + 写：「我这就写」「我现在去写」「我待会儿动笔」
@@ -316,6 +352,138 @@ async def _is_duplicate_promise(store: Any, goal: str, now: float) -> bool:
     return any(_same_promise(goal, str(row.get("goal") or "")) for row in rows)
 
 
+# ── T-022a：承诺记忆化（她的心事，不是系统字段）──────────────────────
+
+
+def promise_memory_text(goal: str) -> str:
+    """她把"答应过要写什么"记成自己的心事（第一人称、无系统指令/工具名）。"""
+    text = str(goal or "").strip()
+    return f"我答应过要写「{text}」，还没写。"
+
+
+def written_memory_text(path: str) -> str:
+    """成文后的自我证据（她反复说"没骗你"时缺的就是这一条）。"""
+    shown = str(path or "").strip() or "那篇"
+    return f"我把「{shown}」写完了，是我自己写的。"
+
+
+async def record_promise_memory(store: Any, intention_id: int, goal: str, now: float) -> int | None:
+    """承诺落一条她自己的记忆；同一 `source_ref` 只一条（已有则跳过）。"""
+    ref = f"{PROMISE_MEMORY_SOURCE_REF_PREFIX}{int(intention_id)}"
+    if await store.find_memory_by_source_ref(ref) is not None:
+        return None
+    text = promise_memory_text(goal)
+    return int(
+        await store.add_memory(
+            float(now),
+            {
+                "level": LEVEL_SHALLOW,
+                "kind": PROMISE_MEMORY_KIND,
+                "content": text,
+                "emotion_vector": {},
+                "importance": PROMISE_MEMORY_IMPORTANCE,
+                "protected": False,
+                "narrative": text,
+                "source": SOURCE_SELF,
+                "certainty": CERTAINTY_CERTAIN,
+                "source_ref": ref,
+            },
+        )
+    )
+
+
+async def record_written_memory(
+    store: Any, now: float, *, path: str | None, promise_ids: list[int]
+) -> int:
+    """成文 ⇒ 落"我写完了"的自我证据，并把"还没写"那条 `superseded_by` 指向它。"""
+    ref = f"{WRITTEN_MEMORY_SOURCE_REF_PREFIX}{str(path or '').strip()}"
+    text = written_memory_text(path or "")
+    new_id = int(
+        await store.add_memory(
+            float(now),
+            {
+                "level": LEVEL_SHALLOW,
+                "kind": PROMISE_MEMORY_KIND,
+                "content": text,
+                "emotion_vector": {},
+                "importance": PROMISE_MEMORY_IMPORTANCE,
+                "protected": False,
+                "narrative": text,
+                "source": SOURCE_SELF,
+                "certainty": CERTAINTY_CERTAIN,
+                "source_ref": ref,
+            },
+        )
+    )
+    for promise_id in promise_ids:
+        old = await store.find_memory_by_source_ref(
+            f"{PROMISE_MEMORY_SOURCE_REF_PREFIX}{int(promise_id)}"
+        )
+        if old is not None and old.get("superseded_by") is None:
+            await store.mark_superseded(int(old["id"]), new_id)
+    return new_id
+
+
+async def unfinished_things(store: Any, now: float, *, limit: int = UNFINISHED_MAX) -> list[str]:
+    """未完成之事的**她自己的原句**（≤limit；没有祈使句、没有工具名）。"""
+    await store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)
+    rows = await store.unfinished_promises(limit=limit)
+    out: list[str] = []
+    for row in rows:
+        text = str(row.get("content") or "").strip()
+        if not text:
+            text = promise_memory_text(str(row.get("goal") or ""))
+        if text and text not in out:
+            out.append(text)
+    return out[:limit]
+
+
+def promise_reminder_question(goals: list[str]) -> str:
+    """兜底提醒（只在 24h/2 次条件满足时出现；换成一个问句，不是命令）。"""
+    joined = "；".join(f"「{str(item).strip()}」" for item in goals if str(item).strip())
+    return f"你答应过的事还没做：{joined}。这件还算数吗？不写也跟我说一声。"
+
+
+async def due_promise_reminder(
+    store: Any, now: float, *, limit: int = MAX_PENDING_PROMISES
+) -> str | None:
+    """T-022a 兜底提醒：承诺 >24h 或之后她已开口 ≥2 次，且同一条 12h 内没提醒过。
+
+    正常回合**不会**出现系统提醒；只有这里返回的非空问句才会进 payload。
+    冷却记在 kv（`promise_reminder:<id>`），不加表结构。
+    """
+    await store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)
+    rows = await store.unfinished_promises(limit=limit)
+    due_goals: list[str] = []
+    for row in rows:
+        created = float(row.get("created_ts") or 0.0)
+        stale = float(now) - created >= REMINDER_STALE_S
+        openings = await store.count_openings_since(created)
+        if not stale and openings < REMINDER_OPENINGS_MIN:
+            continue
+        key = f"promise_reminder:{int(row['id'])}"
+        last = await store.load_json(key, default=0.0)
+        if isinstance(last, (int, float)) and float(now) - float(last) < REMINDER_COOLDOWN_S:
+            continue
+        await store.save_json(key, float(now))
+        due_goals.append(str(row.get("goal") or ""))
+    if not due_goals:
+        return None
+    return promise_reminder_question(due_goals)
+
+
+# T-022a：只有"这一轮明确说了马上/这就/今晚就写"才允许强制第二拍
+_IMMEDIATE_WRITE = re.compile(
+    r"(?:马上|这就|立刻|现在就|今晚|今天|天亮前|睡前|待会儿).{0,8}(?:写|动笔|码字)"
+    r"|我(?:现在|这就|马上)(?:就)?(?:去)?写"
+)
+
+
+def has_immediate_write_intent(text: str) -> bool:
+    """T-022a：她这一轮是否给了**即时意图**（强制轮的唯一许可）。"""
+    return _IMMEDIATE_WRITE.search(str(text or "")) is not None
+
+
 async def capture_promise(
     store: Any,
     text: str,
@@ -343,6 +511,8 @@ async def capture_promise(
         float(now), goal=goal, action="write_note", target=None, kind="promise"
     )
     await store.think(float(now), "promise", f"承诺：{goal}")
+    # T-022a：同时落一条她自己的记忆（第一人称、可被正常召回）；不重复落
+    await record_promise_memory(store, int(intention_id), goal, float(now))
     return int(intention_id)
 
 
@@ -353,15 +523,26 @@ async def settle_after_reply(
     *,
     wrote: bool,
     user_message: str | None = None,
+    written_path: str | None = None,
     window_s: float = PROMISE_WINDOW_S,
 ) -> dict[str, Any]:
     """一次开口落库后的承诺处理：兑现 / 放弃 / 捕获（三者互斥，不代写）。
 
     `user_message` 是用户这一轮的原话（上下文判据要它；None ⇒ 只看显式自诺）。
+    `written_path` 是本回合 `write_note` 写成的相对路径（T-022a 成文自我证据用）。
     """
     since = float(now) - float(window_s)
     if wrote:
+        pending = await store.recent_pending_promises(since, limit=MAX_PENDING_PROMISES)
         await store.close_pending_promises(float(now), since, status="done", outcome="她写了")
+        if pending:
+            # T-022a：成文 ⇒ "我写完了"的自我证据 + 旧的"还没写"记忆 superseded
+            await record_written_memory(
+                store,
+                float(now),
+                path=written_path,
+                promise_ids=[int(row["id"]) for row in pending],
+            )
         return {"closed": "done", "captured": None}
     if is_abandonment(text):
         await store.close_pending_promises(
@@ -387,18 +568,11 @@ async def list_pending_promises(
     return [str(row.get("goal") or "").strip() for row in rows if row.get("goal")]
 
 
-def promise_hint(promises: list[str]) -> str:
-    """提醒指令（写进 payload 文本；不是命令：写/推迟/说不写都合法）。"""
-    joined = "；".join(f"「{item}」" for item in promises)
-    return (
-        f"你答应过的事还没做：{joined}。"
-        "现在就用 write_note 写完它；不想写就明说不写了——两条都算数。"
-    )
-
-
 # ── T-021：承诺第二拍（答应的事当场写完）────────────────────────────
-# 同一个 promise 两次强制尝试之间至少隔 10 分钟（下一轮再试；不设次数配额）。
-FORCED_WRITE_COOLDOWN_S = 600.0
+# T-022a 收窄：强制轮只留给"即时意图"（马上/这就/今晚就写），冷却 2 小时。
+# 依据：用户要求"被推着做不符合期望"——强制只该发生在她已经说"现在就写"的时候；
+# 其余情形交给记忆（T-022a 的 `unfinished_things`）与下一次开口。
+FORCED_WRITE_COOLDOWN_S = 2.0 * 3600.0
 # 同一回合最多补 1 次（一回合只挑一条承诺，不做轮询扫描）。
 MAX_FORCED_WRITES_PER_TURN = 1
 

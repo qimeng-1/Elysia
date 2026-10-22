@@ -28,11 +28,13 @@ from elysia.soul.expression_types import (
 )
 from elysia.soul.intentions import Intentions
 from elysia.soul.promises import (
+    capture_promise,
     detect_contextual_promise,
     detect_promise,
     has_write_request,
     is_abandonment,
     list_pending_promises,
+    settle_after_reply,
 )
 from elysia.soul.tools.writing import WritingWorkspace
 
@@ -693,3 +695,66 @@ def test_write_core_clause_guards() -> None:
     assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "写不出来。", wrote=False) is None
     assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, "今晚就写？", wrote=False) is None
     assert detect_contextual_promise("你在干嘛", "写。", wrote=False) is None
+
+
+# ── T-031：反编造诚实句不许被记成承诺（自激）────────────────────
+# 缺陷：T-030 的诚实句「其实我还没真的写完呢。」会被 `_PROMISE_RESULT`（我…写完）
+# 再捕获成一条新 pending 承诺 ⇒ "没做到"被系统记成"要做"。修法只加 `_REJECT_RE`
+# 的未完成形态，不动 `_PROMISE_TIME` / `_PROMISE_RESULT`。
+def test_honest_sentences_are_never_captured_as_promises() -> None:
+    """遍历 honesty 的**每一个**诚实句（以后加新句自动覆盖）：一律不被捕获。
+
+    取消测试：把 `_REJECT_RE` 的「没真的写完/还没真的写/还没写完」还原
+    ⇒ 本用例红（write 句被 `detect_promise` 捕获成「其实我还没真的写完呢。」）。
+    """
+    from elysia.soul.honesty import _HONEST_SENTENCES
+
+    assert _HONEST_SENTENCES, "诚实句表不能为空（否则遍历退化成永真）"
+    for key, sentence in _HONEST_SENTENCES.items():
+        assert detect_promise(sentence) is None, f"诚实句被记成承诺（{key}）：{sentence}"
+        assert detect_promise(sentence + "。") is None, f"带标点的诚实句也不行（{key}）"
+
+
+@pytest.mark.asyncio
+async def test_settle_does_not_capture_honest_sentences(tmp_path: Path) -> None:
+    """服务级：`settle_after_reply` 在诚实句上不新增 intention（不会自激成待办）。
+
+    本次授权只动 `_REJECT_RE`（显式自诺路径）；`user_message=None` 即走该路径。
+    """
+    from elysia.soul.honesty import _HONEST_SENTENCES
+
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        for key, sentence in _HONEST_SENTENCES.items():
+            outcome = await settle_after_reply(store, sentence, T0, wrote=False)
+            assert outcome["captured"] is None, f"诚实句被记成承诺（{key}）：{outcome}"
+        assert await store.pending_intention_count() == 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_real_promises_still_create_intentions(tmp_path: Path) -> None:
+    """防修过头：收窄拒绝表后，真实承诺仍然能被捕获成 intention。
+
+    「我今晚写」走的是 T-020d/e 的上下文判据（显式 `_PROMISE_TIME` 不含"今晚"，
+    本任务红线不动那条正则），所以用 `capture_promise` 覆盖两条路径。
+    """
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        cases: list[tuple[str, str | None]] = [
+            ("我这就写。", None),
+            ("写完喊你。", None),
+            ("我今晚写。", _REAL_MACHINE_WRITE_REQUEST),
+        ]
+        for text, user_message in cases:
+            assert (
+                detect_promise(text) is not None
+                or detect_contextual_promise(user_message or "", text, wrote=False) is not None
+            ), f"真实承诺的判据全部没认出：{text}"
+            pid = await capture_promise(store, text, T0, wrote=False, user_message=user_message)
+            assert pid is not None, f"真实承诺没有被记成 intention：{text}"
+    finally:
+        await store.close()

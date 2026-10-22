@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -322,29 +323,78 @@ async def test_checkpoint_latest(tmp_path: Path) -> None:
     assert first in mgr.list_checkpoints()
 
 
-@pytest.mark.asyncio
-async def test_heartbeat_creates_periodic_checkpoint(tmp_path: Path) -> None:
-    """取消测试（P0-R1）：心跳跑够 N 拍后 `data/checkpoints/` 必须真的出现快照。
+async def _wait_for_periodic_checkpoint(
+    data_dir: Path, *, timeout_s: float = 10.0
+) -> tuple[list[Path], int, float]:
+    """轮询等待周期快照出现（不等"固定几拍"——第 N 拍的 .backup+gzip 在线程里跑）。
 
-    旧写法（无接线）在本用例上必红：`list_checkpoints()` 为空、目录不存在。
+    返回 `(快照列表, 轮询次数, 实际等待秒数)`；超时也返回最后一次列表（由调用方断言）。
     """
+    mgr = CheckpointManager(data_dir)
+    started = time.monotonic()
+    polls = 0
+    while True:
+        checkpoints = mgr.list_checkpoints()
+        if checkpoints:
+            return checkpoints, polls, time.monotonic() - started
+        if time.monotonic() - started >= timeout_s:
+            return checkpoints, polls, time.monotonic() - started
+        polls += 1
+        await asyncio.sleep(0.05)
+
+
+async def _run_until_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch | None = None,
+    *,
+    slow_create_s: float = 0.0,
+) -> tuple[list[Path], int, float, Path]:
+    """起心跳 → 等快照 → 优雅停止并关库；返回等待结果与数据目录。"""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    soul, clock, state_store, heartbeat_store = _make_heartbeat(data_dir)
+    if slow_create_s > 0:
+        original = CheckpointManager.create
+
+        async def _slow_create(self: CheckpointManager, state_db: Path, heartbeat_db: Path) -> Path:
+            await asyncio.sleep(slow_create_s)
+            return await original(self, state_db, heartbeat_db)
+
+        assert monkeypatch is not None, "slow_create_s 需要 monkeypatch 注入"
+        monkeypatch.setattr(CheckpointManager, "create", _slow_create)
+    soul, _clock, state_store, heartbeat_store = _make_heartbeat(data_dir)
     await state_store.start()
     await heartbeat_store.start()
     task = asyncio.create_task(soul.run())
     try:
-        # 虚拟 5 拍（checkpoint_every_n=3 ⇒ 至少落一份）
-        await clock.sleep(5.0)
+        checkpoints, polls, elapsed = await _wait_for_periodic_checkpoint(data_dir)
     finally:
         await soul.stop()
         await task
         await state_store.close()
         await heartbeat_store.close()
+    return checkpoints, polls, elapsed, data_dir
 
-    checkpoints = CheckpointManager(data_dir).list_checkpoints()
-    assert checkpoints, "心跳跑够 N 拍后必须生成周期快照（旧写法：0 份）"
+
+@pytest.mark.asyncio
+async def test_heartbeat_creates_periodic_checkpoint(tmp_path: Path) -> None:
+    """取消测试（P0-R1）：心跳跑够 N 拍后 `data/checkpoints/` 必须真的出现快照。
+
+    旧写法（无接线）在本用例上必红：`list_checkpoints()` 为空、目录不存在。
+
+    D-19（T-025）：不再"固定推进 5 拍后立刻断言"（快照的 .backup+gzip 在线程里，
+    并发负载下可能在落盘前就断言）；改为**等条件成立**（最多 10s 真实超时），
+    超时才 fail，并把"轮询了多少轮 / 等了多久 / 目录里有什么"打进断言消息。
+    """
+    checkpoints, polls, elapsed, data_dir = await _run_until_checkpoint(tmp_path)
+    listing = (
+        sorted(p.name for p in (data_dir / "checkpoints").iterdir())
+        if (data_dir / "checkpoints").is_dir()
+        else []
+    )
+    assert checkpoints, (
+        f"等待 {polls} 轮 / {elapsed:.1f}s 仍无周期快照"
+        f"（checkpoint_every_n=3）；checkpoints/ 目录内容：{listing}"
+    )
     latest = checkpoints[-1]
     assert (latest / "state.db.gz").is_file()
     assert (latest / "heartbeat.db.gz").is_file()
@@ -353,6 +403,30 @@ async def test_heartbeat_creates_periodic_checkpoint(tmp_path: Path) -> None:
     # 快照必须是**可读的**真库（`.backup` + gzip 产物），不是空文件
     keys = [row[0] for row in _query_snapshot(latest, "state.db", "SELECT key FROM kv")]
     assert "timesense" in keys, "快照里必须有她本拍落盘的时间状态（证明建在拍到落库之后）"
+
+
+@pytest.mark.asyncio
+async def test_periodic_checkpoint_waits_for_slow_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-19 确定性复现：`create()` 慢 0.3s（模拟负载下 to_thread 的 gzip）也必须等到快照。
+
+    取消测试：把等待改回"固定 5 拍后立刻看"⇒ 在 0.3s 慢 create 下会提前看到空列表。
+    """
+    checkpoints, polls, elapsed, data_dir = await _run_until_checkpoint(
+        tmp_path, monkeypatch, slow_create_s=0.3
+    )
+    listing = (
+        sorted(p.name for p in (data_dir / "checkpoints").iterdir())
+        if (data_dir / "checkpoints").is_dir()
+        else []
+    )
+    assert checkpoints, (
+        f"slow create(0.3s) 下等待 {polls} 轮 / {elapsed:.1f}s 仍无快照；目录：{listing}"
+    )
+    latest = checkpoints[-1]
+    assert (latest / "state.db.gz").is_file()
+    assert (latest / "heartbeat.db.gz").is_file()
 
 
 @pytest.mark.asyncio

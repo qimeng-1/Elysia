@@ -139,9 +139,9 @@ async def test_no_capture_when_write_note_succeeded(tmp_path: Path) -> None:
         await store.close()
 
 
-# ── 3. payload：她自己的"未完成之事"（T-022a：不再有系统提醒字段）──
+# ── 3. payload：她自己的"未完成之事"（T-033：只留一个 own_words）──
 @pytest.mark.asyncio
-async def test_payload_carries_unfinished_things_only(tmp_path: Path) -> None:
+async def test_payload_carries_own_words_only(tmp_path: Path) -> None:
     service, store, state = await _service(tmp_path, text="嗯。")
     try:
         await store.add_intention(
@@ -153,16 +153,21 @@ async def test_payload_carries_unfinished_things_only(tmp_path: Path) -> None:
         )
         result = await service.run_job(_job("在吗"))
         payload = result.instruction
-        # T-022a：正常回合不再出现系统提醒字段
-        assert "pending_promises" not in payload
-        assert "pending_promises_hint" not in payload
-        things = payload.get("unfinished_things")
-        assert isinstance(things, list) and things
-        assert any("我待会儿把那篇写完给你看" in item for item in things)
-        assert all(isinstance(item, str) for item in things)
-        assert len(things) <= 3
-        # 正常回合（<24h、之后没开口过）不出现兜底问句
-        assert "promise_reminder" not in payload
+        # T-033：旧的两个施压字段全部消失，只剩 own_words 一个
+        for old in (
+            "pending_promises",
+            "pending_promises_hint",
+            "unfinished_things",
+            "promise_reminder",
+        ):
+            assert old not in payload, f"旧字段 {old} 仍在 payload 里"
+        words = payload.get("own_words")
+        assert isinstance(words, list) and words
+        assert any("我待会儿把那篇写完给你看" in item for item in words)
+        assert all(isinstance(item, str) for item in words)
+        assert len(words) <= 3
+        # 未到期（<24h、之后没开口过）⇒ 普通句式，不带"我想起来："
+        assert all(item.startswith("我说过要写「") for item in words)
     finally:
         await state.close()
         await store.close()

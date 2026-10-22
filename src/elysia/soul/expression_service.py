@@ -126,17 +126,17 @@ from elysia.soul.expression_types import (
 from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
 from elysia.soul.intentions import Intentions
 from elysia.soul.promises import (
+    OWN_WORDS_FIELD,
     PROMISE_TTL_S,
     UNFINISHED_MAX,
-    due_promise_reminder,
     forced_write_prompt,
     formed_log_text,
     has_immediate_write_intent,
     is_abandonment,
     next_forced_write_promise,
+    own_words,
     record_written_memory,
     settle_after_reply,
-    unfinished_things,
 )
 from elysia.soul.tools.keep_moment import MomentKeeper
 from elysia.soul.tools.read_url import ReadResult, read_url
@@ -714,7 +714,7 @@ class ExpressionService:
         依据三选一：① 本次成功工具结果；② 本次钩回的 `world`/`exchange` 记忆；
         ③ 对话上下文（**用户**说过的话——她自己的旧气泡不算独立依据，否则自我循环）。
 
-        T-030：写类完成主张的"无据"判据 = **她还欠着一篇（`unfinished_things` 非空）
+        T-030：写类完成主张的"无据"判据 = **她还欠着一篇（`own_words` 非空）
         且这一轮没有成功的 `write_note`**；不欠账时不拦（那可能是回忆真的旧稿）。
         """
         if not speak.text:
@@ -740,11 +740,11 @@ class ExpressionService:
                     evidence.append(text)
 
         motive = await self._fiction_motive()
-        # T-030：写类完成主张"无据"的窄判据——她还欠着一篇（payload 的
-        # `unfinished_things` 非空）**且**这一轮没有成功的 `write_note`。
+        # T-030/T-033：写类完成主张"无据"的窄判据——她还欠着一篇（payload 的
+        # `own_words` 非空）**且**这一轮没有成功的 `write_note`。
         # 不欠账时不拦：那可能是回忆她真的写过的旧稿，不是谎。
         write_completion_unfounded = (not self._job_write_note_ok) and bool(
-            payload.get("unfinished_things")
+            payload.get(OWN_WORDS_FIELD)
         )
         verdict = rewrite_unfounded_claims(
             speak.text,
@@ -962,21 +962,14 @@ class ExpressionService:
         except Exception:
             log.warning("装配 recent_discoveries 失败", exc_info=True)
             payload["recent_discoveries"] = []
-        # T-022a：她的未完成之事——**她自己的记忆原句**（不是系统提醒字段）。
-        # 正常回合不再出现 `pending_promises` / `pending_promises_hint`。
+        # T-033：她自己的话——未完成清单与到期提醒**合成一个字段** `own_words`
+        # （≤3 条、去重、一种句式；到期那条换「我想起来：…」）。同一承诺一轮只出现
+        # 一次，不再有 `unfinished_things` + `promise_reminder` 的双压。
         try:
-            payload["unfinished_things"] = await unfinished_things(self._store, now)
+            payload[OWN_WORDS_FIELD] = await own_words(self._store, now)
         except Exception:
-            log.warning("装配 unfinished_things 失败", exc_info=True)
-            payload["unfinished_things"] = []
-        # T-022a 兜底：承诺 >24h 或她之后已开口 ≥2 次仍未动 ⇒ 才出现一次问句
-        # （同一条 12h 最多一次；冷却记 kv）
-        try:
-            reminder = await due_promise_reminder(self._store, now)
-            if reminder:
-                payload["promise_reminder"] = reminder
-        except Exception:
-            log.warning("装配 promise_reminder 失败", exc_info=True)
+            log.warning("装配 own_words 失败", exc_info=True)
+            payload[OWN_WORDS_FIELD] = []
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)

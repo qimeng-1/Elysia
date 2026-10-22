@@ -410,7 +410,7 @@ async def test_motive_allows_and_logs(tmp_path: Path, caplog: pytest.LogCaptureF
 
 
 # ── T-030：写类完成主张（窄判据：她还欠着一篇 + 本轮没写）────────────
-# 真机原文（2026-10-22 21:43/21:49/21:51）：unfinished_things 非空、本轮无 write_note。
+# 真机原文（2026-10-22 21:43/21:49/21:51）：own_words 非空、本轮无 write_note。
 REAL_WRITE_CLAIMS = [
     "我刚才把那篇收尾了，搁下笔发了会儿呆。",
     "写完了，心里空了一小块，又有点满。",
@@ -482,7 +482,7 @@ async def _add_pending_promise(store: HeartbeatStore, goal: str = "爱莉希雅�
 
 @pytest.mark.asyncio
 async def test_service_rewrites_write_completion_when_promise_pending(tmp_path: Path) -> None:
-    """T-030 真机三句：她还欠着一篇（unfinished_things 非空）+ 本轮未写 ⇒ 整轮诚实句。"""
+    """T-030 真机三句：她还欠着一篇（own_words 非空）+ 本轮未写 ⇒ 整轮诚实句。"""
     store = HeartbeatStore(tmp_path / "heartbeat.db")
     await store.start()
     try:
@@ -490,7 +490,7 @@ async def test_service_rewrites_write_completion_when_promise_pending(tmp_path: 
         for claim in REAL_WRITE_CLAIMS:
             service = ExpressionService(_FakeLLM(claim), store)  # type: ignore[arg-type]
             result = await service.run_job(_job(user_message="你在干嘛"))
-            assert result.instruction.get("unfinished_things"), "前提：她还欠着一篇"
+            assert result.instruction.get("own_words"), "前提：她还欠着一篇"
             assert result.text == HONEST_WRITE, (claim, result.text)
     finally:
         await store.close()
@@ -508,7 +508,7 @@ async def test_service_passes_write_completion_when_write_note_succeeded(tmp_pat
             store,
             writing_workspace=WritingWorkspace(tmp_path / "writing"),
         )
-        payload: dict[str, Any] = {"unfinished_things": ["我答应过要写「爱莉希雅那篇」，还没写。"]}
+        payload: dict[str, Any] = {"own_words": ["我说过要写「爱莉希雅那篇」，还没写。"]}
         speak = await service._speak_with_retry(payload)
         await service._tool_write_note("我把那篇写完了。", "爱莉希雅.md")  # 本轮真的写了
         verdict = await service._apply_truthfulness(
@@ -521,13 +521,13 @@ async def test_service_passes_write_completion_when_write_note_succeeded(tmp_pat
 
 @pytest.mark.asyncio
 async def test_service_passes_write_completion_without_pending_promise(tmp_path: Path) -> None:
-    """还有半句：没有欠账（unfinished_things 为空）⇒ 不拦，那是回忆真的旧稿。"""
+    """还有半句：没有欠账（own_words 为空）⇒ 不拦，那是回忆真的旧稿。"""
     store = HeartbeatStore(tmp_path / "heartbeat.db")
     await store.start()
     try:
         service = ExpressionService(_FakeLLM(REAL_WRITE_CLAIMS[2]), store)  # type: ignore[arg-type]
         result = await service.run_job(_job(user_message="你在干嘛"))
-        assert result.instruction.get("unfinished_things") == []
+        assert result.instruction.get("own_words") == []
         assert result.text == REAL_WRITE_CLAIMS[2]
     finally:
         await store.close()

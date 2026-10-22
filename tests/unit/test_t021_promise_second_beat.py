@@ -487,27 +487,21 @@ async def test_deepseek_regular_tool_round_has_no_tool_choice() -> None:
     assert "tool_choice" not in payloads[0]
 
 
-# ── 提示语文案（T-029：她自己的记忆口吻，不是催办）────────────────────
-def test_promise_reminder_is_her_memory_not_a_demand() -> None:
-    """取消测试：把文案改回「你答应过的事还没做…这件还算数吗？不写也跟我说一声」
+# ── 提示语文案（T-029/T-033：她自己的记忆口吻，不是催办）──────────────
+def test_own_words_line_is_her_memory_not_a_demand() -> None:
+    """取消测试：把句式改回「你答应过的事还没做…这件还算数吗？不写也跟我说一声」
     ⇒ 本用例红（出现问句/催办词）。"""
-    from elysia.soul.promises import promise_reminder_question
+    from elysia.soul.promises import own_words_line
 
-    single = promise_reminder_question(["我这就写爱莉希雅"])
-    assert single == "我想起来：我说过要写「我这就写爱莉希雅」，还没写。"
-    assert "我想起来" in single and "还没写" in single
-    for banned in ("还算数吗", "跟我说一声", "？", "?", "答应过的事还没做", "write_note"):
-        assert banned not in single, f"提醒不许带催办/问句语义：{banned!r} in {single!r}"
-
-    multi = promise_reminder_question(["爱莉希雅那篇", "星空的诗"])
-    assert multi == "我想起来：我说过要写「爱莉希雅那篇」；也说过「星空的诗」，都还没写。"
-    for banned in ("还算数吗", "跟我说一声", "？", "?"):
-        assert banned not in multi, f"多条提醒同样不许催办：{banned!r} in {multi!r}"
-
-    # 空列表也不许抛/不许退回催办口吻
-    empty = promise_reminder_question([])
-    assert "我想起来" in empty and "还没写" in empty
-    assert "还算数吗" not in empty and "跟我说一声" not in empty
+    plain = own_words_line("我这就写爱莉希雅")
+    assert plain == "我说过要写「我这就写爱莉希雅」，还没写。"
+    due = own_words_line("我这就写爱莉希雅", due=True)
+    assert due == "我想起来：我说过要写「我这就写爱莉希雅」，还没写。"
+    for text in (plain, due):
+        for banned in ("还算数吗", "跟我说一声", "？", "?", "答应过的事还没做", "write_note"):
+            assert banned not in text, f"提醒不许带催办/问句语义：{banned!r} in {text!r}"
+    # 每条 ≤120 字（超长 goal 截断，不把一句提醒撑爆）
+    assert len(own_words_line("字" * 500)) <= 20 + 120
 
 
 def test_reminder_thresholds_untouched_by_tone_change() -> None:

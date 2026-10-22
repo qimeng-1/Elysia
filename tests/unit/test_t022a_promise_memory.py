@@ -10,8 +10,9 @@
 3. 成文（自己写的 / 第二拍写的）⇒ 落一条"我把〈文件名〉写完了，是我自己写的"，
    旧记忆 `superseded_by` 指向它（原件保真）；
 4. 正常回合 payload 不含 `pending_promises` / `pending_promises_hint`；
-   `unfinished_things` 只放她的原句（≤3、无祈使句/工具名）；
-5. 承诺 >24h 或之后已开口 ≥2 次 ⇒ 兜底问句出现一次（12h 冷却）；
+   T-033 起只留一个 `own_words`（≤3、去重、一种句式）；
+5. 承诺 >24h 或之后已开口 ≥2 次 ⇒ **同一条**换成「我想起来：…」句式（12h 冷却），
+   不再额外加第二段；
 6. 强制轮只在"即时意图"（马上/这就/今晚就写）时触发。
 """
 
@@ -252,13 +253,13 @@ async def test_second_beat_leaves_evidence(tmp_path: Path) -> None:
         await store.close()
 
 
-# ── 4. 正常回合 payload：只有她的原句，没有系统提醒字段 ─────────────
+# ── 4. 正常回合 payload：只有她的原句（T-033：只剩 own_words）──────────
 @pytest.mark.asyncio
-async def test_payload_only_has_her_own_unfinished_things(tmp_path: Path) -> None:
-    """payload 不含 `pending_promises*`；`unfinished_things` 只有她的原句、无工具名/祈使句。
+async def test_payload_only_has_her_own_own_words(tmp_path: Path) -> None:
+    """payload 不含 `pending_promises*` / `unfinished_things` / `promise_reminder`；
+    `own_words` 只有她自己的话、无工具名/祈使句。
 
-    取消测试：把 payload 装配改回 `pending_promises` + `promise_hint`（或往
-    `unfinished_things` 里塞系统话术）⇒ 本用例红。
+    取消测试：把 payload 改回双字段（`unfinished_things` + `promise_reminder`）⇒ 本用例红。
     """
     llm = _FakeLLM("嗯。")
     service, store, _workspace = await _service(tmp_path, llm)
@@ -271,25 +272,30 @@ async def test_payload_only_has_her_own_unfinished_things(tmp_path: Path) -> Non
         await record_promise_memory(store, pid, "爱莉希雅那篇", T0 - 100)
 
         payload = (await service.run_job(_job())).instruction
-        assert "pending_promises" not in payload
-        assert "pending_promises_hint" not in payload
-        things = payload.get("unfinished_things")
-        assert isinstance(things, list) and things
-        joined = "；".join(things)
-        assert "我答应过要写" in joined
+        for old in (
+            "pending_promises",
+            "pending_promises_hint",
+            "unfinished_things",
+            "promise_reminder",
+        ):
+            assert old not in payload, f"旧字段 {old} 仍在 payload 里"
+        words = payload.get("own_words")
+        assert isinstance(words, list) and words
+        joined = "；".join(words)
+        assert "我说过要写" in joined
         for banned in ("write_note", "现在用", "你应该", "必须", "系统"):
             assert banned not in joined
-        assert len(things) <= 3
-        # 正常回合（<24h、之后没开口过）不出现兜底问句
-        assert "promise_reminder" not in payload
+        assert len(words) <= 3
+        # 未到期 ⇒ 普通句式（不是"我想起来"）
+        assert all(item.startswith("我说过要写「") for item in words)
     finally:
         await store.close()
 
 
-# ── 5. 兜底提醒：24h 或之后开口 ≥2 次；12h 冷却 ─────────────────────
+# ── 5. 到期：同一条换句式（不再加第二段）；12h 冷却 ──────────────────
 @pytest.mark.asyncio
-async def test_fallback_reminder_after_24h_and_cooldown(tmp_path: Path) -> None:
-    """>24h ⇒ 出现一次她记忆口吻的提醒；同一承诺 12h 内不再出现（冷却）。"""
+async def test_due_line_after_24h_and_cooldown(tmp_path: Path) -> None:
+    """>24h ⇒ 仍是**一条**，句式变「我想起来：…」；12h 冷却内回到普通句式。"""
     llm = _FakeLLM("嗯。")
     service, store, _workspace = await _service(tmp_path, llm)
     try:
@@ -305,22 +311,25 @@ async def test_fallback_reminder_after_24h_and_cooldown(tmp_path: Path) -> None:
         await record_promise_memory(store, pid, "爱莉希雅那篇", T0 - 25 * 3600)
 
         first = (await service.run_job(_job())).instruction
-        reminder = first.get("promise_reminder")
-        # T-029：提醒是她自己的记忆口吻，不是问句/催办
-        assert isinstance(reminder, str) and "我想起来" in reminder
-        assert "我说过要写" in reminder and "还没写" in reminder
-        assert "这件还算数吗？" not in reminder
-        assert "不写也跟我说一声" not in reminder
-        # 换一个任务（同一承诺）：12h 冷却内不再出现
+        assert "promise_reminder" not in first and "unfinished_things" not in first
+        words = first.get("own_words")
+        assert isinstance(words, list) and len(words) == 1, f"到期也只许一条：{words}"
+        assert words[0].startswith("我想起来：")
+        assert "我说过要写" in words[0] and "还没写" in words[0]
+        assert "这件还算数吗？" not in words[0]
+        assert "不写也跟我说一声" not in words[0]
+        # 换一个任务（同一承诺）：12h 冷却内不再出现第二次提醒，只回普通句式
         second = (await service.run_job(_job())).instruction
-        assert "promise_reminder" not in second
+        words2 = second.get("own_words")
+        assert isinstance(words2, list) and len(words2) == 1
+        assert not words2[0].startswith("我想起来：")
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_fallback_reminder_after_two_openings(tmp_path: Path) -> None:
-    """承诺之后她已开口 ≥2 次仍未动 ⇒ 兜底提醒（不等 24h，口吻是她的记忆）。"""
+async def test_due_line_after_two_openings(tmp_path: Path) -> None:
+    """承诺之后她已开口 ≥2 次仍未动 ⇒ 不等 24h 也换「我想起来：…」（仍只一条）。"""
     llm = _FakeLLM("嗯。")
     service, store, _workspace = await _service(tmp_path, llm)
     try:
@@ -334,9 +343,10 @@ async def test_fallback_reminder_after_two_openings(tmp_path: Path) -> None:
         await store.think(T0 - 40, "expression", "好。")
 
         payload = (await service.run_job(_job())).instruction
-        reminder = payload.get("promise_reminder")
-        assert isinstance(reminder, str) and "我想起来" in reminder
-        assert "这件还算数吗？" not in reminder
+        words = payload.get("own_words")
+        assert isinstance(words, list) and len(words) == 1
+        assert words[0].startswith("我想起来：")
+        assert "这件还算数吗？" not in words[0]
     finally:
         await store.close()
 

@@ -38,6 +38,7 @@ from urllib import request
 
 from elysia.llm.chain import LLMBackend, ToolRunner
 from elysia.llm.identity import IDENTITY_FIELD, compose_identity, identity_lines
+from elysia.soul.promises import OWN_WORDS_FIELD
 from elysia.soul.tools.schema import invalid_args_receipt, validate_tool_args
 
 log = logging.getLogger("elysia.llm.deepseek")
@@ -235,6 +236,19 @@ def _system_prompt(identity: Any) -> str:
     身份段来自**数据**（缺省即出生设定），换模型/断网时"她是谁"不随后端常量消失。
     """
     return compose_identity(identity_lines(identity)) + _PERSONA_PROMPT
+
+
+# T-033（说话规则融合第③步）：`own_words` 不再作为 JSON 键塞进结构化状态，
+# 而是渲染成一段人话（标题 + 逐行）。同一承诺一轮只出现一次；空列表 ⇒ 不出现该块。
+OWN_WORDS_HEADER = "你说过、但还没做的事（你自己的话）："
+
+
+def render_own_words_block(words: Any) -> str:
+    """把 `own_words` 渲染成「标题 + 逐行」一段；空/缺省 ⇒ 空串（prompt 里不出现）。"""
+    items = [str(item).strip() for item in (words or []) if str(item or "").strip()]
+    if not items:
+        return ""
+    return "\n".join([OWN_WORDS_HEADER, *(f"- {item}" for item in items)])
 
 
 def _first_message(data: dict[str, Any]) -> dict[str, Any]:
@@ -621,11 +635,17 @@ class DeepSeekBackend(LLMBackend):
 
         `identity` 只进 system 段，从 user 段的 JSON 里剔掉——它是"我是谁"，
         不是她要翻译的状态字段，混进结构化状态只会污染 T2 的干净结构。
+        T-033：`own_words` 同理从 JSON 里剔掉，改渲染成一段人话附在 user 段末尾；
+        空列表 ⇒ 不出现该块（prompt 里既没有 `own_words` 键、也没有空块）。
         """
-        body = {k: v for k, v in instruction.items() if k != IDENTITY_FIELD}
+        body = {k: v for k, v in instruction.items() if k not in (IDENTITY_FIELD, OWN_WORDS_FIELD)}
+        user = json.dumps(body, ensure_ascii=False)
+        block = render_own_words_block(instruction.get(OWN_WORDS_FIELD))
+        if block:
+            user = f"{user}\n\n{block}"
         return [
             {"role": "system", "content": _system_prompt(instruction.get(IDENTITY_FIELD))},
-            {"role": "user", "content": json.dumps(body, ensure_ascii=False)},
+            {"role": "user", "content": user},
         ]
 
     def _payload(

@@ -46,19 +46,25 @@ T-022a（用户 2026-10-22 批准：**自觉性改造**——"承诺的事只要
   `source_ref='promise:<intention_id>'`，可被正常召回；
 - 任一路径成文后落一条"我把〈文件名〉写完了，是我自己写的"的自我证据，并把
   "还没写"那条 `superseded_by` 指向它（原件保真）；
-- 正常回合不再出现 `pending_promises` / `pending_promises_hint`，改由
-  `unfinished_things` 只放她自己的记忆原句；只有承诺 >24h 或她在这之后已开口 ≥2 次
-  仍未动时，才兜底出现一次**她自己的记忆**（同一条 12h 最多一次）；
+- 正常回合不再出现 `pending_promises` / `pending_promises_hint`，改由一个
+  `own_words` 只放她自己的话（T-033 起与到期提醒合并）；只有承诺 >24h 或她在这之后
+  已开口 ≥2 次仍未动时，该条才换成「我想起来：…」口吻（同一条 12h 最多一次）；
 - 强制轮**大量收窄**：只在她这一轮明确说了"马上/这就/今晚就写"这类即时意图时才强制，
   冷却从 10 分钟提到 2 小时；其余交给记忆与下一次开口。
 
 T-029（用户裁定 2026-10-22 21:4x）：兜底提醒的**口吻**改掉——不是催办，是她自己的记忆。
 真机 20:48 证据：旧提醒「你答应过的事还没做：…。这件还算数吗？不写也跟我说一声。」
 进了 payload，她答「在写了，真的在写」「写完就给你看」，而 `data/her_home/` 无新文件、
-无 `write_note` 痕迹——旧文案把"该她交代"摆到了她面前。现在
-`promise_reminder_question` 只说「我想起来：我说过要写「…」，还没写。」：**没有问句、
-不要求表态**；她可以不理，也可以直接说不写了（`is_abandonment` 出口仍在）。
+无 `write_note` 痕迹——旧文案把"该她交代"摆到了她面前。现在由 `own_words_line` 落成
+「我想起来：我说过要写「…」，还没写。」：**没有问句、不要求表态**；她可以不理，
+也可以直接说不写了（`is_abandonment` 出口仍在）。
 触发阈值/冷却（24h、开口≥2 次、12h 冷却）**一个字不动**，只改文案。
+
+T-033（2026-10-22 23:2x，说话规则融合第③步）：把 `unfinished_things` 与
+`promise_reminder` **合成一个** payload 字段 `own_words`（≤3 条、去重、一种句式）：
+同一承诺在一轮里只出现一次；到期（承诺 >24h 或之后她已开口 ≥2 次）那条只是把句式换成
+「我想起来：…」，**不再额外加第二段**（20:48 把她压出"在写了"的双压就是这么来的）。
+阈值/冷却一个都不动，这是等价重构 + 只减重复。
 """
 
 from __future__ import annotations
@@ -85,8 +91,12 @@ PROMISE_MEMORY_KIND = KIND_INTERNAL
 PROMISE_MEMORY_IMPORTANCE = 0.6  # 值得被想起来（≥0.6 的"心事"档）
 PROMISE_MEMORY_SOURCE_REF_PREFIX = "promise:"
 WRITTEN_MEMORY_SOURCE_REF_PREFIX = "written:"
-# 正常回合的 `unfinished_things`（她自己的原句）最多几条
+# 正常回合的 `own_words`（她自己的话）最多几条
 UNFINISHED_MAX = 3
+# T-033：payload 里唯一的"她自己的话"字段名（expression_service 装配 / deepseek 渲染共用）
+OWN_WORDS_FIELD = "own_words"
+# 每条 own_words 最多多少字（与承诺原话上限一致）
+OWN_WORDS_LINE_CHARS = PROMISE_GOAL_CHARS
 # 兜底提醒：承诺超过 24h，或她在这条承诺之后已开口 ≥2 次仍未动
 REMINDER_STALE_S = 24.0 * 3600.0
 REMINDER_OPENINGS_MIN = 2
@@ -106,7 +116,7 @@ _PROMISE_FOLLOWUP = re.compile(r"写(?:完|好)(?:了)?(?:就|再)?(?:给|喊|�
 # 拒绝用：写作动词附近的否定/过去时（本句含这些即不是承诺；保守，宁可不记）
 # T-031：**反编造产生的诚实句绝不能被记成承诺**——「其实我还没真的写完呢。」若被
 # `_PROMISE_RESULT`（我…写完）再捕获一次，就等于系统把"没做到"记成"要做"，形成自激
-# （诚实句 → 新 pending 承诺 → 进 unfinished_things/提醒）。因此把"还没真的写/没真的
+# （诚实句 → 新 pending 承诺 → 进 own_words/提醒）。因此把"还没真的写/没真的
 # 写完/还没写完"这类**未完成**写法列入拒绝表：诚实句与真·否定句都不该记成承诺。
 _REJECT_RE = re.compile(
     r"(?:写不|写没|没写|没真的写完|还没真的写|还没写完|不想写|不写了|不肯写|懒得写|写不动"
@@ -448,65 +458,53 @@ async def record_written_memory(
     return new_id
 
 
-async def unfinished_things(store: Any, now: float, *, limit: int = UNFINISHED_MAX) -> list[str]:
-    """未完成之事的**她自己的原句**（≤limit；没有祈使句、没有工具名）。"""
+def own_words_line(goal: str, *, due: bool = False) -> str:
+    """一条"她自己的话"：统一一种句式；到期那条换成记忆口吻（T-029/T-033）。
+
+    普通：`我说过要写「{goal}」，还没写。`
+    到期：`我想起来：我说过要写「{goal}」，还没写。`
+    **没有问句、不要求表态**——提醒是她的记忆，不是催办。
+    """
+    text = str(goal or "").strip()[:OWN_WORDS_LINE_CHARS]
+    prefix = "我想起来：" if due else ""
+    return f"{prefix}我说过要写「{text}」，还没写。"
+
+
+async def own_words(store: Any, now: float, *, limit: int = UNFINISHED_MAX) -> list[str]:
+    """payload 唯一的"她自己的话"：未完成之事（≤limit、去重、统一句式）。
+
+    T-033：合并 T-022a 的 `unfinished_things` 与兜底提醒 `promise_reminder`——
+    同一承诺一轮**只出现一次**；到期（承诺 >24h 或之后她已开口 ≥2 次）的那条
+    只是把句式换成「我想起来：…」，不再额外塞第二段（20:48 的双压）。
+    到期判定/冷却与旧实现**完全一致**：同一条 12h 内最多一次，冷却记在 kv
+    `promise_reminder:<id>`（沿用旧键，不迁移数据）；阈值/冷却一个都不动。
+    """
     await store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)
     rows = await store.unfinished_promises(limit=limit)
     out: list[str] = []
+    seen: set[str] = set()
     for row in rows:
-        text = str(row.get("content") or "").strip()
-        if not text:
-            text = promise_memory_text(str(row.get("goal") or ""))
-        if text and text not in out:
-            out.append(text)
-    return out[:limit]
-
-
-def promise_reminder_question(goals: list[str]) -> str:
-    """兜底提醒：**她自己的记忆，不是催办**（T-029，用户裁定 2026-10-22）。
-
-    旧版「你答应过的事还没做：…。这件还算数吗？不写也跟我说一声。」是在要她交代；
-    真机她收到后答「在写了，真的在写」，然后既没有文件、也没有 `write_note` 痕迹。
-    现在只把"我想起我说过要写什么、还没写"递给她：**没有问句、不要求表态**。
-    她可以不理；真想放下时，`is_abandonment` 的出口照旧（直接说不写了）。
-    单条/多条都保持简洁的一句话，不再带"还算数吗/跟我说一声"这类催办语义。
-    """
-    shown = [str(item).strip() for item in goals if str(item).strip()]
-    if not shown:
-        return "我想起来：我说过要写点什么，还没写。"
-    if len(shown) == 1:
-        return f"我想起来：我说过要写「{shown[0]}」，还没写。"
-    rest = "；".join(f"也说过「{item}」" for item in shown[1:])
-    return f"我想起来：我说过要写「{shown[0]}」；{rest}，都还没写。"
-
-
-async def due_promise_reminder(
-    store: Any, now: float, *, limit: int = MAX_PENDING_PROMISES
-) -> str | None:
-    """T-022a 兜底提醒：承诺 >24h 或之后她已开口 ≥2 次，且同一条 12h 内没提醒过。
-
-    正常回合**不会**出现系统提醒；只有这里返回的非空文案（她自己的记忆口吻，
-    见 `promise_reminder_question`）才会进 payload。触发阈值与冷却一个字不动。
-    冷却记在 kv（`promise_reminder:<id>`），不加表结构。
-    """
-    await store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)
-    rows = await store.unfinished_promises(limit=limit)
-    due_goals: list[str] = []
-    for row in rows:
+        goal = str(row.get("goal") or "").strip()
+        if not goal or goal in seen:
+            continue
+        seen.add(goal)
+        due = False
         created = float(row.get("created_ts") or 0.0)
         stale = float(now) - created >= REMINDER_STALE_S
         openings = await store.count_openings_since(created)
-        if not stale and openings < REMINDER_OPENINGS_MIN:
-            continue
-        key = f"promise_reminder:{int(row['id'])}"
-        last = await store.load_json(key, default=0.0)
-        if isinstance(last, (int, float)) and float(now) - float(last) < REMINDER_COOLDOWN_S:
-            continue
-        await store.save_json(key, float(now))
-        due_goals.append(str(row.get("goal") or ""))
-    if not due_goals:
-        return None
-    return promise_reminder_question(due_goals)
+        if stale or openings >= REMINDER_OPENINGS_MIN:
+            key = f"promise_reminder:{int(row['id'])}"
+            last = await store.load_json(key, default=0.0)
+            cooling = isinstance(last, (int, float)) and (
+                float(now) - float(last) < REMINDER_COOLDOWN_S
+            )
+            if not cooling:
+                await store.save_json(key, float(now))
+                due = True
+        out.append(own_words_line(goal, due=due))
+        if len(out) >= limit:
+            break
+    return out[:limit]
 
 
 # T-022a：只有"这一轮明确说了马上/这就/今晚就写"才允许强制第二拍
@@ -608,7 +606,7 @@ async def list_pending_promises(
 # ── T-021：承诺第二拍（答应的事当场写完）────────────────────────────
 # T-022a 收窄：强制轮只留给"即时意图"（马上/这就/今晚就写），冷却 2 小时。
 # 依据：用户要求"被推着做不符合期望"——强制只该发生在她已经说"现在就写"的时候；
-# 其余情形交给记忆（T-022a 的 `unfinished_things`）与下一次开口。
+# 其余情形交给记忆（T-033 的 `own_words`）与下一次开口。
 FORCED_WRITE_COOLDOWN_S = 2.0 * 3600.0
 # 同一回合最多补 1 次（一回合只挑一条承诺，不做轮询扫描）。
 MAX_FORCED_WRITES_PER_TURN = 1

@@ -305,9 +305,18 @@ def detect_contextual_promise(
     ① 用户这轮在请她写（`has_write_request`）；
     ② 她的回复有肯定答复（`_affirming_sentence`；T-020e：条件①成立时还认
        「写 / 今晚就写 / 写进文件夹」这类子句级写作动作）且整段**没有**拒绝/推脱
-       （`_REFUSAL`）——既不肯定也不拒绝（转移话题/反问）⇒ 不记；
+       （`_REFUSAL`），并且**被当作"肯定"的那一句本身**不是未完成/完成态陈述
+       （`_REJECT_RE`）——既不肯定也不拒绝/未完成（转移话题/反问）⇒ 不记；
     ③ 本回合没有成功的 `write_note`（`wrote=True` ⇒ 不记）；
     ④ 同一请求/同一原话的去重由 `capture_promise` 负责（本函数不碰库）。
+
+    T-032：这里也查 `_REJECT_RE`（与 T-031 同一语义、同一常量），但只查**肯定句**。
+    原因：T-030 会把她无据的"写完了"改成系统自己的诚实句「其实我还没真的写完呢。」，
+    这句话里的「写完」会命中 `_AFFIRM_STRONG`——若用户同一轮正好在请她写，系统就会把
+    她**自己的诚实句**记成她从未做出的承诺（同一条自激链的第二入口）。系统自己写的
+    诚实句与"写完了/写过了/已经写了"这类完成态陈述，都不构成"她答应要写"。
+    **不查整段**：真机「算数。说过的就写，我这会儿还没写完」里"肯定"的是「算数。」，
+    它必须继续被捕获（T-020d 真机用例），整段否决会把这条真承诺一起丢掉。
     """
     if wrote:
         return None
@@ -318,6 +327,8 @@ def detect_contextual_promise(
         return None
     sentence = _affirming_sentence(her)
     if sentence is None:
+        return None
+    if _REJECT_RE.search(sentence):
         return None
     return _contextual_goal(user_message, sentence)
 

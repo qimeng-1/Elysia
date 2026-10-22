@@ -758,3 +758,49 @@ async def test_real_promises_still_create_intentions(tmp_path: Path) -> None:
             assert pid is not None, f"真实承诺没有被记成 intention：{text}"
     finally:
         await store.close()
+
+
+# ── T-032：上下文判据的第二入口也不许把诚实句记成承诺 ─────────────
+_WRITE_REQUEST_FOR_CONTEXT = "那篇爱莉希雅今晚写一下吧，写进你自己的文件夹里。"
+
+
+@pytest.mark.asyncio
+async def test_contextual_capture_rejects_honest_sentences(tmp_path: Path) -> None:
+    """用户请她写 + 她的回复是系统诚实句 ⇒ 上下文判据也不捕获（自激链第二入口）。
+
+    取消测试：去掉 `detect_contextual_promise` 里的 `_REJECT_RE` 判断 ⇒ 本用例红
+    （每个诚实句都会被上下文判据捕获，`settle_after_reply` 会新增 intention）。
+    """
+    from elysia.soul.honesty import _HONEST_SENTENCES
+
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        for key, sentence in _HONEST_SENTENCES.items():
+            assert (
+                detect_contextual_promise(_WRITE_REQUEST_FOR_CONTEXT, sentence, wrote=False) is None
+            ), f"诚实句被上下文判据捕获（{key}）：{sentence}"
+            outcome = await settle_after_reply(
+                store, sentence, T0, wrote=False, user_message=_WRITE_REQUEST_FOR_CONTEXT
+            )
+            assert outcome["captured"] is None, f"诚实句被上下文判据记成承诺（{key}）：{outcome}"
+        assert await store.pending_intention_count() == 0
+    finally:
+        await store.close()
+
+
+def test_contextual_capture_still_accepts_real_affirmations() -> None:
+    """防修过头：真实肯定答复在同样的写请求下仍然捕获。"""
+    for her_text in ("好呀，今晚写。", "算数，我这就写。", "嗯，写。"):
+        assert (
+            detect_contextual_promise(_WRITE_REQUEST_FOR_CONTEXT, her_text, wrote=False) is not None
+        ), f"真实肯定答复被误杀：{her_text}"
+
+
+def test_contextual_capture_keeps_real_machine_utterance() -> None:
+    """真机「算数。说过的就写，我这会儿还没写完」的**肯定句**是「算数。」⇒ 仍捕获。
+
+    取消测试：把 `_REJECT_RE` 检查从"肯定句"挪到"整段"⇒ 本用例红（真承诺被整体丢掉）。
+    """
+    her = "算数。说过的就写，我这会儿还没写完"
+    assert detect_contextual_promise(_REAL_MACHINE_WRITE_REQUEST, her, wrote=False) is not None

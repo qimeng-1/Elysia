@@ -1,6 +1,6 @@
 r"""数据保留：**先归档，再分层降采样/裁剪 heartbeats 流水，最后 VACUUM**。
 
-用法（**必须先停她** —— 一边裁一边写会撞写锁）：
+用法（**必须先停她（soul + body 两个进程都要停）** —— 一边裁一边写会撞写锁）：
 
 ```powershell
 cd <项目根>
@@ -46,6 +46,9 @@ from elysia.core.retention import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PID_FILE = PROJECT_ROOT / "data" / "run" / "soul.pid"
+# 身体（body）也往 heartbeat.db 写 beat_type='body' 的心跳——所以"停机"必须是**两个进程都停**。
+# 名字固定、从灵魂 PID 文件所在目录推导：默认 data/run/soul.pid ⇒ data/run/body.pid。
+BODY_PID_NAME = "body.pid"
 # 归档在**仓库外**（与她的一生数据同级的 _archive/），不随仓库搬家
 DEFAULT_ARCHIVE_DIR = PROJECT_ROOT.parent / "_archive" / "heartbeats"
 
@@ -57,8 +60,8 @@ def _force_utf8_console() -> None:
             stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
 
 
-def _running_soul_pid(pid_file: Path = PID_FILE) -> int | None:
-    """灵魂进程若在跑就返回它的 PID（用项目自带的 psutil，不引入新依赖）。"""
+def _pid_from_file(pid_file: Path) -> int | None:
+    """PID 文件里那个进程若还活着就返回它的 PID（用项目自带的 psutil，不引入新依赖）。"""
     if not pid_file.exists():
         return None
     try:
@@ -66,6 +69,22 @@ def _running_soul_pid(pid_file: Path = PID_FILE) -> int | None:
     except (OSError, ValueError):
         return None
     return pid if psutil.pid_exists(pid) else None
+
+
+def _running_processes(pid_file: Path = PID_FILE) -> list[tuple[str, int]]:
+    """灵魂/身体任一在跑就返回 `[(名字, PID)]` —— 两个进程都会写 heartbeat.db。
+
+    旧版只查 `soul.pid`：只停灵魂、留着身体时仍会放行，然后归档/删除/`VACUUM`
+    与身体的写入赛跑（SQLite 同时只允许一个写者 ⇒ 归档行数与删除行数可能对不上）。
+    """
+    running: list[tuple[str, int]] = []
+    soul = _pid_from_file(pid_file)
+    if soul is not None:
+        running.append(("soul", soul))
+    body = _pid_from_file(pid_file.parent / BODY_PID_NAME)
+    if body is not None:
+        running.append(("body", body))
+    return running
 
 
 def _print_tier_report(report: TierReport) -> None:
@@ -129,7 +148,10 @@ def main(argv: list[str] | None = None) -> int:
         "--pid-file",
         type=Path,
         default=PID_FILE,
-        help="灵魂 PID 文件（默认仓库 data/run/soul.pid；验收入口）",
+        help=(
+            "灵魂 PID 文件（默认仓库 data/run/soul.pid）；身体 PID 从同目录 body.pid 推导"
+            "（两个进程都写 heartbeat.db，任一在跑都会拒绝）"
+        ),
     )
     parser.add_argument(
         "--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR, help="归档目录（gz 档案）"
@@ -142,10 +164,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[skip] 库不存在：{args.db}")
         return 0
 
-    pid = _running_soul_pid(args.pid_file)
-    if pid is not None and not args.force:
+    pid = _running_processes(args.pid_file)
+    if pid and not args.force:
+        who = "、".join(f"{name}(PID {num})" for name, num in pid)
         print(
-            f"[拒绝] 灵魂仍在运行（PID {pid}）——一边裁一边写会撞写锁。请先执行：\n"
+            f"[拒绝] 她仍在运行（{who}）——一边裁一边写会撞写锁。请先执行：\n"
             f"        powershell -ExecutionPolicy Bypass -File scripts\\soul.ps1 stop",
             file=sys.stderr,
         )

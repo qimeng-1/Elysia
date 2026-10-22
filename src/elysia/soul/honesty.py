@@ -30,6 +30,19 @@ T-024（真机取证 2026-10-22 16:43）：她把阅读主张**拆成三句**—
 
 (a)(b) 同轮成立且 (c) 无据 ⇒ **整轮**换成一句诚实句（只换一句会留下编造的页面细节）；
 有据/有动机 ⇒ 整轮放行。逐句路径保留，用于没有完成态动作的引用型主张。
+
+T-030（用户裁定 2026-10-22 22:2x：「扩」）：反编造从读类扩到**写类完成主张**。
+真机 21:43–21:51 她连说「我刚才把那篇收尾了」「写完了，心里空了一小块」「写完了就搁着笔」，
+而 `data/her_home/` 无新文件、`thought_log` 无 `write_note`、`intentions#3/#4` 仍 pending。
+判据必须**窄**（别做过头），三条同时成立才拦：
+
+    ① 她还欠着一篇（表达 payload 的 `unfinished_things` 非空）；
+    ② 这一轮**没有**成功的 `write_note`；
+    ③ 却声称"写完了/写好了/收尾了/落笔了/搁笔了"。
+
+⇒ **整轮**换成「其实我还没真的写完呢。」+ 原收尾标点；不欠账时不拦（那可能是回忆
+真的旧稿，不是谎）。**进行时不在范围内**（「在写」「写到一半」「写下来」一律不拦）——
+用户明确否掉了进行时守门。有动机（`motive`）仍放行。
 """
 
 from __future__ import annotations
@@ -71,6 +84,12 @@ _ROUND_PAGE_RE = re.compile(
     r"(?:维基百科|维基|页面|网页|那页|这页|一页|文章|资料|网上|论坛|帖子|米游社|那行字|这行字)"
 )
 
+# ── T-030：写类完成主张（整轮级；只认完成态）────────────────────────
+# 名单里**没有**「写下来/写到一半/在写」：用户明确否掉进行时守门（21:4x 她确实在写）。
+# 也**不收裸「写完」**（真机完成句都带完成体「了/好/收尾了」）：裸「写完」会把
+#   「我这会儿还没写完」「写完这句我就接着写」误判成"声称写完"，已有 T-020 用例实测会红。
+_WRITE_DONE_RE = re.compile(r"(?:写完了|写好了|收尾(?:了|完)|落笔了|搁笔了)")
+
 # 句子边界（保留标点，整句替换时沿用原句的收尾标点）
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?；;])")
 
@@ -79,6 +98,7 @@ _HONEST_SENTENCES: dict[str, str] = {
     "read": "其实我还没真的去翻过呢",
     "visit": "其实我还没真的去过呢",
     "cite": "其实我也还没真的读到过那页呢",
+    "write": "其实我还没真的写完呢",
 }
 
 # "套话"：判相关时先去掉这些，只留主张里的**内容词**（如"埃舍尔"）
@@ -139,6 +159,18 @@ def is_round_external_claim(text: str) -> bool:
     return bool(_ROUND_ACTION_RE.search(cleaned)) and bool(_ROUND_PAGE_RE.search(cleaned))
 
 
+def is_write_completion_claim(text: str) -> bool:
+    """T-030：**整轮**是否声称"写完了/写好了/收尾了/落笔了/搁笔了"（跨句也算）。
+
+    只认**完成态**（完成体「了/好」或收尾/落笔）：进行时（「在写」「写到一半」
+    「写下来」）**不算**——用户明确否掉进行时守门；非完成态的裸「写完」也不算
+    （「还没写完」「写完这句就…」），否则会把没完成/将来的话误判成"声称写完"。
+    本函数只回答"有没有这类主张"；"算不算无据"由调用方按
+    `write_completion_unfounded`（她还欠着一篇 + 这一轮没写）判定。
+    """
+    return _WRITE_DONE_RE.search(str(text or "")) is not None
+
+
 def _sentence_related(sentence: str, evidence_texts: Sequence[str]) -> bool:
     if not evidence_texts:
         return False
@@ -197,15 +229,31 @@ def rewrite_unfounded_claims(
     *,
     evidence_texts: Iterable[str] = (),
     motive: tuple[int, str] | None = None,
+    write_completion_unfounded: bool = False,
 ) -> ClaimRewrite:
     """把无依据的外部信息主张换成诚实句；其余句子原样保留。
 
-    T-024：先做**整轮判定**——(a) 完成态阅读动作 + (b) 页面类对象同轮出现且
+    T-030：先处理**写类完成主张**——(a) 整轮含"写完了/收尾了" + (b) 调用方判定无据
+    （她还欠着一篇 + 这一轮没有成功 `write_note`）+ (c) 无动机 ⇒ **整轮**换成
+    「其实我还没真的写完呢。」+ 原收尾标点。不欠账（或本轮真写了）⇒ 不处理，
+    继续走读类判定——那可能是回忆真的旧稿，不是谎。
+
+    T-024：再走**整轮读类判定**——(a) 完成态阅读动作 + (b) 页面类对象同轮出现且
     (c) 无相关依据 ⇒ **整轮**（而不只是那一句）换成一句诚实句：跨句拆开的主张
     一旦只换一句，剩下的「是一页讲海星的…」仍是无依据的编造细节。
     没有 (a) 的引用型主张（「维基上写着…」）仍走原有的逐句路径。
     """
     evidence = [str(item) for item in evidence_texts if str(item or "").strip()]
+
+    # ── T-030：写类完成主张（判据窄：她还欠着一篇 + 本轮没写）──────────
+    # 放在读类整轮判定**之前**：两种主张同轮出现时，更具体、有欠账证据的写类
+    # 诚实句优先；否则读类若因"有据"提前放行，假的"写完了"会逃过去。
+    if write_completion_unfounded and is_write_completion_claim(text):
+        if motive is not None:  # 有动机 ⇒ 有理由的谎放行（与 T-024 同构，留 allowed 统计）
+            return ClaimRewrite(text=text, allowed=1)
+        body, punct = _trailing_punct(text)
+        if body.strip():
+            return ClaimRewrite(text=_HONEST_SENTENCES["write"] + punct, rewritten=1)
 
     # ── T-024：整轮判定（跨句主张）──────────────────────────────
     if is_round_external_claim(text):

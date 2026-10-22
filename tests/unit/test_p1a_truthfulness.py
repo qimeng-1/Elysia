@@ -16,6 +16,12 @@ T-024（2026-10-22 真机 16:43）：阅读主张被拆成三句时按句判定�
 取消测试：把检测放宽成"有动作就算"（去掉外部来源对象要求）⇒
 `test_daily_sentences_are_never_rewritten` 必红（12 句日常话被误伤）。
 去掉整轮判定 ⇒ `test_real_machine_cross_sentence_claim_...` 必红。
+
+T-030（2026-10-22 22:2x 用户裁定「扩」）：写类完成主张（「写完了/收尾了/落笔了」）在
+**她还欠着一篇 + 这一轮没写**时整轮换成「其实我还没真的写完呢。」；不欠账不拦
+（那是回忆真的旧稿），进行时（在写/写到一半/写下来）不在范围内。
+取消测试：`_apply_truthfulness` 里把 `write_completion_unfounded` 传成死 `False` ⇒
+`test_service_rewrites_write_completion_when_promise_pending` 必红。
 """
 
 from __future__ import annotations
@@ -42,10 +48,12 @@ from elysia.soul.honesty import (
     claim_is_related,
     is_external_claim,
     is_round_external_claim,
+    is_write_completion_claim,
     reset_claim_stats,
     rewrite_unfounded_claims,
 )
 from elysia.soul.tools.read_url import ReadResult
+from elysia.soul.tools.writing import WritingWorkspace
 
 T0 = 1_000_000.0
 CLAIM = "我读了维基上关于埃舍尔的页面。今天天气不错。"
@@ -397,5 +405,129 @@ async def test_motive_allows_and_logs(tmp_path: Path, caplog: pytest.LogCaptureF
         messages = [r.getMessage() for r in caplog.records]
         assert any("claim_fiction_allowed motive=" in m for m in messages)
         assert any("kind=surprise" in m for m in messages)
+    finally:
+        await store.close()
+
+
+# ── T-030：写类完成主张（窄判据：她还欠着一篇 + 本轮没写）────────────
+# 真机原文（2026-10-22 21:43/21:49/21:51）：unfinished_things 非空、本轮无 write_note。
+REAL_WRITE_CLAIMS = [
+    "我刚才把那篇收尾了，搁下笔发了会儿呆。",
+    "写完了，心里空了一小块，又有点满。",
+    "写完了就搁着笔，人还在这儿坐着呢。",
+]
+HONEST_WRITE = "其实我还没真的写完呢。"
+# 进行时**不在**范围内（用户明确否掉）：这些一句都不许动
+PROGRESSIVE_WRITE = [
+    "我写到一半，卡住了。",
+    "我在写，别急。",
+    "我写下来，一会儿给你看。",
+]
+# 非完成态的「写完」也不许误判（T-020 承诺去重用例实测会被这两句带红）：
+# 「还没写完」是没完成，「写完这句就…」是将来子句，都不是"声称写完"。
+NON_COMPLETION_WRITE = [
+    "我这会儿还没写完。",
+    "写完这句我就接着写。",
+]
+
+
+def test_write_completion_claim_detection_is_completion_only() -> None:
+    for text in REAL_WRITE_CLAIMS:
+        assert is_write_completion_claim(text) is True, text
+    for text in PROGRESSIVE_WRITE + NON_COMPLETION_WRITE:
+        assert is_write_completion_claim(text) is False, f"不是完成态，不算完成主张：{text}"
+
+
+def test_write_completion_rewritten_as_one_honest_sentence() -> None:
+    """取消测试：把 `write_completion_unfounded` 传成死 False ⇒ 本用例红。"""
+    reset_claim_stats()
+    for text in REAL_WRITE_CLAIMS:
+        result = rewrite_unfounded_claims(text, write_completion_unfounded=True)
+        assert result.text == HONEST_WRITE, (text, result.text)
+        assert result.rewritten == 1
+
+
+def test_write_completion_passes_when_no_debt_or_really_wrote() -> None:
+    """不欠账 / 本轮真写了（调用方传 False）⇒ 原样放行：那是回忆，不是谎。"""
+    reset_claim_stats()
+    for text in REAL_WRITE_CLAIMS:
+        result = rewrite_unfounded_claims(text, write_completion_unfounded=False)
+        assert result.text == text, (text, result.text)
+        assert result.rewritten == 0
+
+
+def test_progressive_write_claims_never_blocked() -> None:
+    reset_claim_stats()
+    for text in PROGRESSIVE_WRITE:
+        result = rewrite_unfounded_claims(text, write_completion_unfounded=True)
+        assert result.text == text, (text, result.text)
+        assert result.rewritten == 0
+
+
+def test_write_completion_with_motive_passes() -> None:
+    reset_claim_stats()
+    text = REAL_WRITE_CLAIMS[0]
+    result = rewrite_unfounded_claims(text, write_completion_unfounded=True, motive=(7, "surprise"))
+    assert result.text == text, "有动机 ⇒ 有理由的谎放行"
+    assert result.allowed == 1
+
+
+async def _add_pending_promise(store: HeartbeatStore, goal: str = "爱莉希雅那篇") -> int:
+    return int(
+        await store.add_intention(
+            T0 - 100, goal=goal, action="write_note", target=None, kind="promise"
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_service_rewrites_write_completion_when_promise_pending(tmp_path: Path) -> None:
+    """T-030 真机三句：她还欠着一篇（unfinished_things 非空）+ 本轮未写 ⇒ 整轮诚实句。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        await _add_pending_promise(store)
+        for claim in REAL_WRITE_CLAIMS:
+            service = ExpressionService(_FakeLLM(claim), store)  # type: ignore[arg-type]
+            result = await service.run_job(_job(user_message="你在干嘛"))
+            assert result.instruction.get("unfinished_things"), "前提：她还欠着一篇"
+            assert result.text == HONEST_WRITE, (claim, result.text)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_service_passes_write_completion_when_write_note_succeeded(tmp_path: Path) -> None:
+    """同一句 + 本轮 `write_note` 成功 ⇒ 原样放行（`_job_write_note_ok=True`）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        await _add_pending_promise(store)
+        service = ExpressionService(  # type: ignore[arg-type]
+            _FakeLLM(REAL_WRITE_CLAIMS[1]),
+            store,
+            writing_workspace=WritingWorkspace(tmp_path / "writing"),
+        )
+        payload: dict[str, Any] = {"unfinished_things": ["我答应过要写「爱莉希雅那篇」，还没写。"]}
+        speak = await service._speak_with_retry(payload)
+        await service._tool_write_note("我把那篇写完了。", "爱莉希雅.md")  # 本轮真的写了
+        verdict = await service._apply_truthfulness(
+            speak, payload=payload, dialogue_context=[], hook_memory_ids=[], now=T0
+        )
+        assert verdict.text == REAL_WRITE_CLAIMS[1], "本轮真写了 ⇒ 完成主张有据，放行"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_service_passes_write_completion_without_pending_promise(tmp_path: Path) -> None:
+    """还有半句：没有欠账（unfinished_things 为空）⇒ 不拦，那是回忆真的旧稿。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        service = ExpressionService(_FakeLLM(REAL_WRITE_CLAIMS[2]), store)  # type: ignore[arg-type]
+        result = await service.run_job(_job(user_message="你在干嘛"))
+        assert result.instruction.get("unfinished_things") == []
+        assert result.text == REAL_WRITE_CLAIMS[2]
     finally:
         await store.close()

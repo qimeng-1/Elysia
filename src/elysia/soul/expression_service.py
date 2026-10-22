@@ -713,6 +713,9 @@ class ExpressionService:
 
         依据三选一：① 本次成功工具结果；② 本次钩回的 `world`/`exchange` 记忆；
         ③ 对话上下文（**用户**说过的话——她自己的旧气泡不算独立依据，否则自我循环）。
+
+        T-030：写类完成主张的"无据"判据 = **她还欠着一篇（`unfinished_things` 非空）
+        且这一轮没有成功的 `write_note`**；不欠账时不拦（那可能是回忆真的旧稿）。
         """
         if not speak.text:
             return speak
@@ -737,7 +740,18 @@ class ExpressionService:
                     evidence.append(text)
 
         motive = await self._fiction_motive()
-        verdict = rewrite_unfounded_claims(speak.text, evidence_texts=evidence, motive=motive)
+        # T-030：写类完成主张"无据"的窄判据——她还欠着一篇（payload 的
+        # `unfinished_things` 非空）**且**这一轮没有成功的 `write_note`。
+        # 不欠账时不拦：那可能是回忆她真的写过的旧稿，不是谎。
+        write_completion_unfounded = (not self._job_write_note_ok) and bool(
+            payload.get("unfinished_things")
+        )
+        verdict = rewrite_unfounded_claims(
+            speak.text,
+            evidence_texts=evidence,
+            motive=motive,
+            write_completion_unfounded=write_completion_unfounded,
+        )
         record_claim_stats(verdict.rewritten, verdict.allowed, now=now)
         if verdict.allowed and motive is not None:
             log.info("claim_fiction_allowed motive=%s kind=%s", motive[0], motive[1])

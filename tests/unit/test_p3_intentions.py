@@ -8,11 +8,16 @@ P1b 联动：`surprise/conceal/play` 的**待办**意图是撒谎动机；意图
 
 取消测试：去掉执行器调用 ⇒ `test_executor_read_url` 红；去掉 3 次熔断 ⇒
 `test_failure_attempts_and_fuse` 红；动机查询改成含 done ⇒ P1b 后半红。
+T-028（P-014）取消测试：去掉 `intentions._execute` 里的工具留痕 ⇒
+`test_intention_write_note_leaves_tool_trace` / `test_intention_read_url_leaves_tool_trace`
+红（`thought_log kind='tool'` 查不到行）；去掉留痕处的 try/except ⇒
+`test_tool_trace_failure_does_not_break_execution` 红（会炸的 store.think 把执行带崩）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -416,5 +421,106 @@ async def test_worker_polls_and_executes(tmp_path: Path) -> None:
         assert await store.pending_intention_count() == 0
         worlds = [m for m in await store.iterate_memories() if m["kind"] == KIND_WORLD]
         assert len(worlds) == 1
+    finally:
+        await store.close()
+
+
+# ── T-028（P-014）：意图执行也留工具痕迹 ────────────────────
+async def _tool_traces(store: HeartbeatStore) -> list[dict[str, Any]]:
+    """`thought_log kind='tool'` 的全部 JSON 留痕（按写入顺序）。"""
+    rows = await store.execute_raw("SELECT text FROM thought_log WHERE kind = 'tool' ORDER BY id")
+    return [json.loads(row[0]) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_intention_write_note_leaves_tool_trace(tmp_path: Path) -> None:
+    """取消测试：去掉 `_execute` 里的 `_record_tool_trace` ⇒ 本用例红（零条 kind='tool'）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    workspace = WritingWorkspace(tmp_path / "writing")
+    try:
+        intentions = Intentions(store, read_url_fn=_reader(), writing=workspace)
+        await intentions.set_intention(
+            goal="把今天的想法写下来", action="write_note", target="today.md", kind="task", now=T0
+        )
+        result = await intentions.run_once(T0 + 5)
+        assert result is not None and result["status"] == "done"
+        assert (tmp_path / "writing" / "today.md").exists()
+        traces = await _tool_traces(store)
+        assert len(traces) == 1, f"write_note 执行后必须有且只有一条工具痕迹：{traces}"
+        trace = traces[0]
+        assert trace["tool"] == "write_note"
+        assert trace["ok"] is True
+        assert trace["via"] == "intention"
+        assert trace["args_len"] > 0
+        assert trace["result_head"].startswith("我写下了：")
+        assert isinstance(trace["elapsed_ms"], (int, float))
+        assert isinstance(trace["ts"], (int, float))
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_intention_read_url_leaves_tool_trace(tmp_path: Path) -> None:
+    """取消测试：去掉 `_execute` 里的 `_record_tool_trace` ⇒ 本用例红（成功/失败都没痕迹）。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        intentions = Intentions(store, read_url_fn=_reader())
+        await intentions.set_intention(
+            goal="想读埃舍尔", action="read_url", target=URL, kind="task", now=T0
+        )
+        result = await intentions.run_once(T0 + 5)
+        assert result is not None and result["status"] == "done"
+        traces = await _tool_traces(store)
+        assert len(traces) == 1, f"read_url 执行后必须有且只有一条工具痕迹：{traces}"
+        assert traces[0]["tool"] == "read_url"
+        assert traces[0]["ok"] is True
+        assert traces[0]["via"] == "intention"
+        assert traces[0]["result_head"].startswith("我读到了：")
+
+        # 失败也留痕（ok=False，原因进 result_head）——否则"她试过但没读成"查不到
+        failing = Intentions(store, read_url_fn=_reader(ok=False))
+        await failing.set_intention(
+            goal="读不到也要试", action="read_url", target=URL, kind="task", now=T0
+        )
+        failed = await failing.run_once(T0 + 6)
+        assert failed is not None and failed["status"] == "pending"
+        traces = await _tool_traces(store)
+        assert len(traces) == 2, f"失败也必须留痕：{traces}"
+        assert traces[1]["tool"] == "read_url"
+        assert traces[1]["ok"] is False
+        assert "读不到" in traces[1]["result_head"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_failure_does_not_break_execution(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取消测试：去掉 `_record_tool_trace` 的 try/except ⇒ 会炸的 store.think 把执行带崩。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    workspace = WritingWorkspace(tmp_path / "writing")
+    try:
+
+        async def _boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("thought_log 挂了")
+
+        monkeypatch.setattr(store, "think", _boom)
+        intentions = Intentions(store, read_url_fn=_reader(), writing=workspace)
+        await intentions.set_intention(
+            goal="留痕炸了也要写成", action="write_note", target="boom.md", kind="task", now=T0
+        )
+        with caplog.at_level(logging.WARNING):
+            result = await intentions.run_once(T0 + 5)
+        assert result is not None and result["status"] == "done", "落痕失败绝不能影响执行结果"
+        assert (tmp_path / "writing" / "boom.md").exists()
+        intention = await store.get_intention(int(result["id"]))
+        assert intention is not None and intention["status"] == "done"
+        assert any("工具留痕失败" in record.getMessage() for record in caplog.records)
     finally:
         await store.close()

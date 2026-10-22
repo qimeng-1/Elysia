@@ -10,6 +10,8 @@ P4 把"过了多久"从触发条件里删掉：**只在离散事件/状态跨越
 - `threshold`：`miss/chat/rest` 从一侧**跨越**到另一侧（带迟滞，防抖）
 - `presence`：你从不在到在场（问候路径）
 - `write`：她刚写完东西（write_note done）
+- `unfinished`（T-022b）：她自己的"未完成之事"到点了——为不聊天而存在的窗口
+  （沉默 ≥20 分钟 + 该承诺距上次尝试 ≥2 小时；**不设每日次数配额**）
 - `response`：你对她说话（强制开口；P4 前后语义不变）
 - `none`：**不允许开口**（调度器永不返回它）
 
@@ -25,9 +27,17 @@ CAUSE_PRESENCE = "presence"
 CAUSE_DISCOVERY = "discovery"
 CAUSE_THRESHOLD = "threshold"
 CAUSE_WRITE = "write"
+CAUSE_UNFINISHED = "unfinished"
 CAUSE_NONE = "none"
 
-ALLOWED_CAUSES = (CAUSE_RESPONSE, CAUSE_PRESENCE, CAUSE_DISCOVERY, CAUSE_THRESHOLD, CAUSE_WRITE)
+ALLOWED_CAUSES = (
+    CAUSE_RESPONSE,
+    CAUSE_PRESENCE,
+    CAUSE_DISCOVERY,
+    CAUSE_THRESHOLD,
+    CAUSE_WRITE,
+    CAUSE_UNFINISHED,
+)
 
 # 迟滞带（low, high）：value 从 high 以下跨上去、或从 low 以上跨下来，都算一次"状态跨越"。
 # 这些是**触发带的宽度**，不是"每天说几条"的配额。
@@ -83,6 +93,7 @@ class SpeechTrigger:
         greeting: bool = False,
         discovery: bool = False,
         wrote: bool = False,
+        unfinished: bool = False,
         dialogue_active: bool = False,
         delay_s: float = 0.0,
     ) -> str | None:
@@ -90,8 +101,12 @@ class SpeechTrigger:
 
         - `force`（你对她说）/ `greeting`（你回来）⇒ 立即开口；
         - 对话进行中（`dialogue_active`）⇒ 内部冲动一律不说（并入 S1b 的闸）；
-        - 否则只认**事件/跨越**：discovery > threshold > write；
+        - 否则只认**事件/跨越**：discovery > threshold > write > unfinished；
         - 事件先挂起，等 `delay_s`（意愿决定的响应延迟）后再开口。
+
+        `unfinished`（T-022b）由心跳按"存在未完成之事 + 沉默 ≥20 分钟 + 该承诺距
+        上次尝试 ≥2 小时 + 没有待处理用户消息"算好后传入——时间窗口由调用方给，
+        本类不做每日配额。
         """
         if force:
             self._pending = None
@@ -114,6 +129,8 @@ class SpeechTrigger:
                 cause = CAUSE_THRESHOLD
             elif wrote:
                 cause = CAUSE_WRITE
+            elif unfinished:
+                cause = CAUSE_UNFINISHED
             if cause is not None:
                 self._prime(cause, now, delay_s)
         if self._pending is not None and float(now) >= self._due:

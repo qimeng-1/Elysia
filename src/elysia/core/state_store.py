@@ -527,6 +527,13 @@ class HeartbeatStore(_AsyncSQLite):
         return float(rows[0][0]) if rows else None
 
     # ── T-022a/T-022b：她的"开口"时间轴（提醒兜底 / 未完成之事的时间片）──
+    async def last_expression_ts(self) -> float | None:
+        """她最近一次开口（气泡）的时刻；从没说过话 ⇒ None。"""
+        rows = await self.execute_raw("SELECT MAX(ts) FROM thought_log WHERE kind = 'expression'")
+        if not rows or rows[0][0] is None:
+            return None
+        return float(rows[0][0])
+
     async def count_openings_since(self, since: float) -> int:
         """`since` 之后她开口过几次（T-022a 兜底提醒判据：承诺之后已开口 ≥2 次）。"""
         rows = await self.execute_raw(

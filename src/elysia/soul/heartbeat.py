@@ -70,7 +70,7 @@ from elysia.soul.expression_types import (
 )
 from elysia.soul.expression_worker import ExpressionWorker
 from elysia.soul.relationship import RelationshipKeeper, RelationshipTone
-from elysia.soul.speech_trigger import SpeechTrigger
+from elysia.soul.speech_trigger import CAUSE_UNFINISHED, SpeechTrigger
 from elysia.soul.words import permitted_words
 
 logger = logging.getLogger("elysia.soul.heartbeat")
@@ -511,6 +511,18 @@ class SoulHeartbeat:
                     )
                 # P4 事件巡检：新 world 记忆 / 刚完成的意图
                 discovery, wrote = await self._harvest_events(now)
+                # T-022b：她的"时间片"——存在未完成之事 + 沉默 ≥20 分钟 + 该承诺
+                # 距上次尝试 ≥2 小时 + 没有待处理用户消息，才允许为它开口。
+                unfinished_due = False
+                if (
+                    self._expression is not None
+                    and not self._new_interaction
+                    and self._pending_user_message is None
+                ):
+                    try:
+                        unfinished_due = await self._expression.unfinished_due(now)
+                    except Exception:
+                        self._stage_failed("E:unfinished_check")
                 speech_cause: str | None = None
                 if self._expression is not None and brain_output is not None:
                     in_dialogue = await self._expression.in_dialogue(now)
@@ -525,6 +537,7 @@ class SoulHeartbeat:
                         greeting=greeting,
                         discovery=discovery,
                         wrote=wrote,
+                        unfinished=unfinished_due,
                         # 你正在对话中 ⇒ 内部冲动不说话（S1b 的闸）；force 不受影响
                         dialogue_active=in_dialogue and not self._new_interaction,
                         delay_s=delay_s,
@@ -543,6 +556,7 @@ class SoulHeartbeat:
                         brain_output,
                         greeting=greeting,
                         reply_decision=reply_decision,
+                        speech_cause=speech_cause,
                     )
                     restraint_logged = False
                     restraint_this_turn = intent == RESTRAINT_INTENT
@@ -1208,6 +1222,7 @@ class SoulHeartbeat:
         *,
         greeting: bool,
         reply_decision: ReplyDecision | None = None,
+        speech_cause: str | None = None,
     ) -> str | None:
         """决策层定意图（T3：谁决定开口仍在她自己的循环里）。
 
@@ -1218,6 +1233,9 @@ class SoulHeartbeat:
         她选择**说明"现在不太想说话"**（b 方案），理由在决定那一刻落库。
         这条链是 `soul/expression.py::INTENTS` 八个意图**全部**的产生者所在，
         有单测（`test_t1_cancel.py::test_every_intent_has_a_producer`）把它钉住。
+
+        T-022b：为"未完成的事"开口（`speech_cause='unfinished'`）走自检
+        （她检查自己心里那件还没做完的事），不是被系统命令。
         """
         refusal = self._refusal_intent()
         if refusal is not None:
@@ -1226,6 +1244,8 @@ class SoulHeartbeat:
             return RESTRAINT_INTENT
         if self._new_interaction:
             return "回应"
+        if speech_cause == CAUSE_UNFINISHED:
+            return "自检报告"
         return self._pick_intent(output, greeting=greeting)
 
     async def _settle_social_pulse(self, *, restraint: bool) -> None:

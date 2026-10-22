@@ -126,6 +126,8 @@ from elysia.soul.expression_types import (
 from elysia.soul.honesty import record_claim_stats, rewrite_unfounded_claims
 from elysia.soul.intentions import Intentions
 from elysia.soul.promises import (
+    PROMISE_TTL_S,
+    UNFINISHED_MAX,
     due_promise_reminder,
     forced_write_prompt,
     formed_log_text,
@@ -247,6 +249,12 @@ FORCED_WRITE_TOOL_CHOICE: dict[str, Any] = {
 # D-15 第二层（尽力而为）：强制写作轮尝试受约束输出（JSON 对象）。
 # 后端不支持会回 400 ⇒ deepseek 自动去掉它重试并在本进程内熔断——绝不搞坏正常开口。
 FORCED_WRITE_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
+
+# ── T-022b：她的"时间片"（为不聊天而存在的窗口）────────────────────
+# 沉默 ≥20 分钟、且该承诺距上次尝试 ≥2 小时，才允许为"未完成的事"开口；
+# 不设每日次数配额——只靠这两个时间条件防节拍器。
+UNFINISHED_SILENCE_S = 20.0 * 60.0
+UNFINISHED_ATTEMPT_GAP_S = 2.0 * 3600.0
 
 # ── T-023：名字缺口事实（只加事实，不教她问）────────────────────────
 NAMES_KV_KEY = "names"
@@ -507,6 +515,8 @@ class ExpressionService:
         self._job_written_path: str | None = None
         # T-021b：第二拍的后台任务句柄（单飞：同一时刻最多一个在跑；persist 从不等它）
         self._forced_write_task: asyncio.Task[None] | None = None
+        # T-022b：上一次为"未完成的事"开口的时刻（防连发；沉默窗口从这次重新计时）
+        self._last_unfinished_trigger_ts: float | None = None
         # T-014（O1）：工具调用留痕——LLM 后端每次工具调用后把结构化记录交回来，
         # 这里落 thought_log kind='tool'（失败只记日志，绝不影响表达链路）。
         set_observer = getattr(llm_chain, "set_tool_observer", None)
@@ -582,6 +592,48 @@ class ExpressionService:
             return False
         delta = float(now) - float(last_user_ts)
         return 0.0 <= delta <= float(window_s)
+
+    async def unfinished_due(self, now: float) -> bool:
+        """T-022b：这一拍该不该为"未完成的事"开口（她的时间片）。
+
+        条件：① 存在未完成之事（pending 承诺，且她那条"还没写"的记忆未 superseded）；
+        ② 当前沉默 ≥ `UNFINISHED_SILENCE_S`（20 分钟）；③ 该承诺距上次尝试
+        ≥ `UNFINISHED_ATTEMPT_GAP_S`（2 小时）。调用方（心跳）另外保证"没有待处理
+        用户消息"。
+
+        **不设每日次数配额**——只靠这两个时间条件防节拍器：说完一句后沉默重新计时，
+        下一次至少 20 分钟后才可能再想起。
+        """
+        try:
+            await self._store.expire_stale_promises(float(now), ttl_s=PROMISE_TTL_S)
+            rows = await self._store.unfinished_promises(limit=UNFINISHED_MAX)
+        except Exception:
+            return False
+        if not rows:
+            return False
+        try:
+            last_ts = await self._store.last_expression_ts()
+        except Exception:
+            return False
+        if last_ts is None or float(now) - float(last_ts) < UNFINISHED_SILENCE_S:
+            return False
+        for row in rows:
+            last_attempt = row.get("last_attempt_ts")
+            anchor = (
+                float(last_attempt)
+                if last_attempt is not None
+                else float(row.get("created_ts") or 0.0)
+            )
+            if float(now) - anchor >= UNFINISHED_ATTEMPT_GAP_S:
+                # 防连发：上一次为"未完成的事"开口之后，沉默窗口从那次重新计时
+                if (
+                    self._last_unfinished_trigger_ts is not None
+                    and float(now) - self._last_unfinished_trigger_ts < UNFINISHED_SILENCE_S
+                ):
+                    return False
+                self._last_unfinished_trigger_ts = float(now)
+                return True
+        return False
 
     def should_speak(
         self,

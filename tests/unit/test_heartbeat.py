@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import random
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from elysia.core.checkpoint import CheckpointManager
 from elysia.core.clock import SimulatedClock
 from elysia.core.mode import ModeManager
 from elysia.core.state_store import HeartbeatStore, StateStore
@@ -754,3 +756,178 @@ async def test_stuck_withdrawal_is_repaired_once(tmp_path: Path) -> None:
     finally:
         await state_store.close()
         await heartbeat_store.close()
+
+
+# ── T-026（D-20）：周期快照移出心跳拍（后台单飞）───────────────────────
+# 真机实测：每 30 分钟心跳冻约 9 秒，且 26h 内所有 ≥2s 停顿都精确落在快照拍
+# ——因为 `await self._save_checkpoint(now)` 把 sqlite .backup + gzip（~96MB）挂在
+# 1Hz 拍上。下面两条用例钉住"心跳只投递、不等待"与"关闭时收尾后台任务"。
+#
+# 取消测试：把 `_schedule_checkpoint` 改回 `await self._save_checkpoint(now)` ⇒
+# `test_periodic_checkpoint_never_stalls_heartbeat` 必红（快照拍出现 ~0.5s 真实停顿）。
+
+
+async def _wait_for_checkpoint(data_dir: Path, *, timeout_s: float = 15.0) -> list[Path]:
+    """等周期快照出现（**等条件成立**，不写死拍数——慢盘/并发负载下拍数会漂）。"""
+    manager = CheckpointManager(data_dir)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        checkpoints = manager.list_checkpoints()
+        if checkpoints:
+            return checkpoints
+        await asyncio.sleep(0.02)
+    return []
+
+
+async def _wait_for_checkpoint_task(soul: SoulHeartbeat, *, timeout_s: float = 15.0) -> None:
+    """等后台快照任务真的被投递（不靠固定拍数猜）。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if soul.checkpoint_task is not None:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"{timeout_s}s 内没有投递周期快照后台任务")
+
+
+def _checkpoint_soul(
+    data_dir: Path, clock: SimulatedClock
+) -> tuple[SoulHeartbeat, StateStore, HeartbeatStore]:
+    state_store = StateStore(data_dir / "state.db")
+    heartbeat_store = HeartbeatStore(data_dir / "heartbeat.db")
+    soul = SoulHeartbeat(
+        state_store=state_store,
+        heartbeat_store=heartbeat_store,
+        timesense=TimeSense(make_soul_state(T0), clock),
+        mode_mgr=ModeManager(clock=clock),
+        clock=clock,
+        interval_s=1.0,
+        checkpoint=CheckpointManager(data_dir),
+        checkpoint_every_n=3,
+    )
+    return soul, state_store, heartbeat_store
+
+
+def _slow_create(seconds: float):
+    original = CheckpointManager.create
+
+    async def _create(self: CheckpointManager, state_db: Path, heartbeat_db: Path) -> Path:
+        await asyncio.sleep(seconds)
+        return await original(self, state_db, heartbeat_db)
+
+    return _create
+
+
+@pytest.mark.asyncio
+async def test_periodic_checkpoint_never_stalls_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消测试（T-026）：`create()` 加 0.5s 真实延迟 ⇒ 心跳拍间**不许**出现 ≥0.5s 停顿。
+
+    旧写法（`await self._save_checkpoint(now)`）在本用例上必红：快照那一拍真实间隔
+    ≈0.5s+（真机是 ~9s）。快照最终仍必须生成——等条件成立，不写死拍数。
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    clock = SimulatedClock(start_ts=T0, speed=60.0)
+    soul, state_store, heartbeat_store = _checkpoint_soul(data_dir, clock)
+    monkeypatch.setattr(CheckpointManager, "create", _slow_create(0.5))
+    await state_store.start()
+    await heartbeat_store.start()
+
+    # 记录每一拍的**真实时刻**（心跳间隔的直接度量；模拟时钟只决定每拍睡多久）
+    beat_reals: list[float] = []
+    original_append = heartbeat_store.append
+
+    async def _record_beat(ts: float, beat_type: str, payload: dict[str, object]) -> None:
+        beat_reals.append(asyncio.get_running_loop().time())
+        await original_append(ts, beat_type, payload)
+
+    monkeypatch.setattr(heartbeat_store, "append", _record_beat)
+
+    task = asyncio.create_task(soul.run())
+    try:
+        checkpoints = await _wait_for_checkpoint(data_dir)
+        # 快照落盘之后**再多跑两拍再断言**：同步 await 的停顿发生在本拍 append 之后、
+        # 下一拍 append 之前；若快照一出现就 stop，可能还没等到"被拖慢的下一拍"。
+        rows = await heartbeat_store.execute_raw(
+            "SELECT COUNT(*) FROM heartbeats WHERE beat_type = 'soul'"
+        )
+        await _wait_for_soul_beats(heartbeat_store, int(rows[0][0]) + 2)
+    finally:
+        await soul.stop()
+        await task
+        await state_store.close()
+        await heartbeat_store.close()
+
+    assert checkpoints, "快照最终必须生成（后台任务真的跑了；不许写死拍数）"
+    gaps = [b - a for a, b in itertools.pairwise(beat_reals)]
+    assert gaps, "至少要有两拍才能量心跳间隔"
+    assert max(gaps) < 0.5, f"心跳出现 ≥0.5s 停顿：{max(gaps):.3f}s（周期快照又同步挂在拍上了？）"
+    assert soul.checkpoint_task is None, "心跳退出后不得留下悬挂的快照任务"
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_pending_checkpoint_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消测试（T-026）：stop() 必须在返回前收尾后台快照任务（断言 task done）。"""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    clock = SimulatedClock(start_ts=T0, speed=60.0)
+    soul, state_store, heartbeat_store = _checkpoint_soul(data_dir, clock)
+    monkeypatch.setattr(CheckpointManager, "create", _slow_create(0.5))
+    await state_store.start()
+    await heartbeat_store.start()
+
+    task = asyncio.create_task(soul.run())
+    try:
+        await _wait_for_checkpoint_task(soul)
+        snapshot_task = soul.checkpoint_task
+        assert snapshot_task is not None and not snapshot_task.done()
+
+        await soul.stop()  # 必须等它完成，而不是丢下它
+        # 断言必须在 `await task` 之前：run() 退出路径自己也会 drain，若把断言放到
+        # 等待 run 之后，就测不出 stop() 是否真的收尾了（旧写法会"靠 run 的 finally 蒙混过关"）。
+        assert snapshot_task.done(), "stop() 返回后周期快照任务仍在跑（悬挂任务）"
+        assert soul.checkpoint_task is None, "stop() 收尾后句柄应已复位"
+
+        await task
+    finally:
+        await state_store.close()
+        await heartbeat_store.close()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_does_not_kill_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """取消测试（T-026）：后台快照失败只记 warning，绝不冒到心跳（循环继续跑）。"""
+    caplog.set_level(logging.WARNING, logger="elysia.soul.heartbeat")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    clock = SimulatedClock(start_ts=T0, speed=60.0)
+    soul, state_store, heartbeat_store = _checkpoint_soul(data_dir, clock)
+
+    async def _boom(self: CheckpointManager, state_db: Path, heartbeat_db: Path) -> Path:
+        raise RuntimeError("注入的快照失败")
+
+    monkeypatch.setattr(CheckpointManager, "create", _boom)
+    await state_store.start()
+    await heartbeat_store.start()
+
+    task = asyncio.create_task(soul.run())
+    try:
+        for _ in range(500):  # 等它真的失败一次（最多约 5s）
+            if "周期快照失败" in caplog.text:
+                break
+            await asyncio.sleep(0.01)
+        assert not task.done(), "后台快照失败绝不能杀死心跳循环"
+    finally:
+        await soul.stop()
+        await task
+        await state_store.close()
+        await heartbeat_store.close()
+
+    assert "周期快照失败" in caplog.text, "快照失败必须可见（warning + attempts）"

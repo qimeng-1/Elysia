@@ -84,6 +84,11 @@ MEMORY_MAINTAIN_EVERY_N = 300
 # 实际一份快照都没生成过。这里的接线才是"有退路"的物理实现。
 CHECKPOINT_EVERY_N = 1800
 
+# T-026（D-20）：周期快照的**.backup + gzip 实测 ~9 秒**——绝不能挂在 1Hz 心跳拍上。
+# 快照改成后台单飞任务；关闭时最多等这么久收尾（正常 ~9s，给慢盘留余量），
+# 超时则取消任务并记 warning（关闭不能被一份快照无限拖住）。
+CHECKPOINT_DRAIN_TIMEOUT_S = 30.0
+
 # P3-O 记忆感受路径：每 N 拍静默唤起一次（同 5 分钟节律，小脉冲不冲保护带）
 MEMORY_FEELING_EVERY_N = 300
 
@@ -208,6 +213,9 @@ class SoulHeartbeat:
         # P0-R1：周期快照的节拍器（每 checkpoint_every_n 拍一次；0/负数视为关闭）
         self._checkpoint_every_n = checkpoint_every_n
         self._checkpoint_tick = 0
+        # T-026：周期快照的后台任务句柄（单飞：同一时刻最多一个在跑；心跳从不 await 它）
+        self._checkpoint_task: asyncio.Task[None] | None = None
+        self._checkpoint_attempts = 0
         self._expression = expression
         # 阶段 1（20.6 的 1.3）：表达由 worker 执行——心跳只提交任务与取回落库
         self._expression_worker = expression_worker
@@ -401,6 +409,8 @@ class SoulHeartbeat:
 
                 # ── P0-R1（D-2）：周期快照——「有退路」必须是**正在运行的机制** ──
                 # 此前 create() 全仓 0 调用者 ⇒ 回滚这条路是断的（文档却写"已落地"）。
+                # T-026（D-20）：快照的 .backup+gzip（~9s）**不许挂在心跳拍上**——
+                # 这里只计数 + 投递后台单飞任务，绝不 await（照 T-021b 的写法）。
                 self._checkpoint_tick += 1
                 if (
                     self._checkpoint is not None
@@ -409,7 +419,7 @@ class SoulHeartbeat:
                     and self._checkpoint_tick >= self._checkpoint_every_n
                 ):
                     self._checkpoint_tick = 0
-                    await self._save_checkpoint(now)
+                    self._schedule_checkpoint(now)
             except Exception:
                 # 落库失败**不许静默**：这是"她是否还在场"的唯一证据链
                 self._stage_failed("C:persist_beat")
@@ -622,6 +632,9 @@ class SoulHeartbeat:
 
             await self._clock.sleep(self._interval_s)
 
+        # T-026：正常退出前收尾周期快照（取消路径由 `stop()` 先等待它）
+        await self._drain_checkpoint()
+
     def _stage_failed(self, stage: str) -> None:
         """单阶段异常：记 exception（含阶段名 + 拍号），**不让循环退出**（D-5）。
 
@@ -634,6 +647,88 @@ class SoulHeartbeat:
             self._heartbeat_seq,
         )
 
+    @property
+    def checkpoint_task(self) -> asyncio.Task[None] | None:
+        """T-026：当前在跑的周期快照后台任务（None = 没有）。
+
+        关闭时由 `stop()` / `run()` 退出路径等待它收尾；测试用它断言"stop 后已 done"。
+        """
+        return self._checkpoint_task
+
+    def _schedule_checkpoint(self, now: float) -> None:
+        """T-026：**只投递、不等待**——快照的 .backup+gzip 绝不能挂在 1Hz 心跳拍上。
+
+        单飞：上一份快照还在跑就跳过本次（不排队堆积；快照是退路，不是任务队列）。
+        投递失败（没有运行中的事件循环，例如离线直调）只记 warning，不影响心跳。
+        """
+        if self._checkpoint is None or not self._running:
+            # 停止已请求（或没接快照）⇒ 不再起新的后台任务，关闭路径不必再等一份
+            return
+        if self._checkpoint_task is not None and not self._checkpoint_task.done():
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(
+                self._run_checkpoint(now), name="heartbeat-checkpoint"
+            )
+        except RuntimeError:
+            logger.warning("周期快照未投递：没有运行中的事件循环 ｜ seq=%d", self._heartbeat_seq)
+            return
+        self._checkpoint_task = task
+        task.add_done_callback(self._on_checkpoint_done)
+
+    def _on_checkpoint_done(self, task: asyncio.Task[None]) -> None:
+        """任务结束回调：复位单飞句柄；异常已在任务内吞掉（这里只兜底记日志）。"""
+        if self._checkpoint_task is task:
+            self._checkpoint_task = None
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:  # 理论上到不了（任务内已 try/except），兜底不上抛
+            logger.warning("周期快照后台任务异常（已吞掉）：%s", error)
+
+    async def _run_checkpoint(self, now: float) -> None:
+        """后台周期快照任务：**任何失败都不许冒到心跳**（只记 warning + attempts）。"""
+        self._checkpoint_attempts += 1
+        try:
+            await self._save_checkpoint(now)
+        except Exception:
+            logger.warning(
+                "周期快照失败（心跳继续，下个周期重试）｜ seq=%d attempts=%d",
+                self._heartbeat_seq,
+                self._checkpoint_attempts,
+                exc_info=True,
+            )
+
+    async def _drain_checkpoint(self) -> None:
+        """T-026：关闭时收尾后台快照——等待它完成，超时才取消并记日志。
+
+        **不许留悬挂任务**：`create_task` 的协程若在进程退出时还活着，
+        快照可能写一半、或 asyncio 关循环时冒 "Task was destroyed but it is pending"。
+        """
+        task = self._checkpoint_task
+        if task is None:
+            return
+        if not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=CHECKPOINT_DRAIN_TIMEOUT_S)
+            except TimeoutError:
+                logger.warning(
+                    "关闭时周期快照超过 %ss 未完成 ⇒ 取消后台任务 ｜ seq=%d",
+                    CHECKPOINT_DRAIN_TIMEOUT_S,
+                    self._heartbeat_seq,
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            except asyncio.CancelledError:
+                # 心跳协程自身被取消：任务已由上面记录/取消，这里不吞取消语义
+                raise
+            except Exception:
+                logger.warning("关闭时周期快照任务异常（已记录，不影响关闭）", exc_info=True)
+        if self._checkpoint_task is task:
+            self._checkpoint_task = None
+
     async def _save_checkpoint(self, now: float) -> None:
         """周期快照（P0-R1）：双库 `.backup` 一致快照落 `data/checkpoints/`。
 
@@ -641,21 +736,17 @@ class SoulHeartbeat:
         96.8 MB → 9.3 MB（10.4x），10 份保留从 0.93 GB 降到 ~93 MB。备份协议不变
         （仍走 SQLite `.backup`），只是落盘前压缩；回滚端自动解压，且兼容旧的未压缩快照。
 
-        **失败必须可见、但不得致命**：快照是"退路"，不是生命循环本身。
-        磁盘满 / 单库被锁坏时她仍应继续活着 —— 记 exception（含拍号与快照名），
-        下个周期重试；绝不把异常吞成静默成功（`backup_database` 失败会抛）。
+        T-026（D-20）：本方法**只在后台任务里被调用**——`create()` 的 .backup+gzip
+        实测 ~9 秒，绝不能同步挂在 1Hz 心跳拍上。失败**向上抛出**，由
+        `_run_checkpoint` 统一记 warning + attempts；绝不吞成静默成功。
         """
         checkpoint = self._checkpoint
         if checkpoint is None:  # 防御：调用点已判空，此处再兜一层
             return
-        try:
-            target = await checkpoint.create(
-                checkpoint.data_dir / "state.db",
-                checkpoint.data_dir / "heartbeat.db",
-            )
-        except Exception:
-            logger.exception("周期快照失败（心跳继续，下个周期重试）｜ seq=%d", self._heartbeat_seq)
-            return
+        target = await checkpoint.create(
+            checkpoint.data_dir / "state.db",
+            checkpoint.data_dir / "heartbeat.db",
+        )
         logger.info(
             "checkpoint created ｜ %s ｜ seq=%d ｜ now=%.3f",
             target.name,
@@ -1371,8 +1462,14 @@ class SoulHeartbeat:
         }
 
     async def stop(self) -> None:
-        """优雅停止：等待当前拍完成（心跳循环由外部任务持有，cancel 兜底）。"""
+        """优雅停止：等待当前拍完成（心跳循环由外部任务持有，cancel 兜底）。
+
+        T-026（D-20）：同时等待周期快照的后台任务收尾——它是 `create_task`，
+        不管它会在进程退出时留下悬挂任务（快照写一半 / asyncio 关循环告警）。
+        最多等 `CHECKPOINT_DRAIN_TIMEOUT_S`，超时取消并记 warning。
+        """
         self._running = False
+        await self._drain_checkpoint()
 
 
 def make_soul_state(now: float) -> TimeSenseState:

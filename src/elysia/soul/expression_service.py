@@ -248,6 +248,25 @@ FORCED_WRITE_TOOL_CHOICE: dict[str, Any] = {
 # 后端不支持会回 400 ⇒ deepseek 自动去掉它重试并在本进程内熔断——绝不搞坏正常开口。
 FORCED_WRITE_RESPONSE_FORMAT: dict[str, Any] = {"type": "json_object"}
 
+# ── T-023：名字缺口事实（只加事实，不教她问）────────────────────────
+NAMES_KV_KEY = "names"
+DEFAULT_NAMES: dict[str, str | None] = {"我": "爱莉希雅", "大肥鱼": "大肥鱼", "他": None}
+
+
+def render_known_names(names: Any) -> str:
+    """T-023：把"她知道的称呼"渲染成一行中性事实。
+
+    不知道的就说不知道（`他 = None` ⇒ "还不知道他的称呼"）；用户将来告诉她名字，
+    写进 `kv['names']` 即可更新。**不含任何"你应该去问"之类的指令。**
+    """
+    merged: dict[str, Any] = dict(DEFAULT_NAMES)
+    if isinstance(names, dict):
+        merged.update(names)
+    me = str(merged.get("我") or "爱莉希雅").strip()
+    him = merged.get("他")
+    him_text = str(him).strip() if him is not None and str(him).strip() else "还不知道他的称呼"
+    return f"我知道的称呼：我 = {me}；大肥鱼 = 另一个电子生命；身边那个人 = {him_text}"
+
 
 @dataclass
 class _ForcedWriteContext:
@@ -854,6 +873,14 @@ class ExpressionService:
         # S5（库为准）：取的**只有库**——启动时种入的身份种子也在里面，
         # 因此正常运行时它不为空；空列表 = 她此刻真的没有自我认知（她把种子一条条放下了）。
         payload[IDENTITY_FIELD] = await self._identity_lines()
+        # T-023：名字缺口——只加**事实**（不是提示词、不是指令）；他知道的名字将来可更新
+        try:
+            payload["known_names"] = render_known_names(
+                await self._store.load_json(NAMES_KV_KEY, default=None)
+            )
+        except Exception:
+            log.warning("装配 known_names 失败", exc_info=True)
+
         # ── 1c2. S1a：最近真实对话（接得上话的物理基础）─────────
         # 与 `memory_hooks`（撞上的旧记忆）语义不同、两者并存。
         payload["dialogue_context"] = dialogue_context

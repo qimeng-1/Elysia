@@ -9,8 +9,13 @@
 
 依据判定/动机放行/日志/统计保持原样。
 
+T-024（2026-10-22 真机 16:43）：阅读主张被拆成三句时按句判定会漏（动作与页面对象
+分居不同句）⇒ 新增**整轮判定**：整轮 (a) 完成态阅读动作 + (b) 页面类对象 + (c) 无据
+⇒ 整轮换成一句诚实句；日常保护（书/视频/一眼/自己的记忆）与引用型逐句路径不变。
+
 取消测试：把检测放宽成"有动作就算"（去掉外部来源对象要求）⇒
 `test_daily_sentences_are_never_rewritten` 必红（12 句日常话被误伤）。
+去掉整轮判定 ⇒ `test_real_machine_cross_sentence_claim_...` 必红。
 """
 
 from __future__ import annotations
@@ -24,12 +29,19 @@ import pytest
 
 from elysia.core.state_store import HeartbeatStore
 from elysia.llm.validator import ValidationResult
-from elysia.memory.levels import KIND_EXCHANGE, LEVEL_SHALLOW, SOURCE_USER
+from elysia.memory.levels import (
+    KIND_EXCHANGE,
+    KIND_WORLD,
+    LEVEL_SHALLOW,
+    SOURCE_OBSERVATION,
+    SOURCE_USER,
+)
 from elysia.memory.retrieve import MemoryHit
 from elysia.soul.expression_service import ExpressionService
 from elysia.soul.honesty import (
     claim_is_related,
     is_external_claim,
+    is_round_external_claim,
     reset_claim_stats,
     rewrite_unfounded_claims,
 )
@@ -37,8 +49,16 @@ from elysia.soul.tools.read_url import ReadResult
 
 T0 = 1_000_000.0
 CLAIM = "我读了维基上关于埃舍尔的页面。今天天气不错。"
-HONEST = "其实我还没真的去翻过呢。今天天气不错。"
+HONEST = "其实我还没真的去翻过呢。"
 EVIDENCE = "《埃舍尔》是荷兰版画艺术家，以不可能的图形闻名。"
+
+# T-024 真机原文（2026-10-22 16:43:25）：她把阅读主张拆成三句，当天无 read_url 调用、
+# 无 world 记忆、hook_memory_ids=[]。期望整轮换成一句诚实句，不留页面细节。
+REAL_MACHINE_CLAIM = (
+    "我翻了。是一页讲海星的，说它们断了腕还能长出新的来。"
+    "我看着那行字发了会儿呆——原来有些东西不靠记着以前，也能自己长回来。"
+)
+SEA_STAR_EVIDENCE = "海星断了腕还能长出新的来，这是它们的再生能力。"
 
 # 用户实测的"误伤尺子"（12 句日常话：一句都不许改）
 DAILY_SENTENCES = [
@@ -54,6 +74,8 @@ DAILY_SENTENCES = [
     "我睡了一觉，好多了。",
     "我在厨房待了一会儿。",
     "我看了会儿书，困了。",
+    # T-024 补：不许因为"翻了"就把她翻自己的记忆当成阅读世界
+    "我翻了翻自己的记忆，没找到。",
 ]
 
 # 真正该拦的外部信息主张
@@ -103,6 +125,7 @@ def test_daily_sentences_are_never_rewritten() -> None:
     reset_claim_stats()
     for sentence in DAILY_SENTENCES:
         assert is_external_claim(sentence) is False, f"日常动作被误判成编造：{sentence}"
+        assert is_round_external_claim(sentence) is False, f"整轮判定误伤日常话：{sentence}"
         result = rewrite_unfounded_claims(sentence)
         assert result.text == sentence, f"日常话被改写：{sentence} → {result.text}"
         assert result.rewritten == 0
@@ -119,11 +142,71 @@ def test_external_claims_are_detected_and_rewritten_as_whole_sentence() -> None:
 
 
 def test_rest_of_bubble_is_kept() -> None:
+    """T-024 起：无据的**整轮**主张整轮替换（不只换那一句）。
+
+    旧的"同一气泡其余句子原样保留"只对**没有完成态动作**的引用型主张成立；
+    跨句阅读主张整轮换，否则会留下「是一页讲海星的」这类编造细节。
+    """
     reset_claim_stats()
     result = rewrite_unfounded_claims(CLAIM)
     assert result.text == HONEST
-    assert "今天天气不错" in result.text, "同一气泡的其余句子必须原样保留"
+    assert "今天天气不错" not in result.text, "跨句编造整轮替换，不留残余句子"
     assert "我读了维基" not in result.text
+    assert result.rewritten == 1
+
+    # 引用型（没有"读了/看过"这类完成态动作）仍走逐句路径，其余句子保留
+    citation_only = "维基上写着埃舍尔是荷兰人。今天天气不错。"
+    result2 = rewrite_unfounded_claims(citation_only)
+    assert "今天天气不错" in result2.text
+    assert "维基上写着" not in result2.text
+
+
+# ── T-024：跨句阅读主张（整轮判定）────────────────────────────
+def test_real_machine_cross_sentence_claim_is_rewritten_as_one_honest_sentence() -> None:
+    """真机 16:43 三句 ⇒ 单句诚实句（无海星/那行字等页面细节）。
+
+    取消测试：去掉 `rewrite_unfounded_claims` 的整轮判定 ⇒ 本用例红
+    （逐句判定：动作句无页面对象、页面细节句无完成态动作 ⇒ 整轮原样逃逸）。
+    """
+    reset_claim_stats()
+    assert is_round_external_claim(REAL_MACHINE_CLAIM) is True
+    result = rewrite_unfounded_claims(REAL_MACHINE_CLAIM)
+    assert result.text == "其实我还没真的去翻过呢。"
+    assert result.rewritten == 1
+    assert "海星" not in result.text
+    assert "那行字" not in result.text
+    assert "一页" not in result.text
+
+
+def test_round_claim_with_related_evidence_passes() -> None:
+    """有据放行：依据（world 记忆/工具结果/用户原话）与整轮内容相关 ⇒ 原样。
+
+    取消测试：去掉 `_round_has_evidence` 依据判定 ⇒ 本用例红。
+    """
+    reset_claim_stats()
+    result = rewrite_unfounded_claims(REAL_MACHINE_CLAIM, evidence_texts=[SEA_STAR_EVIDENCE])
+    assert result.text == REAL_MACHINE_CLAIM
+    assert result.rewritten == 0
+
+
+def test_round_claim_with_unrelated_evidence_is_still_rewritten() -> None:
+    """依据与整轮内容不相关 ⇒ 仍按无据处理（不拿无关资料当挡箭牌）。"""
+    result = rewrite_unfounded_claims(REAL_MACHINE_CLAIM, evidence_texts=["今天原神更新了"])
+    assert result.text == "其实我还没真的去翻过呢。"
+
+
+def test_lookup_without_page_object_passes() -> None:
+    """「我查了下，确实是那样。」没有页面类对象 ⇒ 不是外部阅读主张，原样。"""
+    sentence = "我查了下，确实是那样。"
+    assert is_round_external_claim(sentence) is False
+    assert rewrite_unfounded_claims(sentence).text == sentence
+
+
+def test_excluded_action_does_not_make_round_claim() -> None:
+    """跟随宾语代词的完成态动作不算：不许把「我看了你一眼」所在整轮当阅读主张。"""
+    text = "我看了你一眼。那页纸还摊在桌上。"
+    assert is_round_external_claim(text) is False
+    assert rewrite_unfounded_claims(text).text == text
 
 
 # ── 依据 / 动机（保持原行为）──────────────────────────────
@@ -233,6 +316,46 @@ async def test_dialogue_evidence_passes(tmp_path: Path) -> None:
         service = ExpressionService(_FakeLLM(CLAIM), store)  # type: ignore[arg-type]
         result = await service.run_job(_job(user_message="埃舍尔是谁"))
         assert result.text == CLAIM, "对话上下文（用户说过）⇒ 有据"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_world_memory_evidence_passes_cross_sentence(tmp_path: Path) -> None:
+    """T-024 验收③：钩回的 world 记忆含「海星」且该轮提到海星 ⇒ 整轮原样。"""
+    store = HeartbeatStore(tmp_path / "heartbeat.db")
+    await store.start()
+    try:
+        mid = await store.add_memory(
+            T0,
+            {
+                "level": LEVEL_SHALLOW,
+                "kind": KIND_WORLD,
+                "content": SEA_STAR_EVIDENCE,
+                "emotion_vector": {"chat": 0.5},
+                "importance": 0.3,
+                "protected": False,
+                "narrative": SEA_STAR_EVIDENCE,
+                "source": SOURCE_OBSERVATION,
+            },
+        )
+
+        async def _retriever(*_args: Any, **_kwargs: Any) -> list[MemoryHit]:
+            return [
+                MemoryHit(
+                    memory_id=mid,
+                    narrative="海星是怎么再生的",
+                    level="shallow",
+                    score=1.0,
+                    protected=False,
+                )
+            ]
+
+        service = ExpressionService(  # type: ignore[arg-type]
+            _FakeLLM(REAL_MACHINE_CLAIM), store, retriever=_retriever
+        )
+        result = await service.run_job(_job(user_message="海星是什么"))
+        assert result.text == REAL_MACHINE_CLAIM, "world 记忆与整轮内容相关 ⇒ 有据，不改写"
     finally:
         await store.close()
 

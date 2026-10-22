@@ -16,6 +16,20 @@ P1a-fix（用户实测误伤 12 句日常话后收紧）：
 依据（三选一即算有据）：① 本次作业内成功工具结果；② 本次被钩回的 `world`/`exchange`
 记忆；③ 对话上下文（用户说过）。判"相关"只看句子**去掉套话后的内容词**与依据的
 二元组重合（≥ `CLAIM_EVIDENCE_MIN_SHARED_BIGRAMS`）。
+
+T-024（真机取证 2026-10-22 16:43）：她把阅读主张**拆成三句**——「我翻了。」/
+「是一页讲海星的，说它们断了腕还能长出新的来。」/「我看着那行字发了会儿呆……」——
+按句判定时 (a) 动作与 (b) 页面对象分居不同句，整轮逃逸；且「一页/那行字」不在
+`_EXTERNAL_RE` 里。修法：在逐句判定**之前**先做**整轮判定**——
+
+(a) 完成态阅读动作 `(读|看|翻|查|搜|逛|找)(了|过)`（紧跟「你/他/她/它/自己/一眼」
+    的不算，P1a-fix 的日常保护不变）；
+(b) 页面类对象（维基/页面/那页/一页/文章/资料/网上/论坛/帖子/米游社/那行字/这行字…；
+    这是**整轮判定的私有名单**，`_EXTERNAL_RE` 一个字都不放宽到「书/视频/一眼」）；
+(c) 三条依据来源（不改）与本轮内容相关。
+
+(a)(b) 同轮成立且 (c) 无据 ⇒ **整轮**换成一句诚实句（只换一句会留下编造的页面细节）；
+有据/有动机 ⇒ 整轮放行。逐句路径保留，用于没有完成态动作的引用型主张。
 """
 
 from __future__ import annotations
@@ -42,6 +56,19 @@ _EXTERNAL_RE = re.compile(r"(?:维基百科|维基|页面|网页|那页|这页|�
 # 引用具体外部内容（"维基上写着/页面上说"）——没有动作动词也算经历主张
 _CITATION_RE = re.compile(
     r"(?:维基百科|维基|页面|网页|论坛|米游社|网上).{0,12}(?:写着|上说|提到|讨论)"
+)
+
+# ── T-024：整轮判定（跨句也拦）──────────────────────────────────────
+# 完成态阅读动作。注意「看了你一眼」这类日常动作要排除（P1a-fix 的底线）：
+# 只把"紧跟宾语代词/一眼"的那一处剔掉，不是整句否决。
+_ROUND_ACTION_RE = re.compile(r"(?:读|看|翻|查|搜|逛|找)(?:了|过)")
+_ROUND_ACTION_EXCLUDED_RE = re.compile(
+    r"(?:读|看|翻|查|搜|逛|找)(?:了|过)(?:你|他|她|它|自己|一眼)"
+)
+# 页面类对象（整轮判定私有名单）。**不要**并进 `_EXTERNAL_RE`：逐句路径的
+# 日常保护依赖它只认"页面/资料"这类真正的世界窗口，书/视频/一眼永远不在名单里。
+_ROUND_PAGE_RE = re.compile(
+    r"(?:维基百科|维基|页面|网页|那页|这页|一页|文章|资料|网上|论坛|帖子|米游社|那行字|这行字)"
 )
 
 # 句子边界（保留标点，整句替换时沿用原句的收尾标点）
@@ -99,6 +126,19 @@ def is_external_claim(sentence: str) -> bool:
     return bool(_ACTION_RE.search(sentence)) and bool(_EXTERNAL_RE.search(sentence))
 
 
+def is_round_external_claim(text: str) -> bool:
+    """T-024：**整轮**是否含"完成态阅读动作 + 页面类对象"（跨句也算）。
+
+    例：「我翻了。是一页讲海星的……」——动作在第一句、页面对象在第二句，
+    逐句判定会漏，整轮判定必须命中。
+
+    排除项：紧跟「你/他/她/它/自己/一眼」的完成态动作不算（「我看了你一眼」）；
+    「书/视频/一眼/厨房」都不是页面对象（P1a-fix 的日常保护）。
+    """
+    cleaned = _ROUND_ACTION_EXCLUDED_RE.sub("", str(text or ""))
+    return bool(_ROUND_ACTION_RE.search(cleaned)) and bool(_ROUND_PAGE_RE.search(cleaned))
+
+
 def _sentence_related(sentence: str, evidence_texts: Sequence[str]) -> bool:
     if not evidence_texts:
         return False
@@ -106,6 +146,18 @@ def _sentence_related(sentence: str, evidence_texts: Sequence[str]) -> bool:
     if not content:  # 全是套话（如"页面翻了一堆"）⇒ 任一次成功读取都算依据
         return True
     return any(claim_is_related(sentence, text) for text in evidence_texts)
+
+
+def _round_has_evidence(text: str, evidence_texts: Sequence[str]) -> bool:
+    """T-024：整轮主张与依据是否相关（判定粒度跟着主张走：整轮内容词）。
+
+    依据来源与逐句路径**完全一致**（调用方已把三条来源合并成 `evidence_texts`）。
+    """
+    if not evidence_texts:
+        return False
+    if not _content_bigrams(text):
+        return True
+    return any(claim_is_related(text, evidence) for evidence in evidence_texts)
 
 
 def _sentence_kind(sentence: str) -> str:
@@ -146,8 +198,26 @@ def rewrite_unfounded_claims(
     evidence_texts: Iterable[str] = (),
     motive: tuple[int, str] | None = None,
 ) -> ClaimRewrite:
-    """把无依据的外部信息主张**整句**换成诚实句；其余句子原样保留。"""
+    """把无依据的外部信息主张换成诚实句；其余句子原样保留。
+
+    T-024：先做**整轮判定**——(a) 完成态阅读动作 + (b) 页面类对象同轮出现且
+    (c) 无相关依据 ⇒ **整轮**（而不只是那一句）换成一句诚实句：跨句拆开的主张
+    一旦只换一句，剩下的「是一页讲海星的…」仍是无依据的编造细节。
+    没有 (a) 的引用型主张（「维基上写着…」）仍走原有的逐句路径。
+    """
     evidence = [str(item) for item in evidence_texts if str(item or "").strip()]
+
+    # ── T-024：整轮判定（跨句主张）──────────────────────────────
+    if is_round_external_claim(text):
+        if _round_has_evidence(text, evidence):
+            return ClaimRewrite(text=text)  # 有据 ⇒ 整轮放行
+        if motive is not None:
+            return ClaimRewrite(text=text, allowed=1)  # 有动机 ⇒ 有理由的谎放行
+        body, punct = _trailing_punct(text)
+        if body.strip():
+            return ClaimRewrite(text=_HONEST_SENTENCES[_sentence_kind(text)] + punct, rewritten=1)
+
+    # ── 原有逐句路径（引用型主张 / 不相邻的句子）──────────────────
     total = ClaimRewrite(text=text)
     out: list[str] = []
     for sentence in _SENTENCE_SPLIT_RE.split(text):

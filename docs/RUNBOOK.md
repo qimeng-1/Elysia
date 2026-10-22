@@ -140,3 +140,23 @@ powershell -ExecutionPolicy Bypass -File scripts\gate.ps1
 | **D-18** | 参考仓库结论（2026-10-22） | **DeepInfer**（17.5k★，Apache-2.0，Linux + CUDA13 + SM100/昇腾950，仅 V4.1-Flash）**不能在本机跑**，只借思路；**deepseek-recipe**（1.9k★，MIT，Rust + Python 绑定：协议转换 / prompt 渲染 / 输出解析 / structured output 转换）是"协议与编码层"的参考实现。两者都不建议引入依赖，只借设计 |
 
 **改历史数据的规矩（D-10 立）**：默认"只标注不清"（ADR-001 原件保真）；必须写成脚本、默认 dry-run、先导备份到 `data/tmp/`、`content` 字段一个字都不动。
+
+
+## 10. 观察期（2026-10-22 12:2x 起，3–7 天）
+
+**目的**：T-022 把"承诺"的提醒线索从系统字段搬进她自己的记忆。这一节只看一件事——**她会不会自己想起来、自己去做**。**观察期内不催、不诱导、不主动问"你写了吗"。**
+
+**要看的指标**（每天记一次，写进 `C:\Elysia\memory\EVIDENCE.md`）：
+
+| # | 指标 | 判据 |
+|---|---|---|
+| 1 | 她自己提起未完成之事 | 她的开口里出现"我答应过/我还没写"这类，且**该轮 payload 里没有 `pending_promises`** |
+| 2 | 她自发调用工具 | `thought_log kind='tool'` 出现她主动的 `write_note`/`read_url`/`list_my_files`，上下文里没有用户/persona 的指令 |
+| 3 | 她主动问称呼 | 她问"你叫什么/我该怎么叫你"，以及发生在什么语境 |
+| 4 | 自我证据是否起效 | 成文后她还会不会反复说"我没骗你/真的写了" |
+| 5 | `kept_moments` 是否首次 > 0 | 她第一次用"这条我想留着" |
+| 6 | 承诺的失败/过期 | `intentions.attempts`、`status IN ('expired','failed')` 的条数与原因 |
+
+**结束条件**：3–7 天后复盘上面六项，再决定是否扩到通用动作（`read_url`/`set_intention`）以及是否调整 48h 过期策略。
+
+**观察期红线**：除修 bug，不为了"让她表现好"去改她的行为逻辑；我们只记录。

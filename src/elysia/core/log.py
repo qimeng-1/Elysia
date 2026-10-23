@@ -13,11 +13,90 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import structlog
 
 _LOGGER_NAME = "elysia"
+
+# ── D-21：文件日志按进程分开 ─────────────────────────────────────────
+# soul 保持 `elysia.log`（既有消费者：面板/审计脚本读的就是它）；body 用
+# `elysia.body.log`。两个常驻进程若共用一个 TimedRotatingFileHandler 目标，
+# 午夜轮转时 A 要 rename、B 正持有该文件句柄 ⇒ Windows 上必 PermissionError
+# （os.rename → WinError 32），logging 随后把整段 traceback 经 handleError 写进
+# stderr（我们的死亡第一现场），且那条日志本身被丢掉（10-23 00:29–09:06 实测
+# 18 次 checkpoint 记录全部如此）。`_harden_stream` 只加固控制台流，管不到这里。
+LOG_FILE_NAME = "elysia.log"
+BODY_LOG_FILE_NAME = "elysia.body.log"
+
+
+def _entry_module_name() -> str:
+    """`python -m <module>` 时入口模块的完整名；拿不到返回空串。"""
+    main = sys.modules.get("__main__")
+    spec = getattr(main, "__spec__", None)
+    name = getattr(spec, "name", None)
+    return name if isinstance(name, str) else ""
+
+
+def _file_log_name() -> str:
+    """当前进程该写哪个文件日志（D-21：soul 与 body 不共用轮转目标）。"""
+    parts = _entry_module_name().split(".")
+    if len(parts) >= 2 and parts[-2:] == ["body", "main"]:
+        return BODY_LOG_FILE_NAME
+    return LOG_FILE_NAME
+
+
+class _TolerantStreamHandler(logging.StreamHandler[Any]):
+    """控制台 handler：**任何字符都不许让日志管道自身报错**（D-21 统一护栏）。
+
+    第一道防線是 `_harden_stream(errors="replace")`（P0-R15，保留原编码只放宽错误）；
+    但 pytest capture、自定义流、或运行期被替换的流可能没有 `reconfigure`、或仍是
+    `strict` ⇒ `emit` 抛 `UnicodeEncodeError`，logging 的 `handleError` 会把
+    `--- Logging error ---` + traceback 写进 stderr。这里兜底：用目标编码 `replace`
+    后重写一次；仍写不出就静默丢弃这一条——绝不 `handleError`。
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # 注意：**不能**调 `super().emit()`——`logging.StreamHandler.emit` 自己会把
+        # 所有异常吞进 `handleError`（那正是 `--- Logging error ---` 的来源）。
+        # 所以这里完整实现"格式化 → 写 → flush"，编码失败时用 replace 重写一次。
+        try:
+            message = self.format(record)
+            stream = self.stream
+            stream.write(message + self.terminator)
+            self.flush()
+        except UnicodeEncodeError:
+            try:
+                stream = self.stream
+                encoding = getattr(stream, "encoding", None) or "ascii"
+                safe = message.encode(encoding, "replace").decode(encoding, "replace")
+                stream.write(safe + self.terminator)
+                self.flush()
+            except Exception:
+                return
+        except RecursionError:
+            raise
+        except Exception:  # 流已关闭 / 其它 IO 问题：同样不许自报错
+            return
+
+
+class _TolerantTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """按天轮转的文件 handler：**轮转失败不许写 traceback、也不许丢当前这条日志**。
+
+    标准库 `doRollover()` 在 `os.rename` 失败时抛 OSError；`Handler.handle()` 捕获后
+    调 `handleError()` → stderr 出现 `--- Logging error ---`。这里吞掉轮转异常：
+    跳过本轮轮转，日志继续写当前文件（`FileHandler.emit` 会在 stream 被关掉后重开），
+    `rolloverAt` 保持过去值 ⇒ 下一条记录会再试。任何 OSError 都不外抛。
+    """
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except OSError:
+            # 轮转失败 ⇒ 跳过本轮（不 handleError、不丢当前记录）：
+            # stream 被 doRollover 关掉后，下一次 FileHandler.emit 会重开同一个文件写；
+            # rolloverAt 仍是过去值 ⇒ 下一条记录会再试（占用解除后自动轮转）。
+            return
 
 
 def _harden_stream(stream: object) -> None:
@@ -72,8 +151,9 @@ def setup_logging(*, level: str = "INFO", log_dir: Path | None = None) -> None:
     handlers: list[logging.Handler] = []
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.handlers.TimedRotatingFileHandler(
-            log_dir / "elysia.log",
+        # D-21：soul → elysia.log，body → elysia.body.log（不共用轮转目标）
+        file_handler = _TolerantTimedRotatingFileHandler(
+            log_dir / _file_log_name(),
             when="midnight",
             backupCount=14,
             encoding="utf-8",
@@ -89,7 +169,8 @@ def setup_logging(*, level: str = "INFO", log_dir: Path | None = None) -> None:
         )
         handlers.append(file_handler)
 
-    console_handler = logging.StreamHandler(sys.stdout)
+    # D-21：控制台 handler 自带"编码失败也不自报错"的兜底（不依赖流可 reconfigure）
+    console_handler = _TolerantStreamHandler(sys.stdout)
     console_handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             processors=[

@@ -748,7 +748,7 @@ class SoulHeartbeat:
             checkpoint.data_dir / "heartbeat.db",
         )
         logger.info(
-            "checkpoint created ｜ %s ｜ seq=%d ｜ now=%.3f",
+            "checkpoint created | %s | seq=%d | now=%.3f",
             target.name,
             self._heartbeat_seq,
             now,

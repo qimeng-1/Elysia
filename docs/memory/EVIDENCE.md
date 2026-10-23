@@ -68,3 +68,6 @@
 - [2026-10-23 23:45] **D-22 真机暴露两个漏洞（我复现）**：冲量与 absence 事实读的是"上一次长停机"的 `last_downtime_s`，而本次重启真实 gap 只有 8 秒 ⇒ ① 每次重启都给旧缺席补一次冲量；② 事实每次重启重新武装（前 3 次开口都会说"我不在的时候 12 小时 54 分"）。已派 **D-24**（只认本次 gap，gap<30s 什么都不做）| 日志 downtime=46366 vs 真实 8s
 - [2026-10-23 23:1x] P1-2a 插件启用（`include:memory-bridge`）：25 个 section、briefing 2605 字、同会话 prompt sha 恒定（`c047a86e…`）；关掉即回到安装前基线 `ae1f9628…`。D-14 账本：`tokens.db` 10 次调用、prompt 2,346,801 / completion 6,554、**cache 命中 99.6%** | mem.log + tokens.py
 - [2026-10-23 23:09→23:10] **承诺→动手 35 秒**：用户 23:09「要不你全写给我看吧」⇒ 她 23:09:41「我就一笔一笔写下来」⇒ 23:10:15 `data/her_home/一笔一笔写下来.md`（1448B）。`intentions#5` 已由 N1 捕获（pending→本条待核）| dialogue_turns + her_home
+- [2026-10-24 00:04] D-24 `0e9490f`：冲量与 `absence` 事实只认**本次启动的 gap**（`startup_gap_s`，不持久化），gap<30s 什么都不做；gate **1014/13**（Lead 复跑）。00:08 重启（soul 18764/body 23472，gap≈8s）真机验证：**没有**新的 `absence impulse applied`、cs 74.2→73.1（只是自然漂移，无 +19 冲量）、marker 未改写、err 0B | 真机核对
+- [2026-10-24 00:00] **D-21 午夜轮转真机验证通过**：00:00 后出现 `elysia.log.2026-10-23`（12040B）与 `elysia.body.log.2026-10-23`（886B），当前 `elysia.log`/`elysia.body.log` 各自继续写，两个 err 均 0B ⇒ soul+body 抢同一文件导致的 PermissionError 与"丢快照行"已消失 | ls data/logs + err 大小
+- [2026-10-23 23:47] 用户问「那你写好了吗」⇒ 她答「才写到那句话呢，笔尖还停在纸上——**离写完早得很**。」「你要是催，我就写快一点给你看。」——**没有声称完成**（T-030 未触发；她如实说没写完）| dialogue_turns 23:47–23:48

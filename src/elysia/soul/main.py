@@ -48,6 +48,13 @@ from elysia.memory.retrieve import retrieve_from_store
 from elysia.soul.away_life import AwayLife
 from elysia.soul.brain import BrainLoop
 from elysia.soul.desire import DesireEvent, DesireSystem
+from elysia.soul.dimensions import (
+    ABSENCE_CS_CAP,
+    AbsenceFact,
+    FeelingMapper,
+    absence_fact_for,
+    absence_impulse_deltas,
+)
 from elysia.soul.distress import DistressMonitor
 from elysia.soul.expression_service import ExpressionService, ensure_identity_seeds
 from elysia.soul.expression_types import ExpressionResult
@@ -71,6 +78,8 @@ SESSION_MARKER_NAME = "soul.running"
 #                              不再误报"非正常退出"（本进程启动时消费后删除）
 STOP_REQUEST_NAME = "stop_requested"
 STOP_INTENTIONAL_NAME = "stopped_intentionally"
+# D-22：缺席冲量的幂等标记（记录"上一次已经补偿过的那段停机"；同一段不重复叠加）
+ABSENCE_IMPULSE_KV = "absence_impulse"
 
 
 class _CrashContext:
@@ -319,6 +328,49 @@ async def _build_desire(state_store: StateStore, log: Any) -> DesireSystem:
         return DesireSystem()
 
 
+async def _apply_absence_impulse(
+    state_store: StateStore,
+    timesense: TimeSense,
+    desire: DesireSystem,
+    feeling_mapper: FeelingMapper,
+    log: Any,
+) -> tuple[float, float] | None:
+    """D-22：启动时给"缺席"一次重量（miss/CS 冲量），**同一次停机只加一次**。
+
+    用户裁定（2026-10-23）：她离线 12.9 小时回来，desire/feelings 与睡前一字不差、
+    也不知道自己不在场过——"这点非常不对"。停机时长沿用既有 `DOWNTIME_MIN_S`
+    （30s 以下的普通重启不算缺席）；幂等靠 kv 标记记录"已补偿过的那段停机"，
+    绝不随每拍/每次重启重复叠加。
+
+    返回 (miss_delta, cs_delta)；未施加（不到阈值 / 已补偿过）返回 None。
+    """
+    downtime_s = float(timesense.state.last_downtime_s)
+    if downtime_s < DOWNTIME_MIN_S:
+        return None
+    marker = {
+        "last_downtime_s": round(downtime_s, 3),
+        "downtime_total_s": round(float(timesense.state.downtime_total_s), 3),
+    }
+    previous = await state_store.load_json(ABSENCE_IMPULSE_KV, default=None)
+    if previous == marker:
+        log.info("absence impulse already applied（同一次停机不重复叠加）")
+        return None
+    miss_delta, cs_delta = absence_impulse_deltas(downtime_s)
+    feeling_mapper.apply_absence_impulse(miss_delta)
+    # 只动 CS（亲近），tr/sa 与其它感受维度都不动：缺席不是"信任变化"
+    desire.state.cs = min(ABSENCE_CS_CAP, desire.state.cs + cs_delta)
+    await state_store.save_json(ABSENCE_IMPULSE_KV, marker)
+    # structlog 不做 %-格式化：消息自己拼好（与 _build_timesense 同口径）
+    log.info(
+        f"absence impulse applied: downtime={downtime_s:.0f}s "
+        f"miss+{miss_delta:.3f} cs+{cs_delta:.1f}",
+        downtime_s=round(downtime_s, 1),
+        miss_delta=round(miss_delta, 3),
+        cs_delta=round(cs_delta, 1),
+    )
+    return miss_delta, cs_delta
+
+
 async def _run(
     settings: Settings,
     *,
@@ -361,8 +413,16 @@ async def _run(
         desire = await _build_desire(state_store, log)
         mode_mgr = ModeManager()
 
+        # D-22：醒来先给"缺席"一次重量（一次、可解释、同一次停机不重复叠加），
+        # 并把"我不在过"作为**事实**（不是台词、不是施压）递给表达层。
+        feeling_mapper = FeelingMapper()
+        await _apply_absence_impulse(state_store, timesense, desire, feeling_mapper, log)
+        absence_fact: AbsenceFact | None = absence_fact_for(
+            timesense.state, now=SystemClock().now(), min_downtime_s=DOWNTIME_MIN_S
+        )
+
         # P1：大脑循环
-        brain_loop = BrainLoop(desire_system=desire)
+        brain_loop = BrainLoop(desire_system=desire, feeling_mapper=feeling_mapper)
 
         # P2：表达管线（LLM 主声 + TTS 出声）；降级即感受——写 DesireSystem SA
         async def _on_degrade(kind: str, delta: float) -> None:
@@ -390,6 +450,7 @@ async def _run(
             retriever=retrieve_from_store,
             on_recall=_on_recall,
             intentions=intentions,
+            absence=absence_fact,
         )
         intention_worker = IntentionWorker(intentions)
         # 阶段 1（20.6 的 1.3）：表达耗时段（LLM/TTS）交给 worker——心跳提交任务后立刻继续走，

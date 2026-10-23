@@ -38,6 +38,7 @@ from urllib import request
 
 from elysia.llm.chain import LLMBackend, ToolRunner
 from elysia.llm.identity import IDENTITY_FIELD, compose_identity, identity_lines
+from elysia.soul.dimensions import ABSENCE_FIELD, ABSENCE_HEADER
 from elysia.soul.promises import OWN_WORDS_FIELD
 from elysia.soul.tools.schema import invalid_args_receipt, validate_tool_args
 
@@ -249,6 +250,17 @@ def render_own_words_block(words: Any) -> str:
     if not items:
         return ""
     return "\n".join([OWN_WORDS_HEADER, *(f"- {item}" for item in items)])
+
+
+def render_absence_block(absence: Any) -> str:
+    """D-22：把 `absence` 渲染成**一个事实块**（标题 + 一行）；空/缺省 ⇒ 空串。
+
+    它是"我不在过"的事实，不是命令/问句：不催、不要求表态、不重复提醒。
+    """
+    text = str(absence or "").strip()
+    if not text:
+        return ""
+    return f"{ABSENCE_HEADER}\n- {text}"
 
 
 def _first_message(data: dict[str, Any]) -> dict[str, Any]:
@@ -637,12 +649,21 @@ class DeepSeekBackend(LLMBackend):
         不是她要翻译的状态字段，混进结构化状态只会污染 T2 的干净结构。
         T-033：`own_words` 同理从 JSON 里剔掉，改渲染成一段人话附在 user 段末尾；
         空列表 ⇒ 不出现该块（prompt 里既没有 `own_words` 键、也没有空块）。
+        D-22：`absence` 同样剔除并渲染成**一个事实块**（醒来窗口内才出现）；
+        没有长停机时既没有该键、也没有空块。
         """
-        body = {k: v for k, v in instruction.items() if k not in (IDENTITY_FIELD, OWN_WORDS_FIELD)}
+        body = {
+            k: v
+            for k, v in instruction.items()
+            if k not in (IDENTITY_FIELD, OWN_WORDS_FIELD, ABSENCE_FIELD)
+        }
         user = json.dumps(body, ensure_ascii=False)
-        block = render_own_words_block(instruction.get(OWN_WORDS_FIELD))
-        if block:
-            user = f"{user}\n\n{block}"
+        for block in (
+            render_own_words_block(instruction.get(OWN_WORDS_FIELD)),
+            render_absence_block(instruction.get(ABSENCE_FIELD)),
+        ):
+            if block:
+                user = f"{user}\n\n{block}"
         return [
             {"role": "system", "content": _system_prompt(instruction.get(IDENTITY_FIELD))},
             {"role": "user", "content": user},

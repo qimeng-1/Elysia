@@ -108,6 +108,12 @@ from elysia.memory.world import record_world_memory
 from elysia.soul.brain import BrainOutput
 from elysia.soul.claims import reconcile
 from elysia.soul.dialogue import recent_dialogue_window, recent_openings, record_her_bubble
+from elysia.soul.dimensions import (
+    ABSENCE_FACT_MAX_OPENINGS,
+    ABSENCE_FACT_WINDOW_S,
+    ABSENCE_FIELD,
+    AbsenceFact,
+)
 from elysia.soul.expression import (
     ReplyDecision,
     build_expression,
@@ -486,6 +492,7 @@ class ExpressionService:
         writing_workspace: WritingWorkspace | None = None,
         moment_keeper: MomentKeeper | None = None,
         intentions: Intentions | None = None,
+        absence: AbsenceFact | None = None,
     ) -> None:
         self._llm = llm_chain
         self._store = heartbeat_store
@@ -508,6 +515,10 @@ class ExpressionService:
         )
         # 记忆被唤起 → 感受回路（只推心情，不进入话语）
         self._on_recall = on_recall
+        # D-22：醒来时"我不在过"的事实（只在窗口/前几次开口里出现，随后自动消失）。
+        # 这是**事实字段**，不是第二个施压字段（T-033 的教训）。
+        self._absence = absence
+        self._absence_openings = 0
         # P1a：本次作业内**成功**工具结果（反编造的依据之一；run_job 开头清空）
         self._job_tool_evidence: list[str] = []
         # T-020：本回合是否真的成功写成了文件（有则不把"我这就写"记成新承诺）
@@ -766,6 +777,23 @@ class ExpressionService:
             return SpeakResult(text=verdict.text, level=speak.level, validated=speak.validated)
         return speak
 
+    def _absence_line(self, now: float) -> str | None:
+        """D-22：醒来窗口内的"我不在的时候…"事实（≤1 行；到点/次数到自动消失）。
+
+        窗口：醒来后 `ABSENCE_FACT_WINDOW_S`（2h）内、且只在前
+        `ABSENCE_FACT_MAX_OPENINGS`（3）次开口里出现（两者先到先消失）。
+        计数只在真的给出时递增——没给的那些回合不会偷偷消耗次数。
+        """
+        absence = self._absence
+        if absence is None:
+            return None
+        if float(now) - float(absence.woke_at) >= ABSENCE_FACT_WINDOW_S:
+            return None
+        if self._absence_openings >= ABSENCE_FACT_MAX_OPENINGS:
+            return None
+        self._absence_openings += 1
+        return absence.line()
+
     async def _speak_with_retry(self, payload: dict[str, Any]) -> SpeakResult:
         """整条 LLM 链开口一次；若降到微声 ⇒ **同 prompt 再试一次**，仍失败才用微声。
 
@@ -972,6 +1000,11 @@ class ExpressionService:
         except Exception:
             log.warning("装配 own_words 失败", exc_info=True)
             payload[OWN_WORDS_FIELD] = []
+        # D-22：她不在场过——**事实**字段（醒来 2h 内、且只在前 3 次开口里出现；
+        # 先到先消失，不常驻、不重复提醒）。没有长停机时整条字段不出现。
+        absence_line = self._absence_line(now)
+        if absence_line:
+            payload[ABSENCE_FIELD] = absence_line
 
         # ── 1d. 装配工具：能力由程序保证，用不用由她决定 ────
         set_runner = getattr(self._llm, "set_tool_runner", None)

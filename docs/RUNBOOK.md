@@ -129,8 +129,8 @@ powershell -ExecutionPolicy Bypass -File scripts\gate.ps1
 | **D-1** | `pillow`、`av` 未写进 `pyproject.toml` | `uv sync` 会卸掉未声明包 ⇒ 桌宠/取帧可能突然坏 |
 | **D-2** | `.git/hooks/pre-commit` 指向旧机器 | commit 需 `--no-verify`，门禁靠 `gate.ps1` |
 | **D-3** | `README.md` 有未提交改动 | 文档口径可能与实现漂移 |
-| **D-4** | `origin` 落后 100+ commit | 只有本机一份历史（**push 需用户签认**） |
-| **D-5** | 遗忘阈值 60 / 180 天待定（S4b） | 抖动层已就绪，改数字即可 |
+| **D-4** | ~~`origin` 落后 100+ commit~~ **已处理（2026-10-24 01:2x，用户签认）** | `git push origin main`：`91bf19d..905d370`，ahead/behind 归零。之后**默认仍然不 push**（红线），需要时逐次签认 |
+| **D-5** | ~~遗忘阈值 60 / 180 天待定（S4b）~~ **已拍板（2026-10-24）** | 用户同意：沿用现实现 **60 天细节淡掉 / 180 天沉睡**，抖动层不变；不再等拍板 |
 | **D-6** | 迁移指纹未做（S5） | "她是谁"还不能被搬运、被验证 |
 | **D-7** | 桥与面板重启靠手工 `Start-ScheduledTask` | 改桥/面板代码后容易忘记重启 |
 | **D-8** | ~~`data/her_writing/` 没被创建~~ **已关闭** | T-014 后她真的写成了；T-016 升级为 `data/her_home/`（完全权限） |

@@ -137,13 +137,20 @@ powershell -ExecutionPolicy Bypass -File scripts\gate.ps1
 | **D-9** | ~~重启会把最后一条 `kv['interaction']` 重放一次~~ **已修（T-017，`d99871d`）** | 启动时用持久化的 `timesense.last_interaction_ts` 当基线。真机验证：23:32 重启后未再重放 22:56 那条（对比 20:50/21:30 各重放一次） |
 | **D-10** | ~~桌宠点击被记成"用户发言"~~ **已修 + 已标注** | 修复：`e9e8774`（点击只写 `{kind:'poke'}`）。历史污染：16 条记忆已按她的选择加上"系统记错"标注（`narrative` 前缀，`content` 保真；备份 `data/tmp/click_pollution_backup_*.json`；脚本 `scripts/mark_click_pollution.py`，默认 dry-run）。1 条 `dialogue_turns#763` 只记账不动 |
 | **D-11** | 桌宠不在起停协议里 | 无 pid / 无单实例互斥 / 不被统一重启 ⇒ 改了 `pet.py` 需手动关窗重开。提案见 `docs/specs/PET_LIFECYCLE_SPEC_2026-10-21.md`（用户裁定：暂不执行） |
-| **D-12** | **TTS 服务（GPT-SoVITS，127.0.0.1:9880）没人守护** | 2026-10-21 约 22:57 起 `tts_up=False`、`WinError 10061 连接被拒绝`，她所有语音退化成文字（`medium=text reason=voice_failed`）。桌宠"只播她这一句"（T-018）也因为它没音频而无法触发。**用户 2026-10-21 23:5x 说明：TTS 是他主动关的，暂时不用管** |
+| **D-12** | ~~TTS 服务没人守护~~ **已修（2026-10-22 22:0x）** | 真因不是守护：`一键启动API.bat` 启的是 `api.py`（只有 `POST /`），而她后端走 `GET /tts`（需 `api_v2.py`）。已把 bat 改成 `api_v2.py -a 127.0.0.1 -p 9880`（备份 `.bak-20261022`）、`.env` 设 `ELYSIA_TTS_LAUNCHER_PATH`、面板重启。实测她自己的 backend 合成 181,804 字节 wav；22:01:54 她的语音已发布到 `kv['expression_audio']`。**仍缺**：9880 进程没有守护（关窗即哑） |
 | **D-13** | ~~N1 承诺检测偏窄~~ **已修（T-020d/e，`d5a0c2e` + `cf05ed8`）** | 判据改成**上下文**：用户这轮请她写 + 她肯定答复 + 本回合没写 ⇒ 记 `kind='promise'`；肯定答复放宽到子句级「写。」；同一请求去重；48h 惰性过期。真机 2026-10-22 02:15 首次捕获成功，02:18 提醒进入她的 payload（`pending_promises` + hint）。**仍在观察的**：她收到提醒后是否真的动笔（02:18 那轮她仍只说"我去写"）。**T-021（承诺第二拍）在写** |
 | **D-14** | **token 用量没有账本** | API 每次都回 `usage{prompt_tokens, completion_tokens, prompt_cache_hit_tokens}`，我们**一条都没记** ⇒ 用户定的"3 元/天"只能靠估，我说的一切成本都是猜。修法：每次调用把 usage 落一行（`thought_log kind='usage'` 或 kv 按天累计），sleep 时汇总 |
 | **D-15** | **工具参数靠"调大 max_tokens + 截断检测"，没用受约束输出** | 2026-10-21 真机事故：工具参数被截断成半截 JSON。DeepInfer 的 structured outputs（regex / JSON schema / EBNF，采样期约束）与 deepseek-recipe 的 `OutputConstraint`（有 tools 时约束工具调用块）是**上游解法**；另：recipe 文档写明非思考默认 `max_tokens=8192`，与我们 T-014 的取值一致。修法：强制写作轮（T-021）叠加 schema 约束 |
 | **D-16** | **prompt 前缀未稳定化** | 身份段/人设应固定在最前且不变、变动内容靠后，才能稳定命中 DeepSeek 前缀缓存（探针实测 `prompt_cache_hit_tokens=1408`）。影响"3 元/天"的长期成本 |
 | **D-17** | **承诺判据终究是正则** | 她的话越自然，正则越容易漏（T-020b/c/d/e 四轮都是这个原因）。长期要么改语义判据（小模型/embedding），要么让"答应的事"走她自己调 `set_intention` |
 | **D-18** | 参考仓库结论（2026-10-22） | **DeepInfer**（17.5k★，Apache-2.0，Linux + CUDA13 + SM100/昇腾950，仅 V4.1-Flash）**不能在本机跑**，只借思路；**deepseek-recipe**（1.9k★，MIT，Rust + Python 绑定：协议转换 / prompt 渲染 / 输出解析 / structured output 转换）是"协议与编码层"的参考实现。两者都不建议引入依赖，只借设计 |
+| **D-19** | ~~门禁用例时序过敏~~ **已修（T-025 `a438694`）** | `test_heartbeat_creates_periodic_checkpoint` 改"等条件成立"；并发争用下复跑 5 次全绿 |
+| **D-20** | ~~周期快照同步挂在心跳拍上（每 30 分钟冻 ~9s）~~ **已修（T-026 `e714f09`）** | 快照改后台单飞、关闭时收尾；真机 20:35:33 快照前后心跳 1.01–1.14s（此前 8.6–9.4s） |
+| **D-21** | ~~soul+body 共用 `elysia.log`，午夜轮转 `PermissionError[WinError 32]`~~ **已修（`ab0eda5`）** | 后果不止 stderr 噪音：**那条 checkpoint 日志被丢弃**（10-23 elysia.log 缺 00:29–09:06）。修：body→`elysia.body.log` + 容忍型轮转/流 handler；00:00 真机轮转成功（两份 rotated 文件都在）、err 0B |
+| **D-22 / D-24** | ~~离线 12.9h 后毫无痕迹、她也不知道自己不在场~~ **已实现（`b6e03e1`）+ 修正（`0e9490f`）** | 启动"缺席冲量"（miss+min(.35,.03h)、cs+min(20,1.5h)，只认**本次** gap、gap<30s 什么都不做）+ payload `absence` 事实一行（醒来 2h 或前 3 次开口，先到先消失）。真机：12.9h 缺席一次真实生效（cs 71.2→79.3）；8 秒重启不再补旧账 |
+| **D-23** | `mem.py briefing` 会写 `memory.db` | 只读命令不该改库（WAL + FTS 探测会改文件字节）。记忆插件已用 `brief.py` 复制副本绕开；`mem.py` 本身待修 |
+| **D-25** | `absence` 事实尚无真机证据 | 需一次 >30s 停机后醒来验：日志 `absence impulse applied` 一行（downtime=本次 gap）+ 醒来前 3 次开口 payload 里有 `absence`；2h/3 次后消失 |
+| **D-26** | 记忆插件已启用但无回归守护 | `include:memory-bridge` 默认关、失败静默已验证；但"关掉后 prompt 逐字节回基线"目前只有一次性探针证据，没有常驻测试 |
 
 **改历史数据的规矩（D-10 立）**：默认"只标注不清"（ADR-001 原件保真）；必须写成脚本、默认 dry-run、先导备份到 `data/tmp/`、`content` 字段一个字都不动。
 

@@ -9,16 +9,23 @@
 | P-002 | D-15：工具参数 schema 校验 + 可选受约束输出 | 已兑现 | 用户 2026-10-22 03:0x 批准 | e8d9db9；真机探针确认 tools+tool_choice+response_format 兼容 |
 | P-003 | 承诺最后一公里：真机验证她是否真的落文件 | 已兑现 | 用户 2026-10-22 03:1x 布置（未完成线程） | 2026-10-22 04:12 她自己写成 `我自己/爱莉希雅这一页.md`（418 字），承诺 done |
 | P-004 | P0 记忆骨架：memory/ 四份 .md | 已兑现 | 用户 2026-10-22 03:1x 布置 | 2026-10-22 03:2x lead 复核通过；补了 NOTES.md |
-| P-005 | P1 记忆插件：SQLite + remember/recall + 开场注入 + handover 自动写入 | 进行中 | 同上 | 第一期已落地（db+CLI+迁移+导出）；第二期注入/handover 见 P1_PLUGIN_DESIGN.md |
-| P-006 | D-14 token 用量账本（3 元/天要能算账） | 待办 | 用户口述 | 未做 |
-| P-007 | D-16 prompt 前缀稳定化 | 待办 | 用户口述 | 未做 |
+| P-005 | P1 记忆插件：SQLite + remember/recall + 开场注入 + handover 自动写入 | 进行中 | 同上 | **2a 已兑现**（`C:\Elysia\dsh-memory-plugin`，system-prompt 注入 briefing，默认关、失败静默，2026-10-23 已启用）；**2b（subagent/end handover）未做** |
+| P-006 | D-14 token 用量账本（3 元/天要能算账） | 已兑现 | 用户口述 | `C:\Elysia\memory\tokens.db` + `tokens.py`（session/event usage）；2026-10-23 真机 10 次调用、cache 命中 99.6%。**价格表仍空**（只记 tokens，不设配额）— 见 P-020 |
+| P-007 | D-16 prompt 前缀稳定化 | 待办 | 用户口述 | 未做（P1-2a 的插件侧前缀已稳定，但它不是她 LLM 的 prompt） |
 | P-008 | S4b 遗忘阈值 | 待办 | 用户口述 | 阻塞在用户拍板 |
 | P-009 | S5 迁移指纹 | 待办 | 用户口述 | 未做 |
 | P-010 | origin 落后 100+ commit 的处理 | 待办 | 用户口述 | 需用户签认；未签认前不 push |
 | P-011 | 永远不删 her_home/x.md | 进行中 | 用户 2026-10-22 00:14 | 用户说不用删；该文件无工具留痕，来源不明 |
-| P-012 | 让她第一次用上 kept_moments（"这条我想留着"） | 待办 | 2026-10-22 03:1x 现状 | 仍是 0，记忆即身份的核心通道未被真机验证 |
-| P-013 | 定期导出 memory/ → Elysia\docs\memory\ | 待办 | 用户 2026-10-22 03:1x 拍板 | `mem.py export` 已可用（默认导 repo docs/memory）；定期化未做 |
-| P-014 | 核一次"落盘路径 × 工具留痕覆盖率"（决定 P-003 验收是否可信） | 待办 | lead 2026-10-22 03:2x 自记（inferred） | 见 NOTES.md 同名条目；只读审计，改代码另开切片 |
+| P-012 | 让她第一次用上 kept_moments（"这条我想留着"） | 待办 | 2026-10-22 03:1x 现状 | 到 2026-10-24 仍为 0；记忆即身份的核心通道未真机验证；观察期满后再谈轻度诱导 |
+| P-013 | 定期导出 memory/ → Elysia\docs\memory\ | 进行中 | 用户 2026-10-22 03:1x 拍板 | 手工流程已跑通（`migrate_p0.py` → `mem.py export`，docs/memory 已多次提交）；**自动定期化未做** |
+| P-014 | 核一次"落盘路径 × 工具留痕覆盖率" | 已兑现 | lead 2026-10-22 03:2x 自记 | 审计结论：工具调用路径留痕正常；意图 worker 路径缺痕 ⇒ T-028 补上（`d4a68db`）；`x.md` 两条痕迹皆无 ⇒ 确认非她所写 |
 | P-015 | 自觉性改造 T-022a/b：承诺记忆化 + 自我证据 + 提醒降级 + 时间片 | 已兑现 | 用户 2026-10-22 12:2x 批准 | c0355ed / c5ddda7；gate 951/13；13:25 重启生效 |
 | P-016 | 名字缺口 T-023：只加事实（身边那个人 = 还不知道称呼），不教她问 | 已兑现 | 用户 2026-10-22 12:2x 批准 | a216deb；真机 payload 已带该行，等她主动问 |
-| P-017 | 观察期（3–7 天，六项指标，不催不诱导） | 进行中 | 用户 2026-10-22 12:2x 批准 | 见 RUNBOOK §10；期后再议扩动作 |
+| P-017 | 观察期（3–7 天，六项指标，不催不诱导） | 进行中 | 用户 2026-10-22 12:2x 批准 | 见 RUNBOOK §10；10-22 起，≥10-25 复盘 |
+| P-018 | P1-2b：`subagent/end` 自动写 handover | 待办 | P1 计划 | 未做；设计见 `C:\Elysia\memory\P1_PLUGIN_DESIGN.md` |
+| P-019 | D-23：`mem.py briefing` 改成真正只读 | 待办 | lead 2026-10-23 发现 | 插件已用 `brief.py` 副本绕开；`mem.py` 本体待修 |
+| P-020 | D-14 价格表：把 token 换算成钱 | 待办 | 用户 2026-10-23 批准 D-14 | `tokens.py` 的 `PRICE_TABLE` 仍全 0；填了才出 `est_cost_cny` |
+| P-021 | ① 开口决策融合（`speech_policy.decide_speech`） | 待办 | 用户 2026-10-23 批准顺序 | 唯一非等价步骤，**观察期满（≥10-25）后**做；见 `docs/specs/SPEECH_PIPELINE_2026-10-22.md` |
+| P-022 | P1-2a：`system-prompt/assemble` 只读注入 briefing | 已兑现 | 用户 2026-10-23 批准 | `C:\Elysia\dsh-memory-plugin`；`include:memory-bridge` 已启用；开关关=prompt 逐字节回基线；失败静默 |
+| P-023 | 手机 Telegram 链路（Tailscale 与梯子只能开一个） | 已兑现 | 用户 2026-10-22 提出 | `tailscale serve --bg --tcp=7891 tcp://127.0.0.1:7890`；手机 Telegram 填 SOCKS5 `100.70.192.29:7891`；PC 侧 `getMe` 实测通 |
+| P-024 | D-25：`absence` 事实的真机证据 | 待办 | lead 2026-10-24 | 需一次 >30s 停机重启，验日志一行 + 前 3 次开口 payload 有 `absence` |

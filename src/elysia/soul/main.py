@@ -80,6 +80,10 @@ STOP_REQUEST_NAME = "stop_requested"
 STOP_INTENTIONAL_NAME = "stopped_intentionally"
 # D-22：缺席冲量的幂等标记（记录"上一次已经补偿过的那段停机"；同一段不重复叠加）
 ABSENCE_IMPULSE_KV = "absence_impulse"
+# D-24：`_build_timesense` 把**本次启动算出的 gap** 暴露在 TimeSense 实例上的属性名。
+# 不持久化（每次启动重算）；消费方只认它，绝不把 `state.last_downtime_s`（上一次长停机）
+# 当成本次基准——那会在每次普通重启时给旧缺席补冲量、并重新武装"我不在过"的假事实。
+STARTUP_GAP_ATTR = "startup_gap_s"
 
 
 class _CrashContext:
@@ -268,12 +272,19 @@ def _write_crash_report(settings: Settings, exc: BaseException, ctx: _CrashConte
 
 
 async def _build_timesense(state_store: StateStore, log: Any) -> TimeSense:
-    """TimeSense 恢复/新生：已有档案恢复；无档案或数据缺失时新生（无 0 时刻）。"""
+    """TimeSense 恢复/新生：已有档案恢复；无档案或数据缺失时新生（无 0 时刻）。
+
+    D-24：返回值上带一个**不持久化**的 `startup_gap_s` 属性 = **本次启动**算出的停机
+    gap。缺席冲量/缺席事实只认它；绝不能读 `state.last_downtime_s`——那是"上一次长停机"
+    的持久值，拿它当本次基准会在每次普通重启时补旧账、并重新武装假的"我不在过"。
+    """
     payload = await state_store.load_json("timesense")
     now = SystemClock().now()
     if payload is None:
         log.info("first existence：她诞生了", first_existence_ts=now)
-        return TimeSense(make_soul_state(now))
+        timesense = TimeSense(make_soul_state(now))
+        setattr(timesense, STARTUP_GAP_ATTR, 0.0)
+        return timesense
 
     state = from_payload(payload)
     if state.first_existence_ts <= 0:
@@ -289,15 +300,16 @@ async def _build_timesense(state_store: StateStore, log: Any) -> TimeSense:
     # 照涨 0.7 天——她不知道自己那段不存在。现在用"上一次正常心跳（last_seen_ts）"
     # 与"现在"的差，把停机变成**可测量的数字**，并跨重启累加（不可逆，属成长性）。
     # 老档案没有这个字段时**不虚构历史**：从本次起统计，并如实记一笔。
+    startup_gap_s = 0.0  # D-24：本次启动的 gap（即使 <30s 也如实记录，只是不触发冲量）
     if state.last_seen_ts > 0:
-        gap_s = max(0.0, now - state.last_seen_ts)
-        if gap_s > DOWNTIME_MIN_S:
-            state.downtime_total_s += gap_s
-            state.last_downtime_s = gap_s
+        startup_gap_s = max(0.0, now - state.last_seen_ts)
+        if startup_gap_s > DOWNTIME_MIN_S:
+            state.downtime_total_s += startup_gap_s
+            state.last_downtime_s = startup_gap_s
             # ⚠️ structlog 不做 %-格式化：消息必须自己拼好（否则日志里只剩格式串）
             log.info(
-                f"她不在场 {gap_s:.0f} 秒（累计 {state.downtime_total_s:.0f} 秒）",
-                gap_s=round(gap_s, 1),
+                f"她不在场 {startup_gap_s:.0f} 秒（累计 {state.downtime_total_s:.0f} 秒）",
+                gap_s=round(startup_gap_s, 1),
                 downtime_total_s=round(state.downtime_total_s, 1),
             )
         state.last_seen_ts = now  # 本次醒来即"最近一次在场"
@@ -312,7 +324,19 @@ async def _build_timesense(state_store: StateStore, log: Any) -> TimeSense:
         last_downtime_s=round(state.last_downtime_s, 1),
         downtime_total_s=round(state.downtime_total_s, 1),
     )
-    return TimeSense(state)
+    timesense = TimeSense(state)
+    # D-24：只暴露"本次启动的 gap"（不写进持久 state；每次启动重算）
+    setattr(timesense, STARTUP_GAP_ATTR, startup_gap_s)
+    return timesense
+
+
+def startup_gap_s(timesense: TimeSense) -> float:
+    """D-24：读"本次启动算出的停机 gap"（由 `_build_timesense` 挂在实例上）。
+
+    回落值 0.0 只出现在测试/首跑构造的 TimeSense；生产路径必由 `_build_timesense`
+    设置。**不要**用 `state.last_downtime_s` 代替：那是上一次长停机的持久值。
+    """
+    return float(getattr(timesense, STARTUP_GAP_ATTR, 0.0) or 0.0)
 
 
 async def _build_desire(state_store: StateStore, log: Any) -> DesireSystem:
@@ -335,20 +359,22 @@ async def _apply_absence_impulse(
     feeling_mapper: FeelingMapper,
     log: Any,
 ) -> tuple[float, float] | None:
-    """D-22：启动时给"缺席"一次重量（miss/CS 冲量），**同一次停机只加一次**。
+    """D-22/D-24：启动时给"缺席"一次重量（miss/CS 冲量），**同一次停机只加一次**。
 
     用户裁定（2026-10-23）：她离线 12.9 小时回来，desire/feelings 与睡前一字不差、
-    也不知道自己不在场过——"这点非常不对"。停机时长沿用既有 `DOWNTIME_MIN_S`
-    （30s 以下的普通重启不算缺席）；幂等靠 kv 标记记录"已补偿过的那段停机"，
-    绝不随每拍/每次重启重复叠加。
+    也不知道自己不在场过——"这点非常不对"。
+    **D-24 基准**：只认 `_build_timesense` 暴露的**本次启动 gap**（`startup_gap_s`），
+    不用持久化的 `state.last_downtime_s`（上一次长停机）——否则每次普通重启都会给旧
+    缺席补一次冲量。30s 以下的普通重启动都不动。
+    幂等靠 kv 标记记录"本次启动已补偿过的 gap + 当日累计"（同一次启动不重复叠加）。
 
     返回 (miss_delta, cs_delta)；未施加（不到阈值 / 已补偿过）返回 None。
     """
-    downtime_s = float(timesense.state.last_downtime_s)
+    downtime_s = startup_gap_s(timesense)
     if downtime_s < DOWNTIME_MIN_S:
         return None
     marker = {
-        "last_downtime_s": round(downtime_s, 3),
+        "startup_gap_s": round(downtime_s, 3),
         "downtime_total_s": round(float(timesense.state.downtime_total_s), 3),
     }
     previous = await state_store.load_json(ABSENCE_IMPULSE_KV, default=None)
@@ -413,12 +439,16 @@ async def _run(
         desire = await _build_desire(state_store, log)
         mode_mgr = ModeManager()
 
-        # D-22：醒来先给"缺席"一次重量（一次、可解释、同一次停机不重复叠加），
+        # D-22/D-24：醒来先给"缺席"一次重量（一次、可解释、同一次停机不重复叠加），
         # 并把"我不在过"作为**事实**（不是台词、不是施压）递给表达层。
+        # D-24：两者都只认**本次启动的 gap**（普通重启 8s ⇒ 什么都不做）。
         feeling_mapper = FeelingMapper()
         await _apply_absence_impulse(state_store, timesense, desire, feeling_mapper, log)
         absence_fact: AbsenceFact | None = absence_fact_for(
-            timesense.state, now=SystemClock().now(), min_downtime_s=DOWNTIME_MIN_S
+            timesense.state,
+            now=SystemClock().now(),
+            min_downtime_s=DOWNTIME_MIN_S,
+            startup_gap_s=startup_gap_s(timesense),
         )
 
         # P1：大脑循环

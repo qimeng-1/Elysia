@@ -79,13 +79,21 @@ class AbsenceFact:
         return format_absence_fact(self.last_downtime_s, self.downtime_total_s)
 
 
-def absence_fact_for(state: Any, *, now: float, min_downtime_s: float) -> AbsenceFact | None:
-    """从 TimeSenseState 造"缺席事实"：停机未达阈值 ⇒ None（不虚构"我不在"）。"""
-    last_downtime_s = float(getattr(state, "last_downtime_s", 0.0) or 0.0)
-    if last_downtime_s < float(min_downtime_s):
+def absence_fact_for(
+    state: Any, *, now: float, min_downtime_s: float, startup_gap_s: float
+) -> AbsenceFact | None:
+    """从 TimeSenseState 造"缺席事实"：**只认本次启动的 gap**（D-24）。
+
+    `startup_gap_s` 由 `main._build_timesense` 在本次启动算出；**不能**用
+    `state.last_downtime_s`（上一次长停机的持久值）——那会让每次普通重启都重新
+    武装"我不在的时候：12 小时 54 分"这条假事实（她刚刚只不在 8 秒）。
+    gap 未达阈值 ⇒ None（不虚构"我不在"）。
+    """
+    gap_s = float(startup_gap_s)
+    if gap_s < float(min_downtime_s):
         return None
     return AbsenceFact(
-        last_downtime_s=last_downtime_s,
+        last_downtime_s=gap_s,
         downtime_total_s=float(getattr(state, "downtime_total_s", 0.0) or 0.0),
         woke_at=float(now),
     )
